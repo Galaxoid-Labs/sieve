@@ -35,8 +35,11 @@ as AAD), atomic writes, process hardening, six vault tests.
 - [x] Unlock loads watch-only from the database; a lost database is rebuilt from the vault
 - [x] KDF retuned to 256 MiB / 3 passes (~0.7s) after measuring; params travel in the header
 - [x] Database is owner-only — it holds the xpub and full transaction graph
-- [ ] Restore-from-phrase with word and checksum validation
-- [ ] Optional BIP-39 passphrase on restore and on create
+- [x] Restore from a recovery phrase, a WIF key, or (stub) a descriptor
+- [x] Optional BIP-39 passphrase on restore, kept distinct from the wallet password
+- [x] All four standard derivation paths searched on import, with a per-path breakdown
+- [x] Mainnet selectable on import behind an explicit unreviewed-software acknowledgement
+- [ ] Descriptor / xpub watch-only import
 - [ ] Signer worker owning the decrypted descriptor, one message at a time
 
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never

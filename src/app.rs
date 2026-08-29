@@ -11,6 +11,7 @@ use relm4::prelude::*;
 use relm4::{adw, gtk};
 
 use crate::ui::onboarding::{Onboarding, OnboardingOutput};
+use crate::ui::restore::{Restore, RestoreOutput};
 use crate::ui::unlock::{Unlock, UnlockOutput};
 use crate::ui::wallet_page::{WalletPage, WalletPageMsg};
 use crate::wallet::node::{Notice, Progress, Session};
@@ -19,6 +20,7 @@ use crate::wallet::{Paths, Summary};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Onboarding,
+    Restore,
     Locked,
     Unlocked,
 }
@@ -27,6 +29,7 @@ impl Screen {
     fn page(self) -> &'static str {
         match self {
             Screen::Onboarding => "onboarding",
+            Screen::Restore => "restore",
             Screen::Locked => "unlock",
             Screen::Unlocked => "wallet",
         }
@@ -38,12 +41,15 @@ pub struct App {
     paths: Paths,
     session: Option<Arc<Session>>,
     onboarding: Controller<Onboarding>,
+    restore: Controller<Restore>,
     unlock: Controller<Unlock>,
     wallet: Controller<WalletPage>,
 }
 
 #[derive(Debug)]
 pub enum AppMsg {
+    ShowRestore,
+    ShowWelcome,
     /// A wallet now exists on disk, or an existing one was unlocked. Both
     /// arrive with a watch-only summary and nothing secret.
     Ready(Summary),
@@ -89,6 +95,7 @@ impl Component for App {
                 set_visible_child_name: model.screen.page(),
 
                 add_named: (model.onboarding.widget(), Some("onboarding")),
+                add_named: (model.restore.widget(), Some("restore")),
                 add_named: (model.unlock.widget(), Some("unlock")),
                 add_named: (model.wallet.widget(), Some("wallet")),
             },
@@ -111,6 +118,14 @@ impl Component for App {
             sender.input_sender(),
             |out| match out {
                 OnboardingOutput::Created(summary) => AppMsg::Ready(summary),
+                OnboardingOutput::WantsRestore => AppMsg::ShowRestore,
+            },
+        );
+        let restore = Restore::builder().launch(paths.clone()).forward(
+            sender.input_sender(),
+            |out| match out {
+                RestoreOutput::Imported(summary) => AppMsg::Ready(summary),
+                RestoreOutput::Cancelled => AppMsg::ShowWelcome,
             },
         );
         let unlock = Unlock::builder()
@@ -130,7 +145,7 @@ impl Component for App {
             move |manager| sender.input(AppMsg::ColorSchemeChanged(manager.is_dark()))
         });
 
-        let model = App { screen, paths, session: None, onboarding, unlock, wallet };
+        let model = App { screen, paths, session: None, onboarding, restore, unlock, wallet };
         let widgets = view_output!();
 
         // The stack shows its first child until told otherwise, and that child
@@ -158,6 +173,8 @@ impl Component for App {
                     });
                 }
             }
+            AppMsg::ShowRestore => self.screen = Screen::Restore,
+            AppMsg::ShowWelcome => self.screen = Screen::Onboarding,
             AppMsg::ColorSchemeChanged(dark) => {
                 tracing::debug!(dark, "system color scheme changed");
             }

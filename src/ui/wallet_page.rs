@@ -5,12 +5,63 @@ use relm4::prelude::*;
 use relm4::{adw, gtk};
 
 use crate::wallet::node::Progress;
-use crate::wallet::Summary;
+use crate::wallet::{AccountSummary, Summary};
+
+/// One derivation path's row. A factory rather than a static list, because the
+/// number of paths depends on how the wallet was created.
+#[derive(Debug)]
+pub struct PathRow {
+    label: String,
+    address: String,
+    balance_sats: u64,
+}
+
+#[relm4::factory(pub)]
+impl FactoryComponent for PathRow {
+    type Init = AccountSummary;
+    type Input = ();
+    type Output = ();
+    type CommandOutput = ();
+    type ParentWidget = gtk::ListBox;
+
+    view! {
+        adw::ActionRow {
+            set_title: &self.label,
+            set_subtitle: &self.address,
+            set_subtitle_lines: 1,
+
+            add_suffix = &gtk::Label {
+                add_css_class: "numeric",
+                // Dim a path that holds nothing: it was searched and came back
+                // empty, which is information, not an error.
+                set_css_classes: if self.balance_sats == 0 {
+                    &["numeric", "dim-label"]
+                } else {
+                    &["numeric"]
+                },
+                set_label: &format!("{} sats", self.balance_sats),
+            },
+        }
+    }
+
+    fn init_model(
+        summary: Self::Init,
+        _index: &DynamicIndex,
+        _sender: FactorySender<Self>,
+    ) -> Self {
+        PathRow {
+            label: summary.script_type.to_string(),
+            address: summary.next_address,
+            balance_sats: summary.balance_sats,
+        }
+    }
+}
 
 pub struct WalletPage {
     summary: Option<Summary>,
     progress: Progress,
     peers: Option<(usize, usize)>,
+    paths: FactoryVecDeque<PathRow>,
     note: Option<String>,
     error: Option<String>,
 }
@@ -62,6 +113,11 @@ impl WalletPage {
         }
     }
 
+    /// A single-path wallet needs no breakdown; an imported one does.
+    fn has_breakdown(&self) -> bool {
+        self.summary.as_ref().is_some_and(|s| s.accounts.len() > 1)
+    }
+
     fn syncing(&self) -> bool {
         !matches!(self.progress, Progress::Synced)
     }
@@ -109,6 +165,21 @@ impl SimpleComponent for WalletPage {
                             #[watch]
                             set_label: &model.pending(),
                         },
+                    },
+                },
+
+                adw::PreferencesGroup {
+                    set_title: "Derivation paths",
+                    set_description: Some(
+                        "An imported seed is searched on every standard path.                          Paths showing nothing were scanned and found empty."
+                    ),
+                    #[watch]
+                    set_visible: model.has_breakdown(),
+
+                    #[local_ref]
+                    paths_box -> gtk::ListBox {
+                        add_css_class: "boxed-list",
+                        set_selection_mode: gtk::SelectionMode::None,
                     },
                 },
 
@@ -208,20 +279,35 @@ impl SimpleComponent for WalletPage {
         root: Self::Root,
         _sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let paths = FactoryVecDeque::builder().launch_default().detach();
         let model = WalletPage {
+            paths,
             summary: None,
             progress: Progress::Connecting,
             peers: None,
             note: None,
             error: None,
         };
+        let paths_box = model.paths.widget();
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
-            WalletPageMsg::Show(summary) => self.summary = Some(summary),
+            WalletPageMsg::Show(summary) => {
+                // Rebuild rather than diff: four rows, and the set only changes
+                // when a sync lands.
+                let mut guard = self.paths.guard();
+                guard.clear();
+                if summary.accounts.len() > 1 {
+                    for account in &summary.accounts {
+                        guard.push_back(account.clone());
+                    }
+                }
+                drop(guard);
+                self.summary = Some(summary);
+            }
             WalletPageMsg::SetProgress(progress) => {
                 self.progress = progress;
                 self.error = None;

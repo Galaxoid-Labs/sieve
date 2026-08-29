@@ -48,6 +48,19 @@ These are not preferences. Violating one is a bug, not a style difference.
 6. **Argon2 never runs on the main thread.** `sender.spawn_oneshot_command(...)`. A blocked frame
    clock is a visible stall.
 
+## Import model
+
+Two axes, kept separate:
+
+- **`CredentialKind`** — what the user pastes: a recovery phrase, a WIF key, or a descriptor.
+  `carries_keys()` distinguishes the imports that could lose money from the one that cannot.
+- **`ScriptType`** — where it is searched: BIP44/49/84/86. An import searches all of them,
+  because one seed derives a different wallet on each path and guessing wrong finds nothing.
+  Syncing all four costs no extra bandwidth: a filter covers a whole block regardless.
+
+Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
+one `bdk_kyoto` node drives them all via `build_with_wallets`.
+
 ## Layout
 
 ```

@@ -4,5 +4,6 @@
 //! GNOME HIG by construction: <https://developer.gnome.org/hig/>
 
 pub mod onboarding;
+pub mod restore;
 pub mod unlock;
 pub mod wallet_page;

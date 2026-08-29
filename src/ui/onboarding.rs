@@ -56,6 +56,7 @@ impl Step {
 #[derive(Debug)]
 pub enum OnboardingMsg {
     Begin,
+    Restore,
     Back,
     SetPassword(Secret, Secret),
     PhraseWritten,
@@ -65,6 +66,7 @@ pub enum OnboardingMsg {
 #[derive(Debug)]
 pub enum OnboardingOutput {
     Created(Summary),
+    WantsRestore,
 }
 
 #[derive(Debug)]
@@ -196,9 +198,8 @@ impl Component for Onboarding {
                             },
                             gtk::Button {
                                 add_css_class: "pill",
-                                set_label: "Restore from a recovery phrase",
-                                // Lands with the restore path in the next pass.
-                                set_sensitive: false,
+                                set_label: "I already have a wallet",
+                                connect_clicked => OnboardingMsg::Restore,
                             },
                         },
                     },
@@ -382,6 +383,10 @@ impl Component for Onboarding {
         self.error = None;
         match msg {
             OnboardingMsg::Begin => self.step = Step::Password,
+
+            OnboardingMsg::Restore => {
+                let _ = sender.output(OnboardingOutput::WantsRestore);
+            }
 
             OnboardingMsg::Back => {
                 if let Some(previous) = self.step.previous() {
