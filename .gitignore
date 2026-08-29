@@ -1,3 +1,7 @@
 /target
+
+# Wallet files, in case one is ever created inside the source tree while
+# testing. Note this is a pattern, not a directory: `data/` holds packaging
+# assets that must be tracked — icons, the desktop entry — and ignoring it
+# silently kept them out of the repository.
 *.sieve
-/data

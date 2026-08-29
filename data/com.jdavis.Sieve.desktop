@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Sieve
+Comment=A privacy-focused Bitcoin wallet
+Exec=sieve
+Icon=com.jdavis.Sieve
+Terminal=false
+Categories=GNOME;GTK;Office;Finance;
+Keywords=Bitcoin;Wallet;Privacy;
+StartupNotify=true

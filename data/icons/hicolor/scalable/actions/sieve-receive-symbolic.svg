@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Money in: a plain arrow, shaft and head, pointing down. The Adwaita set
+     has no such icon — go-down is a bare chevron, go-bottom adds a bar, and
+     network-receive points diagonally. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="currentColor">
+    <rect x="6.25" y="1.75" width="3.5" height="8" rx="1.75"/>
+    <path d="M 8 14.25 L 2.6 7.9 A 1.4 1.4 0 0 1 4.7 6.1 L 8 9.9 L 11.3 6.1 A 1.4 1.4 0 0 1 13.4 7.9 Z"/>
+  </g>
+</svg>
