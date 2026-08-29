@@ -11,7 +11,7 @@ use relm4::prelude::*;
 use relm4::{adw, gtk};
 
 use crate::ui::chooser::{Chooser, ChooserMsg, ChooserOutput};
-use crate::ui::onboarding::{Onboarding, OnboardingOutput};
+use crate::ui::onboarding::{Onboarding, OnboardingMsg, OnboardingOutput};
 use crate::ui::restore::{Restore, RestoreOutput};
 use crate::ui::unlock::{Unlock, UnlockMsg, UnlockOutput};
 use crate::ui::wallet_page::{WalletPage, WalletPageMsg};
@@ -351,13 +351,24 @@ impl Component for App {
     ) {
         match msg {
             AppMsg::Back => {
-                self.nav.pop();
+                // Setup and import set can_pop false so they can own their
+                // back button, which also means pop does not move them. The
+                // destination is known anyway: the wallet, when there is one.
+                if self.active.is_some() {
+                    self.nav.replace_with_tags(&["wallet"]);
+                } else {
+                    self.nav.pop();
+                }
             }
             // Both are reached from the wallet list inside preferences, and
             // both take over the window. Leave the dialog first, or the window
             // visibly changes underneath a dialog that is still up.
             AppMsg::ShowOnboarding => {
                 self.close_prefs();
+                // Reached from preferences, so there is a wallet to go back
+                // to and setup needs a way out of its first step.
+                self.onboarding
+                    .emit(OnboardingMsg::CanCancel(self.active.is_some()));
                 self.nav.push_by_tag("onboarding");
             }
             AppMsg::ShowRestore => {
