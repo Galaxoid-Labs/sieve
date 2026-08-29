@@ -58,7 +58,13 @@ fn main() {
     // The radius has to be matched by clipping the picture to it, or the
     // code's own white square fills the corners it cuts away.
     app.set_global_css(
-        ".qr-ground { background-color: #ffffff; border-radius: 18px; padding: 6px; }",
+        ".qr-ground { background-color: #ffffff; border-radius: 18px; padding: 6px; } \
+         .seed-word { \
+           background-color: alpha(currentColor, 0.07); \
+           border-radius: 9px; \
+           padding: 10px 12px; \
+         } \
+         .seed-index { opacity: 0.5; font-size: 0.8em; }",
     );
 
     // Sieve's own icons, compiled into the binary. Adwaita has no plain

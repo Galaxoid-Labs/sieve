@@ -23,6 +23,57 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// One word of the recovery phrase, numbered.
+///
+/// A chip each rather than a block of text: these get copied onto paper by
+/// hand, and the number beside a word is what makes that possible to check.
+#[derive(Debug)]
+pub struct SeedWord {
+    position: usize,
+    word: String,
+}
+
+#[relm4::factory(pub)]
+impl FactoryComponent for SeedWord {
+    type Init = (usize, String);
+    type Input = ();
+    type Output = ();
+    type CommandOutput = ();
+    type ParentWidget = gtk::FlowBox;
+
+    view! {
+        gtk::Box {
+            add_css_class: "seed-word",
+            set_spacing: 8,
+            set_valign: gtk::Align::Center,
+
+            gtk::Label {
+                add_css_class: "seed-index",
+                add_css_class: "numeric",
+                set_width_chars: 2,
+                set_xalign: 1.0,
+                set_label: &self.position.to_string(),
+            },
+
+            gtk::Label {
+                add_css_class: "monospace",
+                set_xalign: 0.0,
+                set_hexpand: true,
+                set_selectable: false,
+                set_label: &self.word,
+            },
+        }
+    }
+
+    fn init_model(
+        (position, word): Self::Init,
+        _index: &DynamicIndex,
+        _sender: FactorySender<Self>,
+    ) -> Self {
+        SeedWord { position, word }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     Welcome,
@@ -99,6 +150,7 @@ pub struct Onboarding {
     name: Option<String>,
     /// 1-based word positions the user must type back.
     challenge: [usize; 3],
+    words: FactoryVecDeque<SeedWord>,
     error: Option<String>,
 }
 
@@ -113,25 +165,6 @@ impl Onboarding {
             (Step::Password, true) => None,
             (step, _) => step.previous(),
         }
-    }
-
-    /// The phrase as two numbered columns of monospace text.
-    fn phrase_display(&self) -> String {
-        let Some(phrase) = &self.mnemonic else {
-            return String::new();
-        };
-        let words: Vec<&str> = phrase.split_whitespace().collect();
-        let rows = words.len().div_ceil(2);
-        (0..rows)
-            .map(|row| {
-                let left = format!("{:>2}. {:<10}", row + 1, words[row]);
-                match words.get(row + rows) {
-                    Some(word) => format!("{left}   {:>2}. {word}", row + rows + 1),
-                    None => left.trim_end().to_string(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     fn word(&self, position: usize) -> Option<String> {
@@ -298,15 +331,17 @@ impl Component for Onboarding {
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 18,
 
-                            gtk::Label {
-                                add_css_class: "card",
-                                add_css_class: "monospace",
-                                set_margin_all: 4,
-                                set_selectable: false,
-                                set_justify: gtk::Justification::Left,
-                                set_xalign: 0.0,
-                                #[watch]
-                                set_label: &model.phrase_display(),
+                            #[local_ref]
+                            word_grid -> gtk::FlowBox {
+                                set_selection_mode: gtk::SelectionMode::None,
+                                set_row_spacing: 8,
+                                set_column_spacing: 8,
+                                set_homogeneous: true,
+                                // Two across on a narrow window, three when
+                                // there is room. Twelve words divide evenly
+                                // into either, so no row is left ragged.
+                                set_min_children_per_line: 2,
+                                set_max_children_per_line: 3,
                             },
 
                             gtk::Button {
@@ -402,6 +437,7 @@ impl Component for Onboarding {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let words = FactoryVecDeque::builder().launch_default().detach();
         let model = Onboarding {
             step: Step::Welcome,
             can_cancel: false,
@@ -410,8 +446,10 @@ impl Component for Onboarding {
             password: None,
             name: None,
             challenge: [1, 2, 3],
+            words,
             error: None,
         };
+        let word_grid = model.words.widget();
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
@@ -450,6 +488,13 @@ impl Component for Onboarding {
                 }
                 match wallet::generate_mnemonic() {
                     Ok(phrase) => {
+                        {
+                            let mut guard = self.words.guard();
+                            guard.clear();
+                            for (index, word) in phrase.split_whitespace().enumerate() {
+                                guard.push_back((index + 1, word.to_string()));
+                            }
+                        }
                         self.mnemonic = Some(phrase);
                         self.password = Some(pass.0);
                         let trimmed = name.trim();
