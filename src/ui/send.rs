@@ -255,6 +255,11 @@ impl Component for SendForm {
                             #[name(to_row)]
                             adw::EntryRow {
                                 set_title: "Pay to",
+                                // An address is checked character by character
+                                // against another screen, and a proportional
+                                // font makes l/1 and O/0 the reader's problem.
+                                // The receive side already shows them this way.
+                                add_css_class: "monospace",
                                 #[watch]
                                 set_sensitive: !model.busy,
                             },
@@ -269,6 +274,9 @@ impl Component for SendForm {
                                 // full alphabet for a field that only takes
                                 // numbers.
                                 set_input_purpose: gtk::InputPurpose::Number,
+                                // Tabular figures, like every other amount in
+                                // the app.
+                                add_css_class: "numeric",
 
                                 // A field that only holds numbers should only
                                 // take numbers. Refused at the keystroke rather
