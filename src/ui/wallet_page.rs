@@ -25,6 +25,8 @@ pub struct TxRow {
     title: String,
     subtitle: String,
     amount: String,
+    /// What that amount is worth now, if a price is on hand.
+    fiat: Option<String>,
     incoming: bool,
 }
 
@@ -35,7 +37,7 @@ pub enum TxRowOutput {
 
 #[relm4::factory(pub)]
 impl FactoryComponent for TxRow {
-    type Init = (crate::wallet::TxSummary, Denomination, u32);
+    type Init = (crate::wallet::TxSummary, Denomination, u32, Option<crate::price::Price>);
     type Input = ();
     type Output = TxRowOutput;
     type CommandOutput = ();
@@ -55,17 +57,33 @@ impl FactoryComponent for TxRow {
                 }),
             },
 
-            add_suffix = &gtk::Label {
-                // set_css_classes replaces the whole list, so the weight has
-                // to be part of it rather than added separately.
-                // Direction carries the colour, so a glance at the column
-                // reads without parsing the sign.
-                set_css_classes: if self.incoming {
-                    &["numeric", "heading", "success"]
-                } else {
-                    &["numeric", "heading", "dim-label"]
+            add_suffix = &gtk::Box {
+                set_orientation: gtk::Orientation::Vertical,
+                set_valign: gtk::Align::Center,
+                set_halign: gtk::Align::End,
+
+                gtk::Label {
+                    set_halign: gtk::Align::End,
+                    // set_css_classes replaces the whole list, so the weight
+                    // has to be part of it rather than added separately.
+                    // Direction carries the colour, so a glance at the column
+                    // reads without parsing the sign.
+                    set_css_classes: if self.incoming {
+                        &["numeric", "heading", "success"]
+                    } else {
+                        &["numeric", "heading", "dim-label"]
+                    },
+                    set_label: &self.amount,
                 },
-                set_label: &self.amount,
+
+                gtk::Label {
+                    set_halign: gtk::Align::End,
+                    add_css_class: "numeric",
+                    add_css_class: "dim-label",
+                    add_css_class: "caption",
+                    set_visible: self.fiat.is_some(),
+                    set_label: self.fiat.as_deref().unwrap_or_default(),
+                },
             },
 
             // The row opens a page, so it carries the chevron that promises one.
@@ -81,7 +99,7 @@ impl FactoryComponent for TxRow {
     }
 
     fn init_model(
-        (tx, denomination, tip): Self::Init,
+        (tx, denomination, tip, price): Self::Init,
         _index: &DynamicIndex,
         _sender: FactorySender<Self>,
     ) -> Self {
@@ -108,6 +126,7 @@ impl FactoryComponent for TxRow {
                 denomination.format(magnitude)
             ),
             incoming,
+            fiat: price.map(|p| format!("≈ ${:.2}", p.value_of(magnitude))),
             txid: tx.txid,
         }
     }
@@ -733,7 +752,12 @@ impl Component for WalletPage {
                 }
             }
             WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
-            WalletPageMsg::SetPrice(price) => self.price = price,
+            WalletPageMsg::SetPrice(price) => {
+                self.price = price;
+                if let Some(summary) = self.summary.clone() {
+                    self.rebuild_transactions(&summary);
+                }
+            }
             WalletPageMsg::SetDenomination(denomination) => {
                 self.settings.denomination = denomination;
                 // The rows hold formatted text, so they are rebuilt.
@@ -798,7 +822,7 @@ impl WalletPage {
         let mut guard = self.transactions.guard();
         guard.clear();
         for tx in &summary.transactions {
-            guard.push_back((tx.clone(), self.settings.denomination, summary.tip));
+            guard.push_back((tx.clone(), self.settings.denomination, summary.tip, self.price));
         }
     }
 
@@ -845,6 +869,19 @@ impl WalletPage {
         stack.set_margin_bottom(12);
         stack.append(&amount);
         stack.append(&caption);
+
+        if let Some(price) = self.price {
+            // Today's price against a past amount, so it is what the coins are
+            // worth now — not what they were worth when they moved. Saying
+            // "today" is the difference between a figure and a wrong figure.
+            let value = gtk::Label::new(Some(&format!(
+                "≈ ${:.2} today",
+                price.value_of(magnitude)
+            )));
+            value.add_css_class("dim-label");
+            value.add_css_class("numeric");
+            stack.append(&value);
+        }
         headline.add(&stack);
         page.add(&headline);
 
