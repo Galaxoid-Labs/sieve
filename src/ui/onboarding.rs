@@ -65,13 +65,13 @@ pub enum OnboardingMsg {
 
 #[derive(Debug)]
 pub enum OnboardingOutput {
-    Created(Summary),
+    Created { paths: Paths, summary: Summary },
     WantsRestore,
 }
 
 #[derive(Debug)]
 pub enum OnboardingCmd {
-    Created(Result<Summary, String>),
+    Created(Result<(Paths, Summary), String>),
 }
 
 pub struct Onboarding {
@@ -447,6 +447,7 @@ impl Component for Onboarding {
                 let primary = wallet::accounts::ScriptType::Taproot;
                 let script_types = vec![primary];
                 // Argon2 and the database write both block. Off the main thread.
+                let created_paths = paths.clone();
                 sender.spawn_oneshot_command(move || {
                     OnboardingCmd::Created(
                         wallet::create(
@@ -461,7 +462,8 @@ impl Component for Onboarding {
                             None,
                             None,
                         )
-                            .map_err(|e| e.to_string()),
+                        .map(|summary| (created_paths, summary))
+                        .map_err(|e| e.to_string()),
                     )
                 });
             }
@@ -476,11 +478,11 @@ impl Component for Onboarding {
     ) {
         let OnboardingCmd::Created(result) = msg;
         match result {
-            Ok(summary) => {
+            Ok((paths, summary)) => {
                 // The wallet exists on disk now; drop everything secret.
                 self.mnemonic = None;
                 self.password = None;
-                let _ = sender.output(OnboardingOutput::Created(summary));
+                let _ = sender.output(OnboardingOutput::Created { paths, summary });
             }
             Err(message) => {
                 self.step = Step::Verify;

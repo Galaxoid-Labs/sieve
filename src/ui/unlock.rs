@@ -38,12 +38,12 @@ pub enum UnlockOutput {
     SwitchWallet,
     /// The vault opened. Only the watch-only summary travels — the decrypted
     /// seed never crosses a component boundary.
-    Unlocked(Summary),
+    Unlocked { paths: Paths, summary: Summary },
 }
 
 #[derive(Debug)]
 pub enum UnlockCmd {
-    Finished(Result<Summary, String>),
+    Finished(Result<(Paths, Summary), String>),
 }
 
 pub struct Unlock {
@@ -175,10 +175,10 @@ impl Component for Unlock {
                 // Blocking and CPU-bound: goes to the thread pool, not the
                 // main loop. `spawn_oneshot_command` cancels on shutdown.
                 sender.spawn_oneshot_command(move || {
-                    UnlockCmd::Finished(
-                        wallet::unlock(passphrase.0.as_bytes(), &paths)
-                            .map_err(|e| e.to_string()),
-                    )
+                    let result = wallet::unlock(passphrase.0.as_bytes(), &paths)
+                        .map(|summary| (paths, summary))
+                        .map_err(|e| e.to_string());
+                    UnlockCmd::Finished(result)
                 });
             }
         }
@@ -193,8 +193,8 @@ impl Component for Unlock {
         let UnlockCmd::Finished(result) = msg;
         self.busy = false;
         match result {
-            Ok(summary) => {
-                let _ = sender.output(UnlockOutput::Unlocked(summary));
+            Ok((paths, summary)) => {
+                let _ = sender.output(UnlockOutput::Unlocked { paths, summary });
             }
             Err(message) => self.error = Some(message),
         }

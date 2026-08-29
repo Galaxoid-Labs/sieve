@@ -53,13 +53,13 @@ pub enum RestoreMsg {
 
 #[derive(Debug)]
 pub enum RestoreOutput {
-    Imported(Summary),
+    Imported { paths: Paths, summary: Summary },
     Cancelled,
 }
 
 #[derive(Debug)]
 pub enum RestoreCmd {
-    Finished(Result<Summary, String>),
+    Finished(Result<(Paths, Summary), String>),
 }
 
 pub struct Restore {
@@ -408,6 +408,7 @@ impl Component for Restore {
                 // A new wallet directory, so importing never disturbs an
                 // existing wallet.
                 let paths = Paths::for_wallet(&Paths::new_id());
+                let created_paths = paths.clone();
                 let kind = submission.kind;
                 let credential = submission.credential.0.trim().to_owned();
                 let bip39 = submission.bip39_passphrase.0.clone();
@@ -455,7 +456,11 @@ impl Component for Restore {
                             "Descriptor import is not wired up yet."
                         )),
                     };
-                    RestoreCmd::Finished(result.map_err(|e| e.to_string()))
+                    RestoreCmd::Finished(
+                        result
+                            .map(|summary| (created_paths, summary))
+                            .map_err(|e| e.to_string()),
+                    )
                 });
             }
         }
@@ -470,8 +475,8 @@ impl Component for Restore {
         let RestoreCmd::Finished(result) = msg;
         self.busy = false;
         match result {
-            Ok(summary) => {
-                let _ = sender.output(RestoreOutput::Imported(summary));
+            Ok((paths, summary)) => {
+                let _ = sender.output(RestoreOutput::Imported { paths, summary });
             }
             Err(message) => self.error = Some(message),
         }

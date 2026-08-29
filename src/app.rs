@@ -59,8 +59,10 @@ pub enum AppMsg {
     /// Open a specific wallet from the chooser.
     OpenWallet(String),
     /// A wallet now exists on disk, or an existing one was unlocked. Both
-    /// arrive with a watch-only summary and nothing secret.
-    Ready(Summary),
+    /// arrive with a watch-only summary and nothing secret. The paths say
+    /// *which* wallet, which is what decides whether the running light client
+    /// still belongs to what is on screen.
+    Ready { paths: Paths, summary: Summary },
     /// The desktop switched between light and dark.
     ///
     /// Stock Adwaita widgets and style classes recolour themselves, so nothing
@@ -140,21 +142,21 @@ impl Component for App {
         let onboarding = Onboarding::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
-                OnboardingOutput::Created(summary) => AppMsg::Ready(summary),
+                OnboardingOutput::Created { paths, summary } => AppMsg::Ready { paths, summary },
                 OnboardingOutput::WantsRestore => AppMsg::ShowRestore,
             },
         );
         let restore = Restore::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
-                RestoreOutput::Imported(summary) => AppMsg::Ready(summary),
+                RestoreOutput::Imported { paths, summary } => AppMsg::Ready { paths, summary },
                 RestoreOutput::Cancelled => AppMsg::ShowWelcome,
             },
         );
         let unlock = Unlock::builder()
             .launch(())
             .forward(sender.input_sender(), |out| match out {
-                UnlockOutput::Unlocked(summary) => AppMsg::Ready(summary),
+                UnlockOutput::Unlocked { paths, summary } => AppMsg::Ready { paths, summary },
                 UnlockOutput::SwitchWallet => AppMsg::ShowChooser,
             });
         let wallet = WalletPage::builder().launch(()).forward(
@@ -198,14 +200,24 @@ impl Component for App {
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
-            AppMsg::Ready(summary) => {
+            AppMsg::Ready { paths, summary } => {
+                // Opening a different wallet must retire the running client.
+                // Otherwise the previous wallet's node keeps feeding this
+                // screen, and a freshly imported wallet shows the old one's
+                // sync state — including a reassuring "Up to date" it has not
+                // earned.
+                let switched = self.active.as_ref().map(|p| &p.dir) != Some(&paths.dir);
+                if switched && let Some(session) = self.session.take() {
+                    tracing::info!("switching wallets; stopping the previous light client");
+                    session.shutdown();
+                    self.wallet.emit(WalletPageMsg::Reset);
+                }
+
+                self.active = Some(paths.clone());
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.screen = Screen::Unlocked;
 
-                // Start the light client once, on first entry to the wallet.
-                if self.session.is_none()
-                    && let Some(paths) = self.active.clone()
-                {
+                if self.session.is_none() {
                     sender.oneshot_command(async move {
                         AppCmd::Started(
                             Session::start(&paths).await.map(Arc::new).map_err(|e| e.to_string()),

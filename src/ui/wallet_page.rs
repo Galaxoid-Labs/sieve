@@ -81,6 +81,8 @@ pub enum WalletPageMsg {
     Failed(String),
     CopyAddress,
     SwitchWallet,
+    /// Clear everything that belonged to a different wallet.
+    Reset,
 }
 
 impl WalletPage {
@@ -307,6 +309,14 @@ impl SimpleComponent for WalletPage {
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
+            WalletPageMsg::Reset => {
+                self.summary = None;
+                self.progress = Progress::Connecting;
+                self.peers = None;
+                self.note = None;
+                self.error = None;
+                self.paths.guard().clear();
+            }
             WalletPageMsg::SwitchWallet => {
                 let _ = sender.output(WalletPageOutput::SwitchWallet);
             }
