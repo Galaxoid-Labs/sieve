@@ -8,6 +8,8 @@ mod ui;
 mod vault;
 mod wallet;
 
+use relm4::gtk;
+use relm4::gtk::prelude::*;
 use relm4::RelmApp;
 
 /// Reverse-DNS ID. Must match the .desktop file or GNOME won't associate the
@@ -46,6 +48,17 @@ fn main() {
     harden();
 
     let app = RelmApp::new(APP_ID);
+
+    // Sieve's own icons. Adwaita has no plain vertical arrow — its options are
+    // a bare chevron, an arrow welded to a bar, or a diagonal — and "money in"
+    // and "money out" deserve the obvious shape.
+    //
+    // Loaded from the source tree for now; packaging in M8 installs them to
+    // the usual icon directory instead.
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::IconTheme::for_display(&display)
+            .add_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons"));
+    }
 
     // The one place Sieve hardcodes a colour, and it has to. A QR code must be
     // dark modules on a light ground to scan; inverting it for dark mode looks

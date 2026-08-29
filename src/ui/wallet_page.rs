@@ -106,9 +106,9 @@ impl FactoryComponent for TxRow {
 
             add_prefix = &gtk::Image {
                 set_icon_name: Some(if self.incoming {
-                    "go-bottom-symbolic"
+                    "sieve-receive-symbolic"
                 } else {
-                    "go-top-symbolic"
+                    "sieve-send-symbolic"
                 }),
             },
 
@@ -755,7 +755,7 @@ impl Component for WalletPage {
                     },
                 },
 
-                add_titled_with_icon[Some("receive"), "Receive", "go-bottom-symbolic"] =
+                add_titled_with_icon[Some("receive"), "Receive", "sieve-receive-symbolic"] =
                 &gtk::ScrolledWindow {
                     set_vexpand: true,
 
@@ -931,9 +931,9 @@ impl Component for WalletPage {
                     },
                 },
 
-                add_titled_with_icon[Some("send"), "Send", "go-top-symbolic"] =
+                add_titled_with_icon[Some("send"), "Send", "sieve-send-symbolic"] =
                 &adw::StatusPage {
-                    set_icon_name: Some("go-top-symbolic"),
+                    set_icon_name: Some("sieve-send-symbolic"),
                     set_title: "Sending is not built yet",
                     set_description: Some(
                         "Sieve can watch this wallet but cannot spend from it. Nothing here \
