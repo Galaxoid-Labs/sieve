@@ -752,7 +752,9 @@ impl Component for WalletPage {
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match msg {
-            WalletPageMsg::ShowTransaction(txid) => self.show_transaction(&txid, root),
+            WalletPageMsg::ShowTransaction(txid) => {
+                self.show_transaction(&txid, root, &sender)
+            }
             WalletPageMsg::SelectReceivePath(index) => {
                 self.receive_index = index;
                 // The fresh address belonged to the path being left.
@@ -766,7 +768,10 @@ impl Component for WalletPage {
                 }
             }
             WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
-            WalletPageMsg::Toast(message) => self.toaster.add_toast(adw::Toast::new(&message)),
+            WalletPageMsg::Toast(message) => {
+                tracing::debug!(%message, "toast");
+                self.toaster.add_toast(adw::Toast::new(&message));
+            }
             WalletPageMsg::SetPrice(price) => {
                 self.price = price;
                 if let Some(summary) = self.summary.clone() {
@@ -849,7 +854,12 @@ impl WalletPage {
     /// A transaction is a place you go and come back from, not a prompt you
     /// answer, so it pushes onto the wallet's own navigation rather than
     /// arriving as a dialog in front of it.
-    fn show_transaction(&self, txid: &str, root: &adw::BreakpointBin) {
+    fn show_transaction(
+        &self,
+        txid: &str,
+        root: &adw::BreakpointBin,
+        sender: &ComponentSender<Self>,
+    ) {
         let Some(summary) = &self.summary else { return };
         let Some(tx) = summary.transactions.iter().find(|t| t.txid == txid) else {
             return;
@@ -967,14 +977,27 @@ impl WalletPage {
         explorer.add_suffix(&gtk::Image::from_icon_name("external-link-symbolic"));
 
         let launcher_parent = root.clone();
+        let sender = sender.clone();
         explorer.connect_activated(move |_| {
             let window = launcher_parent.root().and_downcast::<gtk::Window>();
+            let sender = sender.clone();
+            let url = url.clone();
             gtk::UriLauncher::new(&url).launch(
                 window.as_ref(),
                 None::<&gtk::gio::Cancellable>,
-                |result| {
+                move |result| {
                     if let Err(e) = result {
+                        // Opening a browser fails for reasons this app cannot
+                        // fix — no handler registered, a sandbox without the
+                        // OpenURI portal. Hand over the link rather than doing
+                        // nothing visible at all.
                         tracing::warn!(%e, "could not open the block explorer");
+                        if let Some(display) = gtk::gdk::Display::default() {
+                            display.clipboard().set_text(&url);
+                        }
+                        sender.input(WalletPageMsg::Toast(
+                            "Could not open your browser — link copied".into(),
+                        ));
                     }
                 },
             );
