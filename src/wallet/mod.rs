@@ -23,9 +23,6 @@ use bdk_wallet::bitcoin::Network;
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{DerivableKey, ExtendedKey, GeneratableKey, GeneratedKey};
 use bdk_wallet::miniscript::Tap;
-use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::template::Bip86;
-use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use zeroize::Zeroizing;
 
 pub mod accounts;
