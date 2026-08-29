@@ -13,6 +13,7 @@ use relm4::{adw, gtk};
 use crate::ui::chooser::{Chooser, ChooserMsg, ChooserOutput};
 use crate::ui::onboarding::{Onboarding, OnboardingMsg, OnboardingOutput};
 use crate::ui::restore::{Restore, RestoreOutput};
+use crate::ui::reveal::{Reveal, RevealMsg};
 use crate::ui::unlock::{Unlock, UnlockMsg, UnlockOutput};
 use crate::ui::wallet_page::{WalletPage, WalletPageMsg};
 use crate::wallet::node::{Notice, Progress, Session};
@@ -27,6 +28,8 @@ pub struct App {
     prefs: adw::PreferencesDialog,
     /// The wallet list, wrapped so preferences can slide it in.
     chooser_page: adw::NavigationPage,
+    /// Showing the recovery phrase again, likewise a subpage of preferences.
+    reveal_page: adw::NavigationPage,
     /// The page currently inside the dialog, so reopening replaces it rather
     /// than stacking another copy.
     prefs_page: Option<adw::PreferencesPage>,
@@ -49,6 +52,11 @@ pub struct App {
     restore: Controller<Restore>,
     unlock: Controller<Unlock>,
     wallet: Controller<WalletPage>,
+    reveal: Controller<Reveal>,
+    /// Whether the open wallet's password has been given this session. Not the
+    /// same as "a wallet is open": the wallet screen is on display, with its
+    /// balance, before anyone has typed anything.
+    unlocked: bool,
 }
 
 /// Every icon name the interface uses.
@@ -95,6 +103,8 @@ pub enum AppMsg {
     SetShowFiat(bool),
     /// Slide the wallet list in over preferences.
     ShowWallets,
+    /// Slide the recovery-phrase screen in over preferences.
+    ShowRecoveryPhrase,
     /// Re-present the password dialog for the wallet already on screen.
     PromptUnlock,
     /// Open a specific wallet from the list.
@@ -195,6 +205,7 @@ impl Component for App {
                 UnlockOutput::Unlocked { paths, summary } => AppMsg::Ready { paths, summary },
                 UnlockOutput::SwitchWallet => AppMsg::Back,
             });
+        let reveal = Reveal::builder().launch(()).detach();
         let wallet = WalletPage::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
@@ -272,6 +283,9 @@ impl Component for App {
         let chooser_page = adw::NavigationPage::new(chooser.widget(), "Wallets");
         chooser_page.set_tag(Some("wallets"));
 
+        let reveal_page = adw::NavigationPage::new(reveal.widget(), "Recovery phrase");
+        reveal_page.set_tag(Some("phrase"));
+
         for (tag, title, child, can_pop) in [
             ("wallet", "Wallet", wallet.widget().clone().upcast::<gtk::Widget>(), true),
             // Setup and import drive their own back button: theirs steps
@@ -305,6 +319,7 @@ impl Component for App {
                 dialog
             },
             chooser_page,
+            reveal_page,
             prefs_page: None,
             prefs_open: false,
             unlock_open: false,
@@ -317,6 +332,8 @@ impl Component for App {
             restore,
             unlock,
             wallet,
+            reveal,
+            unlocked: false,
         };
         let widgets = view_output!();
 
@@ -399,7 +416,11 @@ impl Component for App {
                 }
             }
 
-            AppMsg::PrefsClosed => self.prefs_open = false,
+            AppMsg::PrefsClosed => {
+                self.prefs_open = false;
+                // The words are in memory only while they are on screen.
+                self.reveal.emit(RevealMsg::Clear);
+            }
             AppMsg::UnlockClosed => self.unlock_open = false,
 
             AppMsg::ToggleDenomination => {
@@ -462,6 +483,14 @@ impl Component for App {
                 self.prefs.push_subpage(&self.chooser_page);
             }
 
+            AppMsg::ShowRecoveryPhrase => {
+                let Some(paths) = self.active.clone() else { return };
+                // Prepare first: it clears whatever the last visit decrypted,
+                // so the page never slides in already showing a phrase.
+                self.reveal.emit(RevealMsg::Prepare(Box::new(paths)));
+                self.prefs.push_subpage(&self.reveal_page);
+            }
+
             AppMsg::PromptUnlock => {
                 if let Some(root) = self.nav.root().and_then(|r| r.root()) {
                     self.unlock_dialog.present(Some(&root));
@@ -480,6 +509,7 @@ impl Component for App {
                 self.settings.save();
 
                 self.unlock.emit(UnlockMsg::Open { paths, name: name.clone() });
+                self.unlocked = false;
                 self.wallet.emit(WalletPageMsg::SetLocked(true));
                 self.wallet.emit(WalletPageMsg::SetName(name));
 
@@ -502,6 +532,7 @@ impl Component for App {
                 }
 
                 self.active = Some(paths.clone());
+                self.unlocked = true;
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetLocked(false));
                 self.chooser.emit(ChooserMsg::Refresh);
@@ -876,6 +907,28 @@ impl App {
             );
             watched.set_subtitle_lines(2);
             this.add(&watched);
+        }
+
+        // The phrase is shown once, when the wallet is made, and the moment
+        // someone is most likely to put off writing twelve words down is
+        // exactly that one. This is the way back to it.
+        if self.active.is_some() {
+            let phrase = adw::ActionRow::new();
+            phrase.set_title("Recovery phrase");
+            phrase.set_subtitle(if self.unlocked {
+                "Show the words again to write them down"
+            } else {
+                "Unlock this wallet to show the words"
+            });
+            phrase.set_subtitle_lines(2);
+            phrase.set_activatable(self.unlocked);
+            phrase.set_sensitive(self.unlocked);
+            phrase.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            {
+                let sender = sender.clone();
+                phrase.connect_activated(move |_| sender.input(AppMsg::ShowRecoveryPhrase));
+            }
+            this.add(&phrase);
         }
 
         // Remembering peers is what makes a restart quick; forgetting them is
