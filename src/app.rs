@@ -98,6 +98,7 @@ pub enum AppCmd {
     Warning(Option<Notice>),
     Revealed(Result<(String, Summary), String>),
     Chain(Result<crate::wallet::node::ChainInfo, String>),
+    Tick,
     Priced(Result<crate::price::Price, String>),
 }
 
@@ -439,12 +440,17 @@ impl Component for App {
                 self.await_progress(&sender);
                 self.await_warning(&sender);
                 sender.input(AppMsg::RefreshChain);
+                self.schedule_tick(&sender);
             }
             AppCmd::Started(Err(message)) => {
                 tracing::error!(%message, "could not start the light client");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
             AppCmd::Chain(Ok(info)) => self.wallet.emit(WalletPageMsg::SetChain(Some(info))),
+            AppCmd::Tick => {
+                sender.input(AppMsg::RefreshChain);
+                self.schedule_tick(&sender);
+            }
             AppCmd::Chain(Err(message)) => {
                 tracing::warn!(%message, "could not read the chain");
             }
@@ -507,6 +513,22 @@ impl Component for App {
 }
 
 impl App {
+    /// Ask again shortly.
+    ///
+    /// Both the things that refresh the chain view go quiet once a wallet is
+    /// caught up: next_update parks until a new block, and the node only warns
+    /// about connections while it is below its target. Without a tick the
+    /// Network tab freezes at whatever was true when the sync finished.
+    fn schedule_tick(&self, sender: &ComponentSender<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        sender.oneshot_command(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            AppCmd::Tick
+        });
+    }
+
     /// Fetch a price, if the person asked for one and it would mean anything.
     ///
     /// Never on a test network: signet coins have no price, so a number there
