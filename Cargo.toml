@@ -23,6 +23,10 @@ getrandom = "0.4"
 zeroize = { version = "1.9", features = ["derive"] }
 secrecy = "0.10"
 
+# The one outbound connection that is not Bitcoin p2p, and only when the
+# person turns it on. Blocking and small, with rustls rather than OpenSSL.
+ureq = "3"
+
 # Plumbing.
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }

@@ -176,6 +176,7 @@ pub struct WalletPage {
     note: Option<String>,
     error: Option<String>,
     settings: Settings,
+    price: Option<crate::price::Price>,
     /// The wallet is the root screen now, so it exists before anyone has
     /// proved they may look at it.
     locked: bool,
@@ -210,6 +211,8 @@ pub enum WalletPageMsg {
     /// Which unit amounts are shown in. Owned by the app, since the
     /// preferences dialog is where it is changed.
     SetDenomination(crate::settings::Denomination),
+    /// `None` clears it — the setting was turned off, or the fetch failed.
+    SetPrice(Option<crate::price::Price>),
     /// Choose which derivation path to receive on.
     SelectReceivePath(u32),
     /// Ask for an address that has not been handed to anyone yet.
@@ -246,6 +249,17 @@ impl WalletPage {
             .get(self.receive_index as usize)
             .map(|a| a.next_address.clone())
             .unwrap_or_else(|| summary.next_address.clone())
+    }
+
+    /// The balance in dollars, when a price is on hand.
+    ///
+    /// Approximate by construction — one exchange's last trade — so it is
+    /// marked as such rather than presented as a second exact figure beside
+    /// an exact one.
+    fn fiat(&self) -> Option<String> {
+        let price = self.price?;
+        let summary = self.summary.as_ref()?;
+        Some(format!("≈ ${:.2}", price.value_of(summary.balance_sats)))
     }
 
     /// The line under the balance: what qualifies the number above it.
@@ -457,6 +471,17 @@ impl Component for WalletPage {
                                 },
 
                                 gtk::Label {
+                                    add_css_class: "title-4",
+                                    add_css_class: "dim-label",
+                                    add_css_class: "numeric",
+                                    set_halign: gtk::Align::Center,
+                                    #[watch]
+                                    set_visible: model.fiat().is_some(),
+                                    #[watch]
+                                    set_label: &model.fiat().unwrap_or_default(),
+                                },
+
+                                gtk::Label {
                                     add_css_class: "dim-label",
                                     set_halign: gtk::Align::Center,
                                     set_margin_bottom: 24,
@@ -655,6 +680,7 @@ impl Component for WalletPage {
         let model = WalletPage {
             settings: Settings::load(),
             locked: true,
+            price: None,
             name: "Sieve".into(),
             transactions,
             path_model: gtk::StringList::new(&[]),
@@ -707,6 +733,7 @@ impl Component for WalletPage {
                 }
             }
             WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
+            WalletPageMsg::SetPrice(price) => self.price = price,
             WalletPageMsg::SetDenomination(denomination) => {
                 self.settings.denomination = denomination;
                 // The rows hold formatted text, so they are rebuilt.

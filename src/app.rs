@@ -63,6 +63,7 @@ pub enum AppMsg {
     PrefsClosed,
     UnlockClosed,
     ToggleDenomination,
+    SetShowFiat(bool),
     /// Slide the wallet list in over preferences.
     ShowWallets,
     /// Re-present the password dialog for the wallet already on screen.
@@ -93,6 +94,7 @@ pub enum AppCmd {
     Progress(Option<Progress>),
     Warning(Option<Notice>),
     Revealed(Result<(String, Summary), String>),
+    Priced(Result<crate::price::Price, String>),
 }
 
 #[relm4::component(pub)]
@@ -305,6 +307,16 @@ impl Component for App {
                 self.rebuild_preferences(&sender);
             }
 
+            AppMsg::SetShowFiat(show) => {
+                self.settings.show_fiat = show;
+                self.settings.save();
+                if show {
+                    self.fetch_price(&sender);
+                } else {
+                    self.wallet.emit(WalletPageMsg::SetPrice(None));
+                }
+            }
+
             AppMsg::ShowWallets => {
                 self.chooser.emit(ChooserMsg::Refresh);
                 // Slides in over preferences with its own back button, rather
@@ -357,6 +369,8 @@ impl Component for App {
                 // import, the wallet is where you end up — and it is the root,
                 // so nothing is left behind to walk back through.
                 self.nav.replace_with_tags(&["wallet"]);
+
+                self.fetch_price(&sender);
 
                 if self.session.is_none() {
                     sender.oneshot_command(async move {
@@ -437,6 +451,15 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::ShowFreshAddress(address));
             }
+            AppCmd::Priced(Ok(price)) => {
+                self.wallet.emit(WalletPageMsg::SetPrice(Some(price)));
+            }
+            AppCmd::Priced(Err(message)) => {
+                // A missing price is not a wallet problem: the balance in
+                // bitcoin is the real number and is already on screen.
+                tracing::warn!(%message, "could not fetch a price");
+                self.wallet.emit(WalletPageMsg::SetPrice(None));
+            }
             AppCmd::Revealed(Err(message)) => {
                 tracing::error!(%message, "could not reveal an address");
                 self.wallet.emit(WalletPageMsg::Failed(message));
@@ -452,6 +475,30 @@ impl Component for App {
 }
 
 impl App {
+    /// Fetch a price, if the person asked for one and it would mean anything.
+    ///
+    /// Never on a test network: signet coins have no price, so a number there
+    /// would be fiction, and the request would be a disclosure bought for
+    /// nothing.
+    fn fetch_price(&self, sender: &ComponentSender<Self>) {
+        if !self.settings.show_fiat {
+            return;
+        }
+        let is_mainnet = self
+            .active
+            .as_ref()
+            .and_then(wallet::Meta::load)
+            .is_some_and(|m| m.network() == bdk_wallet::bitcoin::Network::Bitcoin);
+        if !is_mainnet {
+            self.wallet.emit(WalletPageMsg::SetPrice(None));
+            return;
+        }
+
+        sender.spawn_oneshot_command(|| {
+            AppCmd::Priced(crate::price::fetch().map_err(|e| e.to_string()))
+        });
+    }
+
     /// Close a dialog only if it is on screen. Closing one that was never
     /// presented is an Adwaita critical, and several paths here run whether or
     /// not the dialog was ever opened.
@@ -496,6 +543,22 @@ impl App {
             amounts.connect_activated(move |_| sender.input(AppMsg::ToggleDenomination));
         }
         display.add(&amounts);
+
+        let fiat = adw::SwitchRow::new();
+        fiat.set_title("Show value in dollars");
+        fiat.set_subtitle(
+            "Fetches a price from Bitfinex. This is the only connection Sieve makes that is \
+             not to the Bitcoin network. It sends no wallet data, but it does reveal your IP \
+             address and when you opened the wallet.",
+        );
+        fiat.set_active(self.settings.show_fiat);
+        {
+            let sender = sender.clone();
+            fiat.connect_active_notify(move |row| {
+                sender.input(AppMsg::SetShowFiat(row.is_active()));
+            });
+        }
+        display.add(&fiat);
         page.add(&display);
 
         let this = adw::PreferencesGroup::new();

@@ -63,6 +63,13 @@ fn group(n: u64) -> String {
 pub struct Settings {
     #[serde(default)]
     pub denomination: Denomination,
+    /// Whether to show a fiat value beside the balance.
+    ///
+    /// Off by default: fetching a price is the only connection Sieve makes
+    /// that is not Bitcoin peer-to-peer, and a wallet built to avoid
+    /// disclosures should not make one nobody asked for.
+    #[serde(default)]
+    pub show_fiat: bool,
 }
 
 fn path() -> PathBuf {

@@ -61,6 +61,14 @@ Two axes, kept separate:
 Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
 one `bdk_kyoto` node drives them all via `build_with_wallets`.
 
+## The one non-Bitcoin connection
+
+Fetching a price from Bitfinex is the only outbound request Sieve makes that is not Bitcoin
+peer-to-peer. It carries no wallet data, but it discloses this machine's IP and when the
+wallet was opened, so it is off by default, stated plainly in its preference row, and never
+made on a test network. If any other outbound call is ever added, it gets the same treatment:
+opt-in, disclosed, and justified in the row that enables it.
+
 ## Receiving
 
 `next_unused_address` never returns a *used* address, but it returns the same unused one
