@@ -6,46 +6,7 @@ use relm4::{adw, gtk};
 
 use crate::wallet::node::Progress;
 use crate::settings::{Denomination, Settings};
-use crate::wallet::{AccountSummary, Summary};
-
-/// One derivation path's row. A factory rather than a static list, because the
-/// number of paths depends on how the wallet was created.
-#[derive(Debug)]
-pub struct PathRow {
-    label: String,
-    amount: String,
-}
-
-#[relm4::factory(pub)]
-impl FactoryComponent for PathRow {
-    type Init = (AccountSummary, Denomination);
-    type Input = ();
-    type Output = ();
-    type CommandOutput = ();
-    type ParentWidget = gtk::ListBox;
-
-    view! {
-        adw::ActionRow {
-            set_title: &self.label,
-
-            add_suffix = &gtk::Label {
-                add_css_class: "numeric",
-                set_label: &self.amount,
-            },
-        }
-    }
-
-    fn init_model(
-        (summary, denomination): Self::Init,
-        _index: &DynamicIndex,
-        _sender: FactorySender<Self>,
-    ) -> Self {
-        PathRow {
-            label: summary.script_type.to_string(),
-            amount: denomination.format(summary.balance_sats),
-        }
-    }
-}
+use crate::wallet::Summary;
 
 #[derive(Debug)]
 pub enum WalletPageOutput {
@@ -161,7 +122,6 @@ pub struct WalletPage {
     summary: Option<Summary>,
     progress: Progress,
     peers: Option<(usize, usize)>,
-    paths: FactoryVecDeque<PathRow>,
     note: Option<String>,
     error: Option<String>,
     settings: Settings,
@@ -285,33 +245,6 @@ impl WalletPage {
         }
     }
 
-    /// A single-path wallet needs no breakdown; an imported one does.
-    fn has_breakdown(&self) -> bool {
-        self.summary.as_ref().is_some_and(|s| s.accounts.len() > 1)
-    }
-
-    /// The paths that were searched and came back empty.
-    ///
-    /// Listing them as one line rather than a row each keeps the reassurance —
-    /// they were checked, not skipped — without four rows of zeros.
-    fn searched_and_empty(&self) -> String {
-        let Some(summary) = &self.summary else { return String::new() };
-        let empty: Vec<&str> = summary
-            .accounts
-            .iter()
-            .filter(|a| a.balance_sats == 0 && a.pending_sats == 0)
-            .map(|a| a.script_type.label())
-            .collect();
-
-        if empty.is_empty() {
-            "Every path searched holds coins.".into()
-        } else if empty.len() == summary.accounts.len() {
-            format!("Searched, nothing found: {}.", empty.join(", "))
-        } else {
-            format!("Also searched, nothing found: {}.", empty.join(", "))
-        }
-    }
-
     fn syncing(&self) -> bool {
         !matches!(self.progress, Progress::Synced)
     }
@@ -340,12 +273,6 @@ impl Component for WalletPage {
                     set_title: "Sieve",
                     #[watch]
                     set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
-                },
-
-                pack_end = &gtk::Button {
-                    set_icon_name: "view-list-symbolic",
-                    set_tooltip_text: Some("Switch wallet"),
-                    connect_clicked => WalletPageMsg::SwitchWallet,
                 },
             },
 
@@ -565,20 +492,6 @@ impl Component for WalletPage {
                     },
 
                     adw::PreferencesGroup {
-                        set_title: "Derivation paths",
-                        #[watch]
-                        set_description: Some(&model.searched_and_empty()),
-                        #[watch]
-                        set_visible: model.has_breakdown(),
-
-                        #[local_ref]
-                        paths_box -> gtk::ListBox {
-                            add_css_class: "boxed-list",
-                            set_selection_mode: gtk::SelectionMode::None,
-                        },
-                    },
-
-                    adw::PreferencesGroup {
                         #[watch]
                         set_visible: model.error.is_some(),
 
@@ -661,7 +574,6 @@ impl Component for WalletPage {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let paths = FactoryVecDeque::builder().launch_default().detach();
         let transactions = FactoryVecDeque::builder().launch_default().forward(
             sender.input_sender(),
             |out| match out {
@@ -669,7 +581,6 @@ impl Component for WalletPage {
             },
         );
         let model = WalletPage {
-            paths,
             settings: Settings::load(),
             transactions,
             path_model: gtk::StringList::new(&[]),
@@ -682,7 +593,6 @@ impl Component for WalletPage {
             note: None,
             error: None,
         };
-        let paths_box = model.paths.widget();
         let tx_list = model.transactions.widget();
         let path_model = model.path_model.clone();
         let widgets = view_output!();
@@ -728,8 +638,7 @@ impl Component for WalletPage {
                 self.settings.save();
                 // The rows hold formatted text, so they are rebuilt.
                 if let Some(summary) = self.summary.clone() {
-                    self.rebuild_paths(&summary);
-                    self.rebuild_transactions(&summary);
+                        self.rebuild_transactions(&summary);
                 }
             }
             WalletPageMsg::Reset => {
@@ -742,7 +651,6 @@ impl Component for WalletPage {
                 self.fresh_address = None;
                 self.path_labels.clear();
                 self.path_model.splice(0, self.path_model.n_items(), &[]);
-                self.paths.guard().clear();
                 self.transactions.guard().clear();
             }
             WalletPageMsg::SwitchWallet => {
@@ -752,7 +660,6 @@ impl Component for WalletPage {
                 // Rebuild rather than diff: four rows, and the set only changes
                 // when a sync lands.
                 self.sync_path_picker(&summary);
-                self.rebuild_paths(&summary);
                 self.rebuild_transactions(&summary);
                 self.summary = Some(summary);
             }
@@ -887,19 +794,6 @@ impl WalletPage {
             .unwrap_or(0) as u32;
     }
 
-    /// Only paths holding something get a row; the rest are named in the group
-    /// description instead.
-    fn rebuild_paths(&mut self, summary: &Summary) {
-        let mut guard = self.paths.guard();
-        guard.clear();
-        if summary.accounts.len() > 1 {
-            for account in &summary.accounts {
-                if account.balance_sats > 0 || account.pending_sats > 0 {
-                    guard.push_back((account.clone(), self.settings.denomination));
-                }
-            }
-        }
-    }
 }
 
 /// A read-only label/value row, as used throughout the detail sheet.
