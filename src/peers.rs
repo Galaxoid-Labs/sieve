@@ -38,10 +38,17 @@ pub fn remembered(network: Network) -> Vec<IpAddr> {
 ///
 /// Called after a sync lands, so these are addresses that were part of one.
 pub fn remember(network: Network, addresses: &[String]) {
-    let keep: Vec<&String> = addresses
+    // Deduplicated: kyoto reports one entry per connection and several can
+    // carry the same address, so a naive copy fills the list with one peer.
+    // Seeding eight connections to a single node would concentrate every
+    // request on it — worse for speed and worse for privacy than not seeding.
+    let mut seen = std::collections::HashSet::new();
+    let keep: Vec<String> = addresses
         .iter()
         .filter(|a| a.parse::<IpAddr>().is_ok())
+        .filter(|a| seen.insert((*a).clone()))
         .take(KEEP)
+        .cloned()
         .collect();
     if keep.is_empty() {
         return;
@@ -76,6 +83,25 @@ mod tests {
         // A malformed entry must not poison the list for everything after it.
         let stored = ["1.2.3.4".to_string(), "nonsense".to_string(), "::1".to_string()];
         let kept: Vec<IpAddr> = stored.iter().filter_map(|s| s.parse().ok()).collect();
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn duplicates_are_not_remembered_repeatedly() {
+        // Several connections to one peer report the same address, and a list
+        // of one peer eight times is worse than an empty one.
+        let addresses = vec![
+            "1.2.3.4".to_string(),
+            "1.2.3.4".to_string(),
+            "5.6.7.8".to_string(),
+            "1.2.3.4".to_string(),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        let kept: Vec<&String> = addresses
+            .iter()
+            .filter(|a| a.parse::<IpAddr>().is_ok())
+            .filter(|a| seen.insert((*a).clone()))
+            .collect();
         assert_eq!(kept.len(), 2);
     }
 

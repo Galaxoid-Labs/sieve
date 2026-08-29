@@ -522,6 +522,13 @@ impl Session {
         }
 
         if let Ok(peers) = self.requester.peer_info().await {
+            // One entry per connection, and several connections can share an
+            // address, so the raw list shows the same peer repeatedly.
+            let mut seen = std::collections::HashSet::new();
+            let peers: Vec<_> = peers
+                .into_iter()
+                .filter(|(address, _)| seen.insert(format_address(address)))
+                .collect();
             info.peers = peers
                 .into_iter()
                 .map(|(address, services)| PeerInfo {
