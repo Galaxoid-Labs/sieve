@@ -774,10 +774,18 @@ impl Component for WalletPage {
                             gtk::Box {
                                 add_css_class: "card",
                                 set_halign: gtk::Align::Center,
+                                set_valign: gtk::Align::Center,
                                 set_overflow: gtk::Overflow::Hidden,
+                                // Fixed, so the card does not resize with the
+                                // code. A longer address needs a denser QR
+                                // version, and sizing to the texture made the
+                                // card jump every time the type changed.
+                                set_size_request: (280, 280),
 
                                 gtk::Picture {
-                                    set_size_request: (260, 260),
+                                    set_hexpand: true,
+                                    set_vexpand: true,
+                                    set_margin_all: 10,
                                     set_content_fit: gtk::ContentFit::Contain,
                                     #[watch]
                                     set_paintable: model.qr().as_ref(),
@@ -876,12 +884,10 @@ impl Component for WalletPage {
 
                             gtk::Label {
                                 add_css_class: "monospace",
-                                add_css_class: "card",
                                 set_wrap: true,
                                 set_wrap_mode: gtk::pango::WrapMode::WordChar,
                                 set_selectable: true,
                                 set_justify: gtk::Justification::Center,
-                                set_margin_all: 4,
                                 #[watch]
                                 set_label: &model.address(),
                             },
