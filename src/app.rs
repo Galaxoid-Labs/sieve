@@ -10,15 +10,17 @@ use adw::prelude::*;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
 
+use crate::ui::chooser::{Chooser, ChooserMsg, ChooserOutput};
 use crate::ui::onboarding::{Onboarding, OnboardingOutput};
 use crate::ui::restore::{Restore, RestoreOutput};
-use crate::ui::unlock::{Unlock, UnlockOutput};
+use crate::ui::unlock::{Unlock, UnlockMsg, UnlockOutput};
 use crate::ui::wallet_page::{WalletPage, WalletPageMsg};
 use crate::wallet::node::{Notice, Progress, Session};
-use crate::wallet::{Paths, Summary};
+use crate::wallet::{self, Paths, Summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    Chooser,
     Onboarding,
     Restore,
     Locked,
@@ -28,6 +30,7 @@ enum Screen {
 impl Screen {
     fn page(self) -> &'static str {
         match self {
+            Screen::Chooser => "chooser",
             Screen::Onboarding => "onboarding",
             Screen::Restore => "restore",
             Screen::Locked => "unlock",
@@ -38,8 +41,10 @@ impl Screen {
 
 pub struct App {
     screen: Screen,
-    paths: Paths,
+    /// The wallet currently open, if any.
+    active: Option<Paths>,
     session: Option<Arc<Session>>,
+    chooser: Controller<Chooser>,
     onboarding: Controller<Onboarding>,
     restore: Controller<Restore>,
     unlock: Controller<Unlock>,
@@ -50,6 +55,9 @@ pub struct App {
 pub enum AppMsg {
     ShowRestore,
     ShowWelcome,
+    ShowChooser,
+    /// Open a specific wallet from the chooser.
+    OpenWallet(String),
     /// A wallet now exists on disk, or an existing one was unlocked. Both
     /// arrive with a watch-only summary and nothing secret.
     Ready(Summary),
@@ -94,6 +102,7 @@ impl Component for App {
                 #[watch(skip_init)]
                 set_visible_child_name: model.screen.page(),
 
+                add_named: (model.chooser.widget(), Some("chooser")),
                 add_named: (model.onboarding.widget(), Some("onboarding")),
                 add_named: (model.restore.widget(), Some("restore")),
                 add_named: (model.unlock.widget(), Some("unlock")),
@@ -107,21 +116,35 @@ impl Component for App {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let paths = Paths::discover();
+        // Sieve used to keep a single wallet in the data root. Move it before
+        // listing, or an existing wallet would silently disappear.
+        wallet::migrate_legacy_layout();
 
-        // First run is decided by the vault, not the database: the database can
-        // be rebuilt from the seed, so only a missing vault means "no wallet".
-        let screen = if paths.is_initialised() { Screen::Locked } else { Screen::Onboarding };
-        tracing::debug!(?screen, vault = %paths.vault.display(), "starting");
+        let wallets = wallet::list_wallets();
+        let screen = match wallets.len() {
+            0 => Screen::Onboarding,
+            // One wallet needs no chooser; go straight to its unlock screen.
+            1 => Screen::Locked,
+            _ => Screen::Chooser,
+        };
+        tracing::debug!(?screen, wallets = wallets.len(), "starting");
 
-        let onboarding = Onboarding::builder().launch(paths.clone()).forward(
+        let chooser = Chooser::builder().launch(()).forward(
+            sender.input_sender(),
+            |out| match out {
+                ChooserOutput::Open(id) => AppMsg::OpenWallet(id),
+                ChooserOutput::New => AppMsg::ShowWelcome,
+                ChooserOutput::Import => AppMsg::ShowRestore,
+            },
+        );
+        let onboarding = Onboarding::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
                 OnboardingOutput::Created(summary) => AppMsg::Ready(summary),
                 OnboardingOutput::WantsRestore => AppMsg::ShowRestore,
             },
         );
-        let restore = Restore::builder().launch(paths.clone()).forward(
+        let restore = Restore::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
                 RestoreOutput::Imported(summary) => AppMsg::Ready(summary),
@@ -129,11 +152,17 @@ impl Component for App {
             },
         );
         let unlock = Unlock::builder()
-            .launch(paths.clone())
+            .launch(())
             .forward(sender.input_sender(), |out| match out {
                 UnlockOutput::Unlocked(summary) => AppMsg::Ready(summary),
+                UnlockOutput::SwitchWallet => AppMsg::ShowChooser,
             });
-        let wallet = WalletPage::builder().launch(()).detach();
+        let wallet = WalletPage::builder().launch(()).forward(
+            sender.input_sender(),
+            |out| match out {
+                crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowChooser,
+            },
+        );
 
         // `ColorScheme::Default` follows the desktop setting, which is what we
         // want — GNOME owns this preference, not the app. It is never overridden;
@@ -145,7 +174,17 @@ impl Component for App {
             move |manager| sender.input(AppMsg::ColorSchemeChanged(manager.is_dark()))
         });
 
-        let model = App { screen, paths, session: None, onboarding, restore, unlock, wallet };
+        let active = wallets.first().map(|w| Paths::for_wallet(&w.id));
+        if let (Screen::Locked, Some(entry)) = (screen, wallets.first()) {
+            unlock.emit(UnlockMsg::Open {
+                paths: Paths::for_wallet(&entry.id),
+                name: entry.name.clone(),
+            });
+        }
+
+        let model = App {
+            screen, active, session: None, chooser, onboarding, restore, unlock, wallet,
+        };
         let widgets = view_output!();
 
         // The stack shows its first child until told otherwise, and that child
@@ -164,8 +203,9 @@ impl Component for App {
                 self.screen = Screen::Unlocked;
 
                 // Start the light client once, on first entry to the wallet.
-                if self.session.is_none() {
-                    let paths = self.paths.clone();
+                if self.session.is_none()
+                    && let Some(paths) = self.active.clone()
+                {
                     sender.oneshot_command(async move {
                         AppCmd::Started(
                             Session::start(&paths).await.map(Arc::new).map_err(|e| e.to_string()),
@@ -175,6 +215,21 @@ impl Component for App {
             }
             AppMsg::ShowRestore => self.screen = Screen::Restore,
             AppMsg::ShowWelcome => self.screen = Screen::Onboarding,
+            AppMsg::ShowChooser => {
+                // Re-read from disk: a wallet may have been created since this
+                // screen was last shown.
+                self.chooser.emit(ChooserMsg::Refresh);
+                self.screen = Screen::Chooser;
+            }
+            AppMsg::OpenWallet(id) => {
+                let paths = Paths::for_wallet(&id);
+                let name = wallet::Meta::load(&paths)
+                    .map(|m| m.display_name(&id))
+                    .unwrap_or_else(|| id.clone());
+                self.unlock.emit(UnlockMsg::Open { paths: paths.clone(), name });
+                self.active = Some(paths);
+                self.screen = Screen::Locked;
+            }
             AppMsg::ColorSchemeChanged(dark) => {
                 tracing::debug!(dark, "system color scheme changed");
             }

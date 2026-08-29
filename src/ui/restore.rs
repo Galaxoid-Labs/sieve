@@ -58,7 +58,6 @@ pub enum RestoreCmd {
 }
 
 pub struct Restore {
-    paths: Paths,
     kind: CredentialKind,
     network: bdk_wallet::bitcoin::Network,
     busy: bool,
@@ -114,7 +113,7 @@ impl Restore {
 
 #[relm4::component(pub)]
 impl Component for Restore {
-    type Init = Paths;
+    type Init = ();
     type Input = RestoreMsg;
     type Output = RestoreOutput;
     type CommandOutput = RestoreCmd;
@@ -285,12 +284,11 @@ impl Component for Restore {
     }
 
     fn init(
-        paths: Self::Init,
+        _init: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let model = Restore {
-            paths,
             kind: CredentialKind::Mnemonic,
             network: bdk_wallet::bitcoin::Network::Signet,
             busy: false,
@@ -348,7 +346,9 @@ impl Component for Restore {
                 self.busy = true;
                 self.error = None;
 
-                let paths = self.paths.clone();
+                // A new wallet directory, so importing never disturbs an
+                // existing wallet.
+                let paths = Paths::for_wallet(&Paths::new_id());
                 let kind = submission.kind;
                 let credential = submission.credential.0.trim().to_owned();
                 let bip39 = submission.bip39_passphrase.0.clone();
@@ -368,6 +368,7 @@ impl Component for Restore {
                             &ScriptType::ALL,
                             ScriptType::NativeSegwit,
                             bip39.as_deref(),
+                            None,
                         ),
                         CredentialKind::Wif => wallet::import_wif(
                             &credential,
@@ -378,6 +379,7 @@ impl Component for Restore {
                             birthday,
                             &ScriptType::ALL,
                             ScriptType::NativeSegwit,
+                            None,
                         ),
                         CredentialKind::Descriptor => Err(anyhow::anyhow!(
                             "Descriptor import is not wired up yet."

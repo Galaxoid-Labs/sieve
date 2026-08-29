@@ -75,7 +75,6 @@ pub enum OnboardingCmd {
 }
 
 pub struct Onboarding {
-    paths: Paths,
     step: Step,
     /// Held only between generation and sealing.
     mnemonic: Option<Zeroizing<String>>,
@@ -139,7 +138,7 @@ fn pick_challenge() -> [usize; 3] {
 
 #[relm4::component(pub)]
 impl Component for Onboarding {
-    type Init = Paths;
+    type Init = ();
     type Input = OnboardingMsg;
     type Output = OnboardingOutput;
     type CommandOutput = OnboardingCmd;
@@ -363,12 +362,11 @@ impl Component for Onboarding {
     }
 
     fn init(
-        paths: Self::Init,
+        _init: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let model = Onboarding {
-            paths,
             step: Step::Welcome,
             mnemonic: None,
             password: None,
@@ -437,7 +435,9 @@ impl Component for Onboarding {
                 };
 
                 self.step = Step::Working;
-                let paths = self.paths.clone();
+                // Every creation mints a new wallet directory, so making
+                // another never disturbs one that already exists.
+                let paths = Paths::for_wallet(&Paths::new_id());
                 // A wallet created here is new, so its birthday is simply the
                 // newest checkpoint this build knows about.
                 let network = wallet::DEFAULT_NETWORK;
@@ -458,6 +458,7 @@ impl Component for Onboarding {
                             birthday,
                             &script_types,
                             primary,
+                            None,
                             None,
                         )
                             .map_err(|e| e.to_string()),

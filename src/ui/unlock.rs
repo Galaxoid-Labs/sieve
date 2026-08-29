@@ -27,10 +27,15 @@ impl std::fmt::Debug for Password {
 #[derive(Debug)]
 pub enum UnlockMsg {
     Submit(Password),
+    SwitchWallet,
+    /// Which wallet this screen is unlocking. Sent before the screen is shown.
+    Open { paths: Paths, name: String },
 }
 
 #[derive(Debug)]
 pub enum UnlockOutput {
+    /// Back to the wallet list.
+    SwitchWallet,
     /// The vault opened. Only the watch-only summary travels — the decrypted
     /// seed never crosses a component boundary.
     Unlocked(Summary),
@@ -42,14 +47,16 @@ pub enum UnlockCmd {
 }
 
 pub struct Unlock {
-    paths: Paths,
+    paths: Option<Paths>,
+    name: String,
+    many_wallets: bool,
     busy: bool,
     error: Option<String>,
 }
 
 #[relm4::component(pub)]
 impl Component for Unlock {
-    type Init = Paths;
+    type Init = ();
     type Input = UnlockMsg;
     type Output = UnlockOutput;
     type CommandOutput = UnlockCmd;
@@ -57,10 +64,18 @@ impl Component for Unlock {
     view! {
         adw::ToolbarView {
             add_top_bar = &adw::HeaderBar {
+                pack_start = &gtk::Button {
+                    set_icon_name: "view-list-symbolic",
+                    set_tooltip_text: Some("Switch wallet"),
+                    #[watch]
+                    set_visible: model.many_wallets,
+                    connect_clicked => UnlockMsg::SwitchWallet,
+                },
                 #[wrap(Some)]
                 set_title_widget = &adw::WindowTitle {
                     set_title: "Sieve",
-                    set_subtitle: "Locked",
+                    #[watch]
+                    set_subtitle: &model.name,
                 },
             },
 
@@ -123,25 +138,40 @@ impl Component for Unlock {
     }
 
     fn init(
-        paths: Self::Init,
+        _init: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let model = Unlock { paths, busy: false, error: None };
+        let model = Unlock {
+            paths: None,
+            name: String::new(),
+            many_wallets: false,
+            busy: false,
+            error: None,
+        };
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
+            UnlockMsg::SwitchWallet => {
+                let _ = sender.output(UnlockOutput::SwitchWallet);
+            }
+            UnlockMsg::Open { paths, name } => {
+                self.many_wallets = wallet::list_wallets().len() > 1;
+                self.paths = Some(paths);
+                self.name = name;
+                self.error = None;
+            }
             UnlockMsg::Submit(passphrase) => {
+                let Some(paths) = self.paths.clone() else { return };
                 if self.busy {
                     return;
                 }
                 self.busy = true;
                 self.error = None;
 
-                let paths = self.paths.clone();
                 // Blocking and CPU-bound: goes to the thread pool, not the
                 // main loop. `spawn_oneshot_command` cancels on shutdown.
                 sender.spawn_oneshot_command(move || {

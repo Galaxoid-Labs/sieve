@@ -57,6 +57,11 @@ impl FactoryComponent for PathRow {
     }
 }
 
+#[derive(Debug)]
+pub enum WalletPageOutput {
+    SwitchWallet,
+}
+
 pub struct WalletPage {
     summary: Option<Summary>,
     progress: Progress,
@@ -75,6 +80,7 @@ pub enum WalletPageMsg {
     Note(String),
     Failed(String),
     CopyAddress,
+    SwitchWallet,
 }
 
 impl WalletPage {
@@ -127,7 +133,7 @@ impl WalletPage {
 impl SimpleComponent for WalletPage {
     type Init = ();
     type Input = WalletPageMsg;
-    type Output = ();
+    type Output = WalletPageOutput;
 
     view! {
         adw::ToolbarView {
@@ -137,6 +143,12 @@ impl SimpleComponent for WalletPage {
                     set_title: "Sieve",
                     #[watch]
                     set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
+                },
+
+                pack_end = &gtk::Button {
+                    set_icon_name: "view-list-symbolic",
+                    set_tooltip_text: Some("Switch wallet"),
+                    connect_clicked => WalletPageMsg::SwitchWallet,
                 },
             },
 
@@ -293,8 +305,11 @@ impl SimpleComponent for WalletPage {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
+            WalletPageMsg::SwitchWallet => {
+                let _ = sender.output(WalletPageOutput::SwitchWallet);
+            }
             WalletPageMsg::Show(summary) => {
                 // Rebuild rather than diff: four rows, and the set only changes
                 // when a sync lands.

@@ -134,7 +134,10 @@ impl Session {
             anyhow::bail!("no wallet databases found — unlock first");
         }
 
-        let headers = dir.join("headers");
+        // Headers are public chain data and identical for every wallet, so a
+        // second wallet on a network Sieve has already seen starts with the
+        // chain already downloaded instead of fetching it again.
+        let headers = super::chain_dir(network);
         std::fs::create_dir_all(&headers)?;
 
         // Every path shares one node. A compact block filter covers a whole

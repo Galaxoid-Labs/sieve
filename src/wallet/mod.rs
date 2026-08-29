@@ -118,30 +118,133 @@ pub fn checkpoint_at_or_before(network: Network, height: u32) -> Checkpoint {
 /// public descriptors and chain data.
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// This wallet's own directory.
+    pub dir: PathBuf,
     pub vault: PathBuf,
+    /// Kept only to name the directory the per-path databases live in.
     pub db: PathBuf,
-    /// Public, password-free metadata: where this wallet's history can start.
+    /// Public, password-free metadata: network, birthday, derivation paths.
     /// Sync is watch-only, so this cannot live in the encrypted vault.
     pub meta: PathBuf,
 }
 
+/// Root of everything Sieve stores.
+pub fn data_root() -> PathBuf {
+    directories::ProjectDirs::from("com", "jdavis", "Sieve")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Where wallets live, one directory each.
+pub fn wallets_root() -> PathBuf {
+    data_root().join("wallets")
+}
+
+/// Block headers and peer records, shared by every wallet on a network.
+///
+/// Headers are public chain data and identical for all wallets, so a second
+/// wallet on a network it has already seen starts with the chain already
+/// downloaded instead of fetching it again.
+pub fn chain_dir(network: Network) -> PathBuf {
+    data_root().join("chain").join(network.to_string())
+}
+
 impl Paths {
-    pub fn discover() -> Self {
-        let dir = directories::ProjectDirs::from("com", "jdavis", "Sieve")
-            .map(|d| d.data_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
+    pub fn for_wallet(id: &str) -> Self {
+        let dir = wallets_root().join(id);
         Self {
             vault: dir.join("vault.sieve"),
             db: dir.join("wallet.sqlite"),
             meta: dir.join("wallet.meta.json"),
+            dir,
         }
     }
 
-    /// First run is "no vault", not "no database" — the database can be
-    /// rebuilt from the seed, so its absence is recoverable and the vault's is not.
+    /// An id no existing wallet is using.
+    pub fn new_id() -> String {
+        let mut bytes = [0u8; 6];
+        let _ = getrandom::fill(&mut bytes);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// First run is "no vault", not "no database" — the databases can be
+    /// rebuilt from the seed, so their absence is recoverable and the vault's
+    /// is not.
     pub fn is_initialised(&self) -> bool {
         self.vault.exists()
     }
+}
+
+/// A wallet as the chooser needs to show it: enough to pick one, and nothing
+/// that requires a password.
+#[derive(Debug, Clone)]
+pub struct WalletEntry {
+    pub id: String,
+    pub name: String,
+    pub network: String,
+}
+
+/// Every wallet on disk, newest-looking last.
+///
+/// A directory without readable metadata is skipped rather than failing the
+/// list — one broken wallet must not hide the others.
+pub fn list_wallets() -> Vec<WalletEntry> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(wallets_root()) else {
+        return found;
+    };
+
+    for entry in entries.flatten() {
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let paths = Paths::for_wallet(&id);
+        if !paths.is_initialised() {
+            continue;
+        }
+        match Meta::load(&paths) {
+            Some(meta) => found.push(WalletEntry {
+                name: meta.display_name(&id),
+                network: meta.network,
+                id,
+            }),
+            None => tracing::warn!(%id, "wallet has no readable metadata; skipping"),
+        }
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+/// Move a pre-multi-wallet installation into the new layout.
+///
+/// Sieve used to keep one wallet directly in the data root. Leaving it there
+/// would strand it, so it is moved into `wallets/<id>/` the first time this
+/// build runs. Returns the id if anything moved.
+pub fn migrate_legacy_layout() -> Option<String> {
+    let root = data_root();
+    let legacy_vault = root.join("vault.sieve");
+    if !legacy_vault.exists() {
+        return None;
+    }
+
+    let id = Paths::new_id();
+    let target = wallets_root().join(&id);
+    if std::fs::create_dir_all(&target).is_err() {
+        return None;
+    }
+
+    for name in ["vault.sieve", "wallet.meta.json"] {
+        let _ = std::fs::rename(root.join(name), target.join(name));
+    }
+    // Per-path databases, plus the older single-wallet database name.
+    for script_type in accounts::ScriptType::ALL {
+        let file = script_type.db_file();
+        let _ = std::fs::rename(root.join(&file), target.join(&file));
+    }
+    let _ = std::fs::rename(root.join("wallet.sqlite"), target.join("wallet.sqlite"));
+
+    tracing::info!(%id, "migrated the existing wallet into the multi-wallet layout");
+    Some(id)
 }
 
 /// Public, password-free facts about a wallet.
@@ -165,6 +268,9 @@ pub struct Meta {
     /// The path used for receiving.
     #[serde(default = "default_primary")]
     pub primary: accounts::ScriptType,
+    /// What the person called it. Absent for wallets created before naming.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 fn default_script_types() -> Vec<accounts::ScriptType> {
@@ -181,14 +287,24 @@ impl Meta {
         birthday: Checkpoint,
         script_types: Vec<accounts::ScriptType>,
         primary: accounts::ScriptType,
+        name: Option<String>,
     ) -> Self {
         Self {
+            name,
             network: network.to_string(),
             birthday_height: birthday.height,
             birthday_hash: birthday.hash.to_owned(),
             script_types,
             primary,
         }
+    }
+
+    /// A name to show, falling back to something stable rather than blank.
+    pub fn display_name(&self, id: &str) -> String {
+        self.name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| format!("Wallet {}", &id[..id.len().min(4)]))
     }
 
     pub fn network(&self) -> Network {
@@ -325,6 +441,7 @@ pub fn create(
     script_types: &[accounts::ScriptType],
     primary: accounts::ScriptType,
     bip39_passphrase: Option<&str>,
+    name: Option<String>,
 ) -> Result<Summary> {
     let xprv = xprv_from_mnemonic(mnemonic, bip39_passphrase, network)?;
     let mut portfolio =
@@ -332,7 +449,7 @@ pub fn create(
 
     // Recorded before the vault is written, so a wallet that exists at all has
     // a network and a birthday, and never falls back to scanning from genesis.
-    Meta::new(network, birthday, script_types.to_vec(), primary).save(paths)?;
+    Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
 
     let sealed = vault::seal(mnemonic.as_bytes(), password, &network.to_string(), kdf)?;
     vault::write_atomic(&paths.vault, &sealed)?;
@@ -350,10 +467,11 @@ pub fn import_wif(
     birthday: Checkpoint,
     script_types: &[accounts::ScriptType],
     primary: accounts::ScriptType,
+    name: Option<String>,
 ) -> Result<Summary> {
     let mut portfolio =
         accounts::Portfolio::create_from_wif(wif, data_dir(paths), script_types, primary, network)?;
-    Meta::new(network, birthday, script_types.to_vec(), primary).save(paths)?;
+    Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
 
     let sealed = vault::seal(wif.as_bytes(), password, &network.to_string(), kdf)?;
     vault::write_atomic(&paths.vault, &sealed)?;
@@ -538,6 +656,45 @@ mod tests {
         assert_eq!(seen.len(), 4);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wallets_do_not_share_a_directory() {
+        // The bug this prevents: creating a second wallet overwriting the
+        // first one's vault, which would destroy a seed.
+        let a = Paths::for_wallet("aaaa");
+        let b = Paths::for_wallet("bbbb");
+        assert_ne!(a.dir, b.dir);
+        assert_ne!(a.vault, b.vault);
+        assert_ne!(a.meta, b.meta);
+    }
+
+    #[test]
+    fn wallet_ids_do_not_collide() {
+        let ids: std::collections::HashSet<String> =
+            (0..64).map(|_| Paths::new_id()).collect();
+        assert_eq!(ids.len(), 64, "wallet ids must be unique");
+    }
+
+    #[test]
+    fn a_wallet_without_a_name_still_shows_something() {
+        let meta = Meta::new(
+            DEFAULT_NETWORK,
+            SIGNET_CHECKPOINTS[0],
+            vec![accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            None,
+        );
+        assert_eq!(meta.display_name("abcdef"), "Wallet abcd");
+
+        let named = Meta::new(
+            DEFAULT_NETWORK,
+            SIGNET_CHECKPOINTS[0],
+            vec![accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            Some("Spending".into()),
+        );
+        assert_eq!(named.display_name("abcdef"), "Spending");
     }
 
     #[test]
