@@ -457,6 +457,9 @@ impl Component for App {
                 match notice {
                     Notice::Peers { connected, required } => {
                         self.wallet.emit(WalletPageMsg::Peers { connected, required });
+                        // The peer list is a snapshot; without this it shows
+                        // whoever was connected when the last sync finished.
+                        sender.input(AppMsg::RefreshChain);
                     }
                     Notice::Problem(message) => self.wallet.emit(WalletPageMsg::Note(message)),
                     Notice::Ignorable => {}

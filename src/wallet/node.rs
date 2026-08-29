@@ -442,8 +442,24 @@ pub struct ChainInfo {
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     pub address: String,
-    /// Whether this peer serves the filters the wallet actually needs.
-    pub serves_filters: bool,
+    /// What the peer advertises, or `None` when nothing was reported.
+    ///
+    /// Kyoto leaves the service flags empty for connections whose version
+    /// message it has not recorded, and every real node advertises at least
+    /// NETWORK — so zero means "not known", not "serves nothing". Claiming the
+    /// latter told people their peers were useless when they were not.
+    pub serves_filters: Option<bool>,
+}
+
+/// A peer address as a person would write it, rather than as Rust prints it.
+fn format_address(address: &bdk_wallet::bitcoin::p2p::address::AddrV2) -> String {
+    use bdk_wallet::bitcoin::p2p::address::AddrV2;
+    match address {
+        AddrV2::Ipv4(ip) => ip.to_string(),
+        AddrV2::Ipv6(ip) => format!("[{ip}]"),
+        AddrV2::TorV3(_) => "Tor address".into(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// Blocks between difficulty adjustments.
@@ -496,9 +512,14 @@ impl Session {
             info.peers = peers
                 .into_iter()
                 .map(|(address, services)| PeerInfo {
-                    address: format!("{address:?}"),
-                    serves_filters: services
-                        .has(bdk_wallet::bitcoin::p2p::ServiceFlags::COMPACT_FILTERS),
+                    address: format_address(&address),
+                    serves_filters: (services
+                        != bdk_wallet::bitcoin::p2p::ServiceFlags::NONE)
+                        .then(|| {
+                            services.has(
+                                bdk_wallet::bitcoin::p2p::ServiceFlags::COMPACT_FILTERS,
+                            )
+                        }),
                 })
                 .collect();
         }

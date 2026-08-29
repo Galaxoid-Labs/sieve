@@ -24,7 +24,7 @@ pub enum WalletPageOutput {
 #[derive(Debug)]
 pub struct PeerRow {
     address: String,
-    serves_filters: bool,
+    serves_filters: Option<bool>,
 }
 
 #[relm4::factory(pub)]
@@ -41,19 +41,24 @@ impl FactoryComponent for PeerRow {
             set_title_lines: 1,
             // The distinction that matters: most of the network does not serve
             // filters, and a peer that does not cannot help this wallet sync.
-            set_subtitle: if self.serves_filters {
-                "Serves compact filters"
-            } else {
-                "No compact filters"
+            set_subtitle: match self.serves_filters {
+                Some(true) => "Serves compact filters",
+                Some(false) => "No compact filters",
+                // Kyoto reports nothing for some connections; saying so beats
+                // claiming the peer is useless when we simply do not know.
+                None => "Services not reported",
             },
 
             add_prefix = &gtk::Image {
-                set_icon_name: Some(if self.serves_filters {
-                    "network-wireless-symbolic"
-                } else {
-                    "network-offline-symbolic"
+                set_icon_name: Some(match self.serves_filters {
+                    Some(true) => "network-wireless-symbolic",
+                    Some(false) => "network-offline-symbolic",
+                    None => "network-idle-symbolic",
                 }),
-                set_css_classes: if self.serves_filters { &["success"] } else { &["dim-label"] },
+                set_css_classes: match self.serves_filters {
+                    Some(true) => &["success"],
+                    _ => &["dim-label"],
+                },
             },
         }
     }
@@ -434,8 +439,15 @@ impl WalletPage {
 
     fn peer_count(&self) -> String {
         let Some(chain) = &self.chain else { return "Connecting…".into() };
-        let serving = chain.peers.iter().filter(|p| p.serves_filters).count();
-        format!("{} connected · {serving} serving filters", chain.peers.len())
+        let serving = chain
+            .peers
+            .iter()
+            .filter(|p| p.serves_filters == Some(true))
+            .count();
+        match serving {
+            0 => format!("{} connected", chain.peers.len()),
+            n => format!("{} connected · {n} serving filters", chain.peers.len()),
+        }
     }
 
     fn has_transactions(&self) -> bool {
