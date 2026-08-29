@@ -452,10 +452,15 @@ impl Component for Onboarding {
                 // newest checkpoint this build knows about.
                 let network = wallet::DEFAULT_NETWORK;
                 let birthday = wallet::checkpoints(network)[0];
-                // A wallet Sieve creates is taproot only. Other paths are for
-                // seeds that came from elsewhere.
+                // Taproot to receive on, with native segwit alongside it.
+                // Taproot is the better address to hand out — a single-sig
+                // spend is indistinguishable from any other key-path spend —
+                // but plenty of exchanges still refuse to send to bc1p, and a
+                // wallet nobody can pay is a wallet with a hole in it. Legacy
+                // and nested are not derived: a new wallet has no history on
+                // them and nothing sends to them by preference.
                 let primary = wallet::accounts::ScriptType::Taproot;
-                let script_types = vec![primary];
+                let script_types = vec![primary, wallet::accounts::ScriptType::NativeSegwit];
                 // Argon2 and the database write both block. Off the main thread.
                 let created_paths = paths.clone();
                 sender.spawn_oneshot_command(move || {
