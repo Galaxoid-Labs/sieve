@@ -40,6 +40,13 @@ pub struct App {
 #[derive(Debug)]
 pub enum AppMsg {
     Unlocked,
+    /// The desktop switched between light and dark.
+    ///
+    /// Stock Adwaita widgets and style classes recolour themselves, so nothing
+    /// here has to react yet. Anything we draw ourselves does — the receive-page
+    /// QR code lands in a `gtk::DrawingArea`, and a QR drawn with hardcoded
+    /// black-on-white becomes invisible in dark mode.
+    ColorSchemeChanged(bool),
 }
 
 /// `$XDG_DATA_HOME/sieve/vault.sieve`.
@@ -80,7 +87,10 @@ impl SimpleComponent for App {
                 #[wrap(Some)]
                 set_content = &gtk::Stack {
                     set_transition_type: gtk::StackTransitionType::Crossfade,
-                    #[watch]
+                    // skip_init: the stack has no children yet when init-time
+                    // property assignment runs, and it defaults to showing the
+                    // first one added, which is already the correct state.
+                    #[watch(skip_init)]
                     set_visible_child_name: model.screen.page(),
 
                     add_named: (model.unlock.widget(), Some("unlock")),
@@ -103,6 +113,16 @@ impl SimpleComponent for App {
 
         let wallet = WalletPage::builder().launch(()).detach();
 
+        // `ColorScheme::Default` follows the desktop setting, which is what we
+        // want — GNOME owns this preference, not the app. It is never overridden;
+        // we only listen so custom-drawn content can repaint.
+        let style = adw::StyleManager::default();
+        tracing::debug!(dark = style.is_dark(), "following the system color scheme");
+        style.connect_dark_notify({
+            let sender = sender.clone();
+            move |manager| sender.input(AppMsg::ColorSchemeChanged(manager.is_dark()))
+        });
+
         let model = App { screen: Screen::Locked, unlock, wallet };
         let widgets = view_output!();
         ComponentParts { model, widgets }
@@ -111,6 +131,9 @@ impl SimpleComponent for App {
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
             AppMsg::Unlocked => self.screen = Screen::Unlocked,
+            AppMsg::ColorSchemeChanged(dark) => {
+                tracing::debug!(dark, "system color scheme changed");
+            }
         }
     }
 }

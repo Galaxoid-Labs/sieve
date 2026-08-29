@@ -23,7 +23,15 @@ These are not preferences. Violating one is a bug, not a style difference.
 4. **The wallet is watch-only by default.** `bdk_wallet::ChangeSet` persists only
    `Descriptor<DescriptorPublicKey>`, so the SQLite store contains no private keys. Browsing
    balances and building PSBTs must not require an unlock. Decrypt only to sign.
-5. **Argon2 never runs on the main thread.** `sender.spawn_oneshot_command(...)`. A blocked frame
+5. **Light and dark follow the desktop, automatically.** The `libadwaita` feature makes
+   `RelmApp::new` build an `adw::Application`, and `ColorScheme::Default` already follows the
+   system preference — never call `set_color_scheme` to force one. Consequently: no hardcoded
+   colors, ever. Use Adwaita style classes (`suggested-action`, `destructive-action`, `error`,
+   `warning`, `dim-label`, `pill`, `card`) and Adwaita named colors in any custom CSS, since those
+   recolor themselves. Anything drawn by hand into a `gtk::DrawingArea` must read
+   `StyleManager::is_dark()` and repaint on `AppMsg::ColorSchemeChanged`, which `app.rs` already
+   wires up — a QR code drawn black-on-white disappears in dark mode.
+6. **Argon2 never runs on the main thread.** `sender.spawn_oneshot_command(...)`. A blocked frame
    clock is a visible stall.
 
 ## Layout
@@ -83,3 +91,6 @@ factories, Adwaita patterns). Consult it rather than guessing at macro syntax.
 First-run onboarding (seed generation, mnemonic display, `vault::seal`), the signer worker, the
 `bdk_kyoto` node wiring, and the primary menu. `vault::seal` and `vault::write_atomic` exist and
 are tested but not yet called — hence the `#![allow(dead_code)]` in `vault`.
+
+The full milestone plan (M0–M8, with the decisions that gate M1 and the mainnet gate at M8) is in
+`ROADMAP.md`.
