@@ -364,9 +364,16 @@ impl Component for WalletPage {
         adw::BreakpointBin {
             set_size_request: (360, 300),
 
+            // The overlay wraps the whole navigation view rather than one
+            // page's content: a toast raised while a transaction is open has
+            // to float over that page, not underneath it.
             #[wrap(Some)]
-            #[name(inner_nav)]
-            set_child = &adw::NavigationView {
+            #[local_ref]
+            set_child = toast_overlay -> adw::ToastOverlay {
+
+                #[wrap(Some)]
+                #[name(inner_nav)]
+                set_child = &adw::NavigationView {
 
                 #[name(main_page)]
                 adw::NavigationPage {
@@ -421,13 +428,8 @@ impl Component for WalletPage {
             },
 
             #[wrap(Some)]
-            #[local_ref]
-            set_content = toast_overlay -> adw::ToastOverlay {
-                set_vexpand: true,
-
-                #[wrap(Some)]
-                #[name(view_stack)]
-                set_child = &adw::ViewStack {
+            #[name(view_stack)]
+            set_content = &adw::ViewStack {
 
                 add_titled_with_icon[Some("activity"), "Activity", "document-open-recent-symbolic"] =
                 &gtk::ScrolledWindow {
@@ -682,13 +684,13 @@ impl Component for WalletPage {
                 },
 
             },
-            },
 
                 // Revealed by the breakpoint below, when the header has no
                 // room for the switcher.
                 #[name(switcher_bar)]
                 add_bottom_bar = &adw::ViewSwitcherBar {},
                     },
+                },
                 },
             },
         }
@@ -852,10 +854,14 @@ impl WalletPage {
         let Some(tx) = summary.transactions.iter().find(|t| t.txid == txid) else {
             return;
         };
+        // BreakpointBin -> ToastOverlay -> NavigationView.
         let Some(nav) = root
             .child()
+            .and_then(|child| child.downcast::<adw::ToastOverlay>().ok())
+            .and_then(|overlay| overlay.child())
             .and_then(|child| child.downcast::<adw::NavigationView>().ok())
         else {
+            tracing::warn!("could not find the wallet's navigation view");
             return;
         };
 
