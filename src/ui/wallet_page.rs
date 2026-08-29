@@ -171,6 +171,7 @@ pub enum WalletPageMsg {
     /// Clear everything that belonged to a different wallet.
     Reset,
     SetLocked(bool),
+    ShowPreferences,
     SetName(String),
     RequestUnlock,
 }
@@ -283,6 +284,14 @@ impl Component for WalletPage {
                     set_title: &model.name,
                     #[watch]
                     set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
+                },
+
+                // Preferences belong in a dialog reached from the header, not
+                // in the switcher beside the things you actually do with money.
+                pack_end = &gtk::Button {
+                    set_icon_name: "preferences-system-symbolic",
+                    set_tooltip_text: Some("Preferences"),
+                    connect_clicked => WalletPageMsg::ShowPreferences,
                 },
             },
 
@@ -538,59 +547,6 @@ impl Component for WalletPage {
                     },
                 },
 
-                add_titled_with_icon[Some("settings"), "Settings", "preferences-system-symbolic"] =
-                &adw::PreferencesPage {
-
-                    adw::PreferencesGroup {
-                        set_title: "Display",
-
-                        adw::ActionRow {
-                            set_title: "Amounts",
-                            set_activatable: true,
-                            #[watch]
-                            set_subtitle: match model.settings.denomination {
-                                crate::settings::Denomination::Sats => "Satoshis",
-                                crate::settings::Denomination::Btc => "Decimal BTC",
-                            },
-                            connect_activated => WalletPageMsg::ToggleDenomination,
-
-                            add_suffix = &gtk::Label {
-                                add_css_class: "dim-label",
-                                #[watch]
-                                set_label: model.settings.denomination.label(),
-                            },
-                        },
-                    },
-
-                    adw::PreferencesGroup {
-                        set_title: "This wallet",
-
-                        adw::ActionRow {
-                            set_title: "Chain",
-                            #[watch]
-                            set_subtitle: model.summary.as_ref()
-                                .map_or("—", |s| s.network.as_str()),
-                        },
-
-                        adw::ActionRow {
-                            set_title: "Derivation paths watched",
-                            #[watch]
-                            set_subtitle: &model.paths_watched(),
-                            set_subtitle_lines: 2,
-                        },
-
-                        adw::ActionRow {
-                            set_title: "Switch wallet",
-                            set_subtitle: "Open a different wallet, or make another",
-                            set_activatable: true,
-                            connect_activated => WalletPageMsg::SwitchWallet,
-
-                            add_suffix = &gtk::Image {
-                                set_icon_name: Some("go-next-symbolic"),
-                            },
-                        },
-                    },
-                },
             },
 
                 // Revealed by the breakpoint below, when the header has no
@@ -676,6 +632,7 @@ impl Component for WalletPage {
                         self.rebuild_transactions(&summary);
                 }
             }
+            WalletPageMsg::ShowPreferences => self.show_preferences(root, &sender),
             WalletPageMsg::SetLocked(locked) => self.locked = locked,
             WalletPageMsg::SetName(name) => self.name = name,
             WalletPageMsg::RequestUnlock => {
@@ -732,6 +689,82 @@ impl WalletPage {
         for tx in &summary.transactions {
             guard.push_back((tx.clone(), self.settings.denomination, summary.tip));
         }
+    }
+
+    /// Present preferences.
+    ///
+    /// Built fresh each time rather than held: it is a snapshot of a handful of
+    /// values, and keeping a live dialog around means keeping references to its
+    /// rows just to update text nobody is looking at most of the time.
+    fn show_preferences(&self, root: &adw::BreakpointBin, sender: &ComponentSender<Self>) {
+        let page = adw::PreferencesPage::new();
+
+        let display = adw::PreferencesGroup::new();
+        display.set_title("Display");
+
+        let amounts = adw::ActionRow::new();
+        amounts.set_title("Amounts");
+        amounts.set_activatable(true);
+        let unit = gtk::Label::new(None);
+        unit.add_css_class("dim-label");
+        amounts.add_suffix(&unit);
+
+        // The row keeps its own copy so it can relabel itself while open; the
+        // message keeps the component and the saved setting in step.
+        let current = std::cell::Cell::new(self.settings.denomination);
+        let describe = |d: crate::settings::Denomination| match d {
+            crate::settings::Denomination::Sats => "Satoshis",
+            crate::settings::Denomination::Btc => "Decimal BTC",
+        };
+        amounts.set_subtitle(describe(current.get()));
+        unit.set_label(current.get().label());
+
+        {
+            let sender = sender.clone();
+            let row = amounts.clone();
+            let unit = unit.clone();
+            amounts.connect_activated(move |_| {
+                let next = current.get().toggled();
+                current.set(next);
+                row.set_subtitle(describe(next));
+                unit.set_label(next.label());
+                sender.input(WalletPageMsg::ToggleDenomination);
+            });
+        }
+        display.add(&amounts);
+        page.add(&display);
+
+        let this = adw::PreferencesGroup::new();
+        this.set_title("This wallet");
+        this.add(&detail_row(
+            "Chain",
+            self.summary.as_ref().map_or("—", |s| s.network.as_str()),
+        ));
+        this.add(&detail_row("Derivation paths watched", &self.paths_watched()));
+
+        let switch = adw::ActionRow::new();
+        switch.set_title("Switch wallet");
+        switch.set_subtitle("Open a different wallet, or make another");
+        switch.set_activatable(true);
+        switch.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        page.add(&this);
+
+        let dialog = adw::PreferencesDialog::new();
+        dialog.add(&page);
+
+        {
+            let sender = sender.clone();
+            let dialog = dialog.clone();
+            switch.connect_activated(move |_| {
+                // Close first: the list is a different place, not something
+                // layered over this one.
+                dialog.close();
+                sender.input(WalletPageMsg::SwitchWallet);
+            });
+        }
+        this.add(&switch);
+
+        dialog.present(Some(root));
     }
 
     /// Present the detail sheet for one transaction.
