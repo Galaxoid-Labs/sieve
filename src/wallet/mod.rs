@@ -202,13 +202,22 @@ pub fn list_wallets() -> Vec<WalletEntry> {
         if !paths.is_initialised() {
             continue;
         }
+        // A vault exists, so a seed exists. Never hide it because a sidecar
+        // file could not be parsed — show it and let the user open it.
         match Meta::load(&paths) {
             Some(meta) => found.push(WalletEntry {
                 name: meta.display_name(&id),
                 network: meta.network,
                 id,
             }),
-            None => tracing::warn!(%id, "wallet has no readable metadata; skipping"),
+            None => {
+                tracing::warn!(%id, "wallet metadata is unreadable; listing it anyway");
+                found.push(WalletEntry {
+                    name: format!("Wallet {}", &id[..id.len().min(4)]),
+                    network: "unknown".into(),
+                    id,
+                });
+            }
         }
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
@@ -273,6 +282,13 @@ pub struct Meta {
     pub name: Option<String>,
 }
 
+/// Sieve's first metadata format: a birthday and nothing else.
+#[derive(serde::Deserialize)]
+struct LegacyBirthday {
+    height: u32,
+    hash: String,
+}
+
 fn default_script_types() -> Vec<accounts::ScriptType> {
     vec![accounts::ScriptType::Taproot]
 }
@@ -312,7 +328,25 @@ impl Meta {
     }
 
     pub fn load(paths: &Paths) -> Option<Self> {
-        serde_json::from_slice(&std::fs::read(&paths.meta).ok()?).ok()
+        let bytes = std::fs::read(&paths.meta).ok()?;
+        if let Ok(meta) = serde_json::from_slice::<Self>(&bytes) {
+            return Some(meta);
+        }
+        // Sieve's first metadata format recorded only a birthday, and only
+        // signet existed. Upgrading in place beats refusing to open a wallet
+        // that holds a seed.
+        let legacy: LegacyBirthday = serde_json::from_slice(&bytes).ok()?;
+        tracing::info!("upgrading a wallet from the first metadata format");
+        let upgraded = Meta {
+            name: None,
+            network: Network::Signet.to_string(),
+            birthday_height: legacy.height,
+            birthday_hash: legacy.hash,
+            script_types: default_script_types(),
+            primary: default_primary(),
+        };
+        let _ = upgraded.save(paths);
+        Some(upgraded)
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
@@ -548,6 +582,7 @@ mod tests {
             &[accounts::ScriptType::Taproot],
             accounts::ScriptType::Taproot,
             None,
+            None,
         )
         .unwrap()
     }
@@ -561,6 +596,7 @@ mod tests {
             vault: dir.join("vault.sieve"),
             db: dir.join("wallet.sqlite"),
             meta: dir.join("wallet.meta.json"),
+            dir,
         }
     }
 
@@ -656,6 +692,29 @@ mod tests {
         assert_eq!(seen.len(), 4);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_first_metadata_format_still_opens() {
+        // The regression this pins: a schema change hid a wallet that held a
+        // seed, because list_wallets skipped anything it could not parse.
+        let paths = scratch("legacy-meta");
+        std::fs::write(
+            &paths.meta,
+            br#"{"height":319000,"hash":"000000021cefaf18c0d9f75944d79689bde29448c55ff00c65c0022814f40578"}"#,
+        )
+        .unwrap();
+
+        let meta = Meta::load(&paths).expect("the first metadata format must still load");
+        assert_eq!(meta.birthday_height, 319_000);
+        assert_eq!(meta.network(), Network::Signet);
+        assert_eq!(meta.script_types, vec![accounts::ScriptType::Taproot]);
+
+        // And it is rewritten in the current format, so this happens once.
+        let reread: Meta = serde_json::from_slice(&std::fs::read(&paths.meta).unwrap()).unwrap();
+        assert_eq!(reread.birthday_height, 319_000);
+
+        std::fs::remove_dir_all(&paths.dir).ok();
     }
 
     #[test]
