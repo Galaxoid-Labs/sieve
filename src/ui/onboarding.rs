@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use crate::wallet::{self, Paths, Summary};
 
 /// Secret string with a redacted `Debug`, so relm4's message tracing can never
-/// print a passphrase or a recovery phrase.
+/// print a password or a recovery phrase.
 pub struct Secret(Zeroizing<String>);
 
 impl std::fmt::Debug for Secret {
@@ -26,7 +26,7 @@ impl std::fmt::Debug for Secret {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     Welcome,
-    Passphrase,
+    Password,
     Phrase,
     Verify,
     Working,
@@ -36,7 +36,7 @@ impl Step {
     fn tag(self) -> &'static str {
         match self {
             Step::Welcome => "welcome",
-            Step::Passphrase => "passphrase",
+            Step::Password => "passphrase",
             Step::Phrase => "phrase",
             Step::Verify => "verify",
             Step::Working => "working",
@@ -46,8 +46,8 @@ impl Step {
     fn previous(self) -> Option<Step> {
         match self {
             Step::Welcome | Step::Working => None,
-            Step::Passphrase => Some(Step::Welcome),
-            Step::Phrase => Some(Step::Passphrase),
+            Step::Password => Some(Step::Welcome),
+            Step::Phrase => Some(Step::Password),
             Step::Verify => Some(Step::Phrase),
         }
     }
@@ -57,7 +57,7 @@ impl Step {
 pub enum OnboardingMsg {
     Begin,
     Back,
-    SetPassphrase(Secret, Secret),
+    SetPassword(Secret, Secret),
     PhraseWritten,
     Verify(Secret, Secret, Secret),
 }
@@ -77,7 +77,7 @@ pub struct Onboarding {
     step: Step,
     /// Held only between generation and sealing.
     mnemonic: Option<Zeroizing<String>>,
-    passphrase: Option<Zeroizing<String>>,
+    password: Option<Zeroizing<String>>,
     /// 1-based word positions the user must type back.
     challenge: [usize; 3],
     error: Option<String>,
@@ -151,7 +151,7 @@ impl Component for Onboarding {
                     #[watch]
                     set_subtitle: match model.step {
                         Step::Welcome => "Set up",
-                        Step::Passphrase => "Step 1 of 3",
+                        Step::Password => "Step 1 of 3",
                         Step::Phrase => "Step 2 of 3",
                         Step::Verify => "Step 3 of 3",
                         Step::Working => "Creating",
@@ -205,11 +205,12 @@ impl Component for Onboarding {
                 },
 
                 // ---- passphrase ----
-                add_named[Some("passphrase")] = &adw::StatusPage {
-                    set_title: "Choose a passphrase",
+                add_named[Some("password")] = &adw::StatusPage {
+                    set_title: "Choose a password",
                     set_description: Some(
-                        "This encrypts your wallet on this computer. It is not part of \
-                         your recovery phrase, and it cannot be recovered if you forget it."
+                        "This locks the wallet on this computer. It is not part of your \
+                         recovery phrase — if you forget it you can still restore from \
+                         those twelve words."
                     ),
 
                     #[wrap(Some)]
@@ -222,11 +223,11 @@ impl Component for Onboarding {
                             adw::PreferencesGroup {
                                 #[name(pass_row)]
                                 adw::PasswordEntryRow {
-                                    set_title: "Passphrase",
+                                    set_title: "Password",
                                 },
                                 #[name(confirm_row)]
                                 adw::PasswordEntryRow {
-                                    set_title: "Confirm passphrase",
+                                    set_title: "Confirm password",
                                 },
                             },
 
@@ -236,7 +237,7 @@ impl Component for Onboarding {
                                 set_halign: gtk::Align::Center,
                                 set_label: "Continue",
                                 connect_clicked[sender, pass_row, confirm_row] => move |_| {
-                                    sender.input(OnboardingMsg::SetPassphrase(
+                                    sender.input(OnboardingMsg::SetPassword(
                                         Secret(Zeroizing::new(pass_row.text().to_string())),
                                         Secret(Zeroizing::new(confirm_row.text().to_string())),
                                     ));
@@ -369,7 +370,7 @@ impl Component for Onboarding {
             paths,
             step: Step::Welcome,
             mnemonic: None,
-            passphrase: None,
+            password: None,
             challenge: [1, 2, 3],
             error: None,
         };
@@ -380,7 +381,7 @@ impl Component for Onboarding {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         self.error = None;
         match msg {
-            OnboardingMsg::Begin => self.step = Step::Passphrase,
+            OnboardingMsg::Begin => self.step = Step::Password,
 
             OnboardingMsg::Back => {
                 if let Some(previous) = self.step.previous() {
@@ -388,19 +389,19 @@ impl Component for Onboarding {
                 }
             }
 
-            OnboardingMsg::SetPassphrase(pass, confirm) => {
+            OnboardingMsg::SetPassword(pass, confirm) => {
                 if pass.0.len() < 8 {
                     self.error = Some("Use at least 8 characters.".into());
                     return;
                 }
                 if *pass.0 != *confirm.0 {
-                    self.error = Some("The two passphrases do not match.".into());
+                    self.error = Some("The two passwords do not match.".into());
                     return;
                 }
                 match wallet::generate_mnemonic() {
                     Ok(phrase) => {
                         self.mnemonic = Some(phrase);
-                        self.passphrase = Some(pass.0);
+                        self.password = Some(pass.0);
                         self.challenge = pick_challenge();
                         self.step = Step::Phrase;
                     }
@@ -423,8 +424,8 @@ impl Component for Onboarding {
                     return;
                 }
 
-                let (Some(mnemonic), Some(passphrase)) =
-                    (self.mnemonic.clone(), self.passphrase.clone())
+                let (Some(mnemonic), Some(password)) =
+                    (self.mnemonic.clone(), self.password.clone())
                 else {
                     self.error = Some("The setup state was lost. Start again.".into());
                     return;
@@ -437,7 +438,7 @@ impl Component for Onboarding {
                     OnboardingCmd::Created(
                         wallet::create(
                             &mnemonic,
-                            passphrase.as_bytes(),
+                            password.as_bytes(),
                             &paths,
                             crate::vault::KdfParams::default(),
                         )
@@ -459,7 +460,7 @@ impl Component for Onboarding {
             Ok(summary) => {
                 // The wallet exists on disk now; drop everything secret.
                 self.mnemonic = None;
-                self.passphrase = None;
+                self.password = None;
                 let _ = sender.output(OnboardingOutput::Created(summary));
             }
             Err(message) => {

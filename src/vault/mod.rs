@@ -50,11 +50,15 @@ pub struct KdfParams {
 }
 
 impl Default for KdfParams {
-    /// Desktop-class defaults: 512 MiB and 4 passes. Well above the OWASP
-    /// floor, because this gates a seed phrase and a ~0.5s unlock is fine in a
-    /// GUI. Deliberately not tunable from the UI.
+    /// Measured on desktop hardware (see the `kdf_cost` test): 256 MiB and 3
+    /// passes costs ~0.7s, where 512 MiB and 4 passes cost 2.1s. Both are far
+    /// above the OWASP floor; 0.7s is the most cost we can buy before an unlock
+    /// starts feeling broken. Deliberately not tunable from the UI.
+    ///
+    /// Changing this does not strand existing wallets — the parameters used to
+    /// seal a file travel in its header.
     fn default() -> Self {
-        Self { m_cost: 512 * 1024, t_cost: 4, p_cost: 4 }
+        Self { m_cost: 256 * 1024, t_cost: 3, p_cost: 4 }
     }
 }
 
@@ -129,8 +133,8 @@ fn take<'a>(blob: &'a [u8], cursor: &mut usize, n: usize) -> Result<&'a [u8]> {
 
 /// Decrypt a blob produced by [`seal`].
 ///
-/// A wrong passphrase and a corrupt file are indistinguishable by design — both
-/// surface as an authentication failure.
+/// A wrong password and a damaged file are indistinguishable by design — both
+/// surface as an authentication failure, so the message names both.
 pub fn open(blob: &[u8], passphrase: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let mut cursor = 0usize;
 
@@ -154,7 +158,7 @@ pub fn open(blob: &[u8], passphrase: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let kek = derive_kek(passphrase, &salt, header.kdf)?;
     let mut dek = XChaCha20Poly1305::new((&*kek).into())
         .decrypt(&XNonce::from(nonce_kek), Payload { msg: &wrapped, aad })
-        .map_err(|_| anyhow::anyhow!("incorrect passphrase, or the vault file was modified"))?;
+        .map_err(|_| anyhow::anyhow!("Incorrect password, or the wallet file has been damaged."))?;
 
     let dek_key: &[u8; KEY_LEN] = dek
         .as_slice()
@@ -174,6 +178,38 @@ mod tests {
 
     /// Cheap parameters so the suite stays fast; production uses the defaults.
     const FAST: KdfParams = KdfParams { m_cost: 8, t_cost: 1, p_cost: 1 };
+
+    /// Not run by default — it exists to measure the KDF cost on real hardware
+    /// before the parameters are locked into shipped vault files.
+    ///
+    ///     cargo test --release -- --ignored --nocapture kdf_cost
+    #[test]
+    #[ignore]
+    fn kdf_cost() {
+        // Cost is roughly m_cost * t_cost; lanes only buy parallelism.
+        let candidates = [
+            KdfParams { m_cost: 512 * 1024, t_cost: 4, p_cost: 4 },
+            KdfParams { m_cost: 512 * 1024, t_cost: 2, p_cost: 4 },
+            KdfParams { m_cost: 256 * 1024, t_cost: 3, p_cost: 4 },
+            KdfParams { m_cost: 256 * 1024, t_cost: 2, p_cost: 4 },
+            KdfParams { m_cost: 128 * 1024, t_cost: 3, p_cost: 4 },
+            KdfParams { m_cost: 64 * 1024, t_cost: 3, p_cost: 4 },
+        ];
+
+        for params in candidates {
+            let start = std::time::Instant::now();
+            let sealed = seal(b"seed", b"passphrase", "signet", params).unwrap();
+            let elapsed = start.elapsed();
+            open(&sealed, b"passphrase").unwrap();
+            println!(
+                "m={:>4} MiB t={} p={}  ->  {:.2}s",
+                params.m_cost / 1024,
+                params.t_cost,
+                params.p_cost,
+                elapsed.as_secs_f64(),
+            );
+        }
+    }
 
     #[test]
     fn roundtrip() {
@@ -210,6 +246,17 @@ mod tests {
         let sealed = seal(b"seed", b"hunter2", "bitcoin", FAST).unwrap();
         assert!(open(&sealed[..sealed.len() / 2], b"hunter2").is_err());
         assert!(open(b"", b"hunter2").is_err());
+    }
+
+    #[test]
+    fn params_are_read_from_the_header_not_the_default() {
+        // A file sealed with old, expensive parameters must still open after
+        // the default is retuned. This is what makes the default safe to change.
+        let old = KdfParams { m_cost: 32, t_cost: 7, p_cost: 1 };
+        assert_ne!(old.t_cost, KdfParams::default().t_cost);
+
+        let sealed = seal(b"seed", b"pw", "signet", old).unwrap();
+        assert_eq!(open(&sealed, b"pw").unwrap().as_slice(), b"seed");
     }
 
     #[test]

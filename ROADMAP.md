@@ -15,7 +15,7 @@ a migration and a re-scan.
 | Script type | **BIP86 taproot** | Single-sig key-path spends are indistinguishable on-chain. Costs acceptance at a few older services that reject `bc1p`. |
 | Dev network | **Signet** (regtest for tests) | Real block times and enough `NODE_COMPACT_FILTERS` peers to exercise sync honestly. |
 | Phrase length | **12 words**, not user-selectable | 128 bits is beyond brute force; transcription error is the realistic loss vector. |
-| Passphrase semantics | **Vault encryption only** | A BIP-39 passphrase would make a typo derive a different empty wallet instead of erroring. Defer it. |
+| Password vs passphrase | **Both, named distinctly** | The *password* always encrypts the file. The *passphrase* is the optional BIP-39 25th word. A wrong password errors; a wrong passphrase silently derives an empty wallet, so the UI must never blur them. |
 | Wallet count | **One per vault** | Keeps unlock, sync, and the signer singular. The header carries a version, so multi-account stays open. |
 
 ## Milestones
@@ -33,7 +33,10 @@ as AAD), atomic writes, process hardening, six vault tests.
 - [x] Passphrase with confirmation and a minimum length
 - [x] Seal to `vault.sieve`, derive BIP86 descriptors, initialise the BDK SQLite store
 - [x] Unlock loads watch-only from the database; a lost database is rebuilt from the vault
+- [x] KDF retuned to 256 MiB / 3 passes (~0.7s) after measuring; params travel in the header
+- [x] Database is owner-only — it holds the xpub and full transaction graph
 - [ ] Restore-from-phrase with word and checksum validation
+- [ ] Optional BIP-39 passphrase on restore and on create
 - [ ] Signer worker owning the decrypted descriptor, one message at a time
 
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never

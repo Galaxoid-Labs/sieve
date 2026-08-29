@@ -57,6 +57,17 @@ impl Paths {
     }
 }
 
+/// The database holds no keys, but it does hold the wallet's xpub-derived
+/// descriptors and full transaction graph — enough to reconstruct every address
+/// the wallet will ever use. That is exactly the linkage this wallet exists to
+/// avoid leaking, so it is owner-only in its own right rather than relying on
+/// the directory mode.
+fn restrict(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("cannot restrict {}", path.display()))
+}
+
 /// What the UI needs to render an unlocked wallet.
 #[derive(Debug, Clone)]
 pub struct Summary {
@@ -94,6 +105,7 @@ fn build(mnemonic: &str, db: &Path) -> Result<PersistedWallet<Connection>> {
         std::fs::create_dir_all(parent)?;
     }
     let mut conn = Connection::open(db)?;
+    restrict(db)?;
     Wallet::create(
         Bip86(xprv, KeychainKind::External),
         Bip86(xprv, KeychainKind::Internal),
@@ -109,7 +121,7 @@ fn build(mnemonic: &str, db: &Path) -> Result<PersistedWallet<Connection>> {
 /// the main thread.
 pub fn create(
     mnemonic: &str,
-    passphrase: &[u8],
+    password: &[u8],
     paths: &Paths,
     kdf: vault::KdfParams,
 ) -> Result<Summary> {
@@ -117,7 +129,7 @@ pub fn create(
 
     let sealed = vault::seal(
         mnemonic.as_bytes(),
-        passphrase,
+        password,
         &NETWORK.to_string(),
         kdf,
     )?;
@@ -132,12 +144,13 @@ pub fn create(
 ///
 /// The seed is decrypted only to prove the passphrase is right; the wallet
 /// itself is loaded from public descriptors already in the database.
-pub fn unlock(passphrase: &[u8], paths: &Paths) -> Result<Summary> {
+pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
     let blob = std::fs::read(&paths.vault)
         .with_context(|| format!("cannot read {}", paths.vault.display()))?;
-    let mnemonic = vault::open(&blob, passphrase)?;
+    let mnemonic = vault::open(&blob, password)?;
 
     let mut conn = Connection::open(&paths.db)?;
+    restrict(&paths.db)?;
     let mut wallet = match Wallet::load()
         .check_network(NETWORK)
         .load_wallet(&mut conn)
@@ -204,14 +217,14 @@ mod tests {
         assert!(!paths.is_initialised());
 
         let phrase = generate_mnemonic().unwrap();
-        let created = create(&phrase, b"a good passphrase", &paths, FAST).unwrap();
+        let created = create(&phrase, b"a good password", &paths, FAST).unwrap();
 
         assert!(paths.is_initialised());
         assert!(created.next_address.starts_with("tb1p"));
 
         // Reopening is a fresh read of both files — nothing is carried over in
         // memory, which is what "close the app and reopen it" means.
-        let reopened = unlock(b"a good passphrase", &paths).unwrap();
+        let reopened = unlock(b"a good password", &paths).unwrap();
         assert_eq!(created.next_address, reopened.next_address);
         assert_eq!(created.balance_sats, reopened.balance_sats);
 
@@ -233,11 +246,11 @@ mod tests {
     fn a_lost_database_is_rebuilt_from_the_vault() {
         let paths = scratch("rebuild");
         let phrase = generate_mnemonic().unwrap();
-        let created = create(&phrase, b"a good passphrase", &paths, FAST).unwrap();
+        let created = create(&phrase, b"a good password", &paths, FAST).unwrap();
 
         // The database holds only public data, so losing it must be survivable.
         std::fs::remove_file(&paths.db).unwrap();
-        let rebuilt = unlock(b"a good passphrase", &paths).unwrap();
+        let rebuilt = unlock(b"a good password", &paths).unwrap();
         assert_eq!(created.next_address, rebuilt.next_address);
 
         std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();

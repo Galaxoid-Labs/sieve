@@ -1,4 +1,4 @@
-//! Unlock screen: passphrase in, decrypted vault out.
+//! Unlock screen: password in, decrypted vault out.
 //!
 //! Argon2id at the configured cost takes roughly half a second, which would
 //! visibly stall the frame clock, so it runs on the thread pool via
@@ -11,22 +11,22 @@ use zeroize::Zeroizing;
 
 use crate::wallet::{self, Paths, Summary};
 
-/// Passphrase with a redacted `Debug`.
+/// The wallet password, with a redacted `Debug`.
 ///
 /// Relm4 traces messages when `RUST_LOG=relm4=trace`, and every message type
-/// must implement `Debug`. The derived impl would print the passphrase into the
+/// must implement `Debug`. The derived impl would print the password into the
 /// log, so it is written by hand.
-pub struct Passphrase(Zeroizing<String>);
+pub struct Password(Zeroizing<String>);
 
-impl std::fmt::Debug for Passphrase {
+impl std::fmt::Debug for Password {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Passphrase(<redacted>)")
+        f.write_str("Password(<redacted>)")
     }
 }
 
 #[derive(Debug)]
 pub enum UnlockMsg {
-    Submit(Passphrase),
+    Submit(Password),
 }
 
 #[derive(Debug)]
@@ -68,7 +68,7 @@ impl Component for Unlock {
             set_content = &adw::StatusPage {
             set_icon_name: Some("channel-secure-symbolic"),
             set_title: "Sieve",
-            set_description: Some("Enter your passphrase to unlock this wallet."),
+            set_description: Some("Enter your password to unlock this wallet."),
 
             #[wrap(Some)]
             set_child = &adw::Clamp {
@@ -81,12 +81,12 @@ impl Component for Unlock {
                     adw::PreferencesGroup {
                         #[name(password_row)]
                         adw::PasswordEntryRow {
-                            set_title: "Passphrase",
+                            set_title: "Password",
                             #[watch]
                             set_sensitive: !model.busy,
                             connect_entry_activated[sender] => move |row| {
                                 sender.input(UnlockMsg::Submit(
-                                    Passphrase(Zeroizing::new(row.text().to_string()))
+                                    Password(Zeroizing::new(row.text().to_string()))
                                 ));
                             },
                         },
@@ -102,7 +102,7 @@ impl Component for Unlock {
                         set_label: if model.busy { "Unlocking…" } else { "Unlock" },
                         connect_clicked[sender, password_row] => move |_| {
                             sender.input(UnlockMsg::Submit(
-                                Passphrase(Zeroizing::new(password_row.text().to_string()))
+                                Password(Zeroizing::new(password_row.text().to_string()))
                             ));
                         },
                     },

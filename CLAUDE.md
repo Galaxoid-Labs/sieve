@@ -6,6 +6,20 @@ BDK with a BIP157/158 compact-block-filter light client on the back.
 The name is the architecture: compact block filters sieve blocks locally, so the wallet
 never tells a server which addresses it owns.
 
+## Two secrets, two words
+
+Never use these interchangeably in code, comments, or UI copy. Blurring them is how people
+lose money.
+
+| Term | What it is | Cost of losing it |
+|---|---|---|
+| **Password** | Encrypts the wallet file on disk. Always required. Sieve's own concept. | This copy of the wallet. The seed still recovers everything. |
+| **Passphrase** | The optional BIP-39 25th word. Part of the seed; selects which wallet derives. | The money. A different passphrase silently derives a different, empty wallet. |
+
+A wrong password produces an authentication error. A wrong passphrase produces an empty
+wallet with no error at all — which is why the UI has to make the distinction obvious rather
+than merely correct.
+
 ## Hard rules
 
 These are not preferences. Violating one is a bug, not a style difference.
@@ -58,8 +72,13 @@ The header (KDF cost, network) is authenticated as AEAD associated data. Without
 attacker who can write the file could downgrade `m_cost` to 8 KiB and brute-force the passphrase.
 Do not change the format without bumping the magic byte and writing a migration.
 
-Defaults are 512 MiB / 4 passes / 4 lanes, deliberately not user-tunable. Tests use cheap
-parameters via the `FAST` constant.
+Defaults are 256 MiB / 3 passes / 4 lanes — measured at ~0.7s on desktop hardware, where
+512 MiB / 4 passes cost 2.1s. Run `cargo test --release -- --ignored --nocapture kdf_cost`
+to re-measure. Not user-tunable. Changing the default is safe: the parameters used to seal a
+file travel in its header, so existing wallets keep opening.
+
+Argon2 is unusable at `opt-level = 0` (~36s), so `Cargo.toml` optimises `argon2` and `blake2`
+even in dev builds. Do not remove those profile overrides.
 
 ## Versions
 
