@@ -34,13 +34,12 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Argon2 at opt-level 0 takes ~36s per unlock, which makes the debug build
-# unusable for anything that touches the vault. Optimise just the KDF crates;
-# our own code stays unoptimised and debuggable.
-[profile.dev.package.argon2]
-opt-level = 3
-
-[profile.dev.package.blake2]
+# Two unrelated hot paths make an unoptimised dependency tree unusable here:
+# Argon2 takes ~36s per unlock at opt-level 0, and matching BIP158 filters is
+# SipHash plus Golomb-Rice decoding over hundreds of thousands of blocks. Both
+# live entirely in dependencies, so optimise those while our own code stays
+# unoptimised and debuggable.
+[profile.dev.package."*"]
 opt-level = 3
 
 [profile.release]

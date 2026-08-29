@@ -36,12 +36,29 @@ use crate::vault;
 /// behind an external review of the vault format and the signing path.
 pub const NETWORK: Network = Network::Signet;
 
-/// Where the two files live. The vault holds the seed; the database holds only
+/// A signet block that is guaranteed to predate any wallet this build creates.
+///
+/// A wallet created today cannot have received a payment before the app that
+/// created it existed, so a checkpoint fixed at build time is always safe: at
+/// worst it scans a little more than necessary. Without it, `ScanType::Sync`
+/// resumes from the wallet's own checkpoint — which for a new wallet is the
+/// genesis block — and the first sync walks the entire chain.
+///
+/// Bump this on each release. Never move it forward past a shipped build, or
+/// wallets created by that build could miss early payments.
+pub const BIRTHDAY_HEIGHT: u32 = 319_000;
+pub const BIRTHDAY_HASH: &str =
+    "000000021cefaf18c0d9f75944d79689bde29448c55ff00c65c0022814f40578";
+
+/// Where the files live. The vault holds the seed; the database holds only
 /// public descriptors and chain data.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub vault: PathBuf,
     pub db: PathBuf,
+    /// Public, password-free metadata: where this wallet's history can start.
+    /// Sync is watch-only, so this cannot live in the encrypted vault.
+    pub meta: PathBuf,
 }
 
 impl Paths {
@@ -49,13 +66,41 @@ impl Paths {
         let dir = directories::ProjectDirs::from("com", "jdavis", "Sieve")
             .map(|d| d.data_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        Self { vault: dir.join("vault.sieve"), db: dir.join("wallet.sqlite") }
+        Self {
+            vault: dir.join("vault.sieve"),
+            db: dir.join("wallet.sqlite"),
+            meta: dir.join("wallet.meta.json"),
+        }
     }
 
     /// First run is "no vault", not "no database" — the database can be
     /// rebuilt from the seed, so its absence is recoverable and the vault's is not.
     pub fn is_initialised(&self) -> bool {
         self.vault.exists()
+    }
+}
+
+/// The earliest block this wallet could possibly have a transaction in.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Birthday {
+    pub height: u32,
+    pub hash: String,
+}
+
+impl Birthday {
+    /// For a wallet created by this build.
+    pub fn current() -> Self {
+        Self { height: BIRTHDAY_HEIGHT, hash: BIRTHDAY_HASH.to_owned() }
+    }
+
+    pub fn load(paths: &Paths) -> Option<Self> {
+        let bytes = std::fs::read(&paths.meta).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    pub fn save(&self, paths: &Paths) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(self)?;
+        crate::vault::write_atomic(&paths.meta, &bytes)
     }
 }
 
@@ -128,6 +173,10 @@ pub fn create(
     kdf: vault::KdfParams,
 ) -> Result<Summary> {
     let mut wallet = build(mnemonic, &paths.db)?;
+
+    // Recorded before the vault is written, so a wallet that exists at all has
+    // a birthday and never falls back to scanning from genesis.
+    Birthday::current().save(paths)?;
 
     let sealed = vault::seal(
         mnemonic.as_bytes(),
@@ -210,7 +259,11 @@ mod tests {
             .join(format!("sieve-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        Paths { vault: dir.join("vault.sieve"), db: dir.join("wallet.sqlite") }
+        Paths {
+            vault: dir.join("vault.sieve"),
+            db: dir.join("wallet.sqlite"),
+            meta: dir.join("wallet.meta.json"),
+        }
     }
 
     #[test]
@@ -234,7 +287,25 @@ mod tests {
     }
 
     #[test]
-    fn unlock_rejects_the_wrong_passphrase() {
+    fn creating_a_wallet_records_a_birthday() {
+        // Without this file the first sync falls back to the genesis block and
+        // walks the entire chain.
+        let paths = scratch("birthday");
+        let phrase = generate_mnemonic().unwrap();
+        create(&phrase, b"a good password", &paths, FAST).unwrap();
+
+        let birthday = Birthday::load(&paths).expect("a created wallet must have a birthday");
+        assert_eq!(birthday.height, BIRTHDAY_HEIGHT);
+        assert!(
+            birthday.hash.parse::<bdk_wallet::bitcoin::BlockHash>().is_ok(),
+            "the compiled-in birthday hash must be a valid block hash",
+        );
+
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn unlock_rejects_the_wrong_password() {
         let paths = scratch("wrongpass");
         let phrase = generate_mnemonic().unwrap();
         create(&phrase, b"the right one", &paths, FAST).unwrap();

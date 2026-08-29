@@ -84,12 +84,24 @@ impl SimpleComponent for WalletPage {
                         #[watch]
                         set_subtitle: &model.progress.label(),
 
+                        // Spinner while the work is unbounded, bar once the
+                        // node reports a real fraction. Never both, and both
+                        // sit inside the row rather than under the card.
                         add_suffix = &gtk::Spinner {
                             set_valign: gtk::Align::Center,
                             #[watch]
-                            set_visible: model.syncing(),
+                            set_visible: model.syncing() && model.progress.fraction().is_none(),
                             #[watch]
-                            set_spinning: model.syncing(),
+                            set_spinning: model.syncing() && model.progress.fraction().is_none(),
+                        },
+
+                        add_suffix = &gtk::ProgressBar {
+                            set_valign: gtk::Align::Center,
+                            set_width_request: 120,
+                            #[watch]
+                            set_visible: model.syncing() && model.progress.fraction().is_some(),
+                            #[watch]
+                            set_fraction: model.progress.fraction().unwrap_or(0.0),
                         },
                     },
 
@@ -101,19 +113,6 @@ impl SimpleComponent for WalletPage {
                         #[watch]
                         set_subtitle: model.note.as_deref().unwrap_or_default(),
                         set_subtitle_lines: 2,
-                    },
-
-                    // Only meaningful once the node reports a real fraction;
-                    // before that the work is unbounded and a bar would lie.
-                    gtk::ProgressBar {
-                        set_margin_top: 6,
-                        set_margin_start: 12,
-                        set_margin_end: 12,
-                        set_margin_bottom: 6,
-                        #[watch]
-                        set_visible: model.progress.fraction().is_some() && model.syncing(),
-                        #[watch]
-                        set_fraction: model.progress.fraction().unwrap_or(0.0),
                     },
                 },
 

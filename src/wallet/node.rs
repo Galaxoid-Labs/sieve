@@ -20,11 +20,18 @@ use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{NETWORK, Paths, Summary, restrict};
+use bdk_kyoto::bip157::HashCheckpoint;
 
-/// How many peers to hold open. Two gives some resilience to one peer stalling
-/// without making the wallet noisy on the network.
-const REQUIRED_PEERS: u8 = 2;
+use super::{Birthday, NETWORK, Paths, Summary, restrict};
+
+/// How many peers to hold open.
+///
+/// Filters are fetched in parallel across peers, so this is the main lever on
+/// sync speed. It is set high relative to a normal wallet because the peers
+/// that serve `NODE_COMPACT_FILTERS` are a small minority of the network — most
+/// nodes do not run `-blockfilterindex=1` — and connection attempts to peers
+/// that turn out not to serve filters are common.
+const REQUIRED_PEERS: u8 = 4;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// If the node says nothing for this long, tell the user so rather than
 /// leaving a spinner turning against a frozen label.
@@ -117,15 +124,37 @@ impl Session {
         let headers = paths.db.parent().unwrap_or(&paths.db).join("headers");
         std::fs::create_dir_all(&headers)?;
 
-        // `ScanType::Sync` resumes from the wallet's own checkpoint. For a
-        // freshly created wallet that checkpoint is the genesis block, so the
-        // first sync walks the whole chain. Recording a birthday height at
-        // creation is the fix, and is tracked as M2 follow-up work.
+        // A wallet that has never synced sits at the genesis checkpoint, so
+        // `ScanType::Sync` would walk the entire chain. If we recorded a
+        // birthday when the wallet was created, start there instead.
+        let scan_type = match (wallet.latest_checkpoint().height(), Birthday::load(paths)) {
+            (0, Some(birthday)) => match birthday.hash.parse() {
+                Ok(hash) => {
+                    tracing::info!(height = birthday.height, "scanning from the wallet birthday");
+                    ScanType::Recovery {
+                        used_script_index: wallet
+                            .derivation_index(KeychainKind::External)
+                            .unwrap_or(0),
+                        checkpoint: HashCheckpoint::new(birthday.height, hash),
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "birthday hash is unreadable; scanning from genesis");
+                    ScanType::Sync
+                }
+            },
+            (0, None) => {
+                tracing::warn!("no birthday recorded; scanning from genesis");
+                ScanType::Sync
+            }
+            _ => ScanType::Sync,
+        };
+
         let client: LightClient<_, Single> = Builder::new(NETWORK)
             .required_peers(REQUIRED_PEERS)
             .data_dir(headers)
             .response_timeout(RESPONSE_TIMEOUT)
-            .build_with_wallet(&wallet, ScanType::Sync)
+            .build_with_wallet(&wallet, scan_type)
             .map_err(|e| anyhow!("could not build the light client: {e}"))?;
 
         let (client, logging, updates) = client.subscribe();
