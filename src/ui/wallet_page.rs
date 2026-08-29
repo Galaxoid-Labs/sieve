@@ -85,9 +85,9 @@ impl FactoryComponent for TxRow {
 
             add_prefix = &gtk::Image {
                 set_icon_name: Some(if self.incoming {
-                    "go-down-symbolic"
+                    "network-receive-symbolic"
                 } else {
-                    "go-up-symbolic"
+                    "network-transmit-symbolic"
                 }),
             },
 
@@ -450,7 +450,7 @@ impl Component for WalletPage {
                     },
                 },
 
-                add_titled_with_icon[Some("receive"), "Receive", "go-down-symbolic"] =
+                add_titled_with_icon[Some("receive"), "Receive", "network-receive-symbolic"] =
                 &adw::PreferencesPage {
 
                     adw::PreferencesGroup {
@@ -495,9 +495,9 @@ impl Component for WalletPage {
                     },
                 },
 
-                add_titled_with_icon[Some("send"), "Send", "go-up-symbolic"] =
+                add_titled_with_icon[Some("send"), "Send", "network-transmit-symbolic"] =
                 &adw::StatusPage {
-                    set_icon_name: Some("go-up-symbolic"),
+                    set_icon_name: Some("network-transmit-symbolic"),
                     set_title: "Sending is not built yet",
                     set_description: Some(
                         "Sieve can watch this wallet but cannot spend from it. Nothing here \
