@@ -7,11 +7,15 @@
 use relm4::gtk;
 use relm4::gtk::gdk;
 use relm4::gtk::glib::Bytes;
-use relm4::gtk::prelude::Cast;
+use relm4::gtk::prelude::{Cast, TextureExt};
 
-/// Pixels per QR module. Large enough that scaling to any sensible display
-/// size stays crisp rather than blurring the module edges.
-const SCALE: usize = 8;
+/// Every code is rendered onto a canvas of this side, whatever version it is.
+///
+/// A longer address needs more modules, and sizing the image to the modules
+/// makes the widget's natural size change with the address — which moves the
+/// layout every time the address type changes. A fixed canvas with the code
+/// centred in it keeps the picture identical and lets only the density vary.
+const CANVAS: usize = 512;
 /// Quiet zone in modules. Four is the specification's minimum, and scanners
 /// genuinely fail without it.
 const QUIET: usize = 4;
@@ -30,9 +34,15 @@ pub fn texture(data: &str) -> Option<gdk::Texture> {
         return None;
     }
 
-    let side = (width + QUIET * 2) * SCALE;
+    // Whole pixels per module, so edges stay sharp; whatever is left over
+    // becomes a wider quiet zone rather than a fractional module.
+    let total = width + QUIET * 2;
+    let scale = (CANVAS / total).max(1);
+    let drawn = total * scale;
+    let margin = (CANVAS - drawn) / 2;
+
     // Three bytes per pixel, RGB.
-    let mut pixels = vec![0xFFu8; side * side * 3];
+    let mut pixels = vec![0xFFu8; CANVAS * CANVAS * 3];
 
     for (index, module) in modules.iter().enumerate() {
         if !matches!(module, qrcode::Color::Dark) {
@@ -41,11 +51,11 @@ pub fn texture(data: &str) -> Option<gdk::Texture> {
         let row = index / width;
         let column = index % width;
 
-        for y in 0..SCALE {
-            let py = (row + QUIET) * SCALE + y;
-            for x in 0..SCALE {
-                let px = (column + QUIET) * SCALE + x;
-                let offset = (py * side + px) * 3;
+        for y in 0..scale {
+            let py = margin + (row + QUIET) * scale + y;
+            for x in 0..scale {
+                let px = margin + (column + QUIET) * scale + x;
+                let offset = (py * CANVAS + px) * 3;
                 pixels[offset] = 0;
                 pixels[offset + 1] = 0;
                 pixels[offset + 2] = 0;
@@ -54,11 +64,11 @@ pub fn texture(data: &str) -> Option<gdk::Texture> {
     }
 
     Some(gdk::MemoryTexture::new(
-        side as i32,
-        side as i32,
+        CANVAS as i32,
+        CANVAS as i32,
         gdk::MemoryFormat::R8g8b8,
         &Bytes::from_owned(pixels),
-        side * 3,
+        CANVAS * 3,
     )
     .upcast())
 }
@@ -78,6 +88,31 @@ mod tests {
     #[test]
     fn encodes_a_bip21_uri() {
         assert_eq!(payment_uri("bc1qexample"), "bitcoin:bc1qexample");
+    }
+
+    #[test]
+    fn every_address_type_renders_the_same_size() {
+        // The whole point: a taproot address needs a denser code than a legacy
+        // one, and if the texture grew with it the layout moved every time the
+        // address type changed.
+        let addresses = [
+            "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+            "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+            "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            "bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297",
+        ];
+
+        let sizes: Vec<(i32, i32)> = addresses
+            .iter()
+            .filter_map(|a| texture(&payment_uri(a)))
+            .map(|t| (t.width(), t.height()))
+            .collect();
+
+        assert_eq!(sizes.len(), addresses.len(), "every address must encode");
+        assert!(
+            sizes.windows(2).all(|w| w[0] == w[1]),
+            "textures differ in size: {sizes:?}"
+        );
     }
 
     #[test]
