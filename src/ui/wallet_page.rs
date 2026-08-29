@@ -932,6 +932,35 @@ impl WalletPage {
         detail.add(&txid_row);
         page.add(&detail);
 
+        if let Some(url) = explorer_url(&summary.network, &tx.txid) {
+        let elsewhere = adw::PreferencesGroup::new();
+        let explorer = adw::ActionRow::new();
+        explorer.set_title("View on mempool.space");
+        // Said plainly for the same reason the price switch says it: this is a
+        // disclosure, and a bigger one than a price lookup, because it names
+        // the transaction rather than only the fact that a wallet was opened.
+        explorer.set_subtitle("Opens your browser, and tells the explorer you looked at this transaction");
+        explorer.set_subtitle_lines(2);
+        explorer.set_activatable(true);
+        explorer.add_suffix(&gtk::Image::from_icon_name("external-link-symbolic"));
+
+        let launcher_parent = root.clone();
+        explorer.connect_activated(move |_| {
+            let window = launcher_parent.root().and_downcast::<gtk::Window>();
+            gtk::UriLauncher::new(&url).launch(
+                window.as_ref(),
+                None::<&gtk::gio::Cancellable>,
+                |result| {
+                    if let Err(e) = result {
+                        tracing::warn!(%e, "could not open the block explorer");
+                    }
+                },
+            );
+        });
+        elsewhere.add(&explorer);
+        page.add(&elsewhere);
+        }
+
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&adw::HeaderBar::new());
         toolbar.set_content(Some(&page));
@@ -967,6 +996,25 @@ impl WalletPage {
 
 }
 
+/// Where to look a transaction up.
+///
+/// mempool.space serves mainnet at the root and test networks under a prefix.
+/// Getting this wrong sends someone to a page that says the transaction does
+/// not exist, which reads as "your wallet is lying" rather than "wrong site".
+fn explorer_url(network: &str, txid: &str) -> Option<String> {
+    match network {
+        "bitcoin" => Some(format!("https://mempool.space/tx/{txid}")),
+        // The test networks mempool.space actually serves.
+        "signet" | "testnet" | "testnet4" => {
+            Some(format!("https://mempool.space/{network}/tx/{txid}"))
+        }
+        // Regtest is a chain on this machine; no public explorer can see it,
+        // and offering a link that always says "not found" is worse than
+        // offering none.
+        _ => None,
+    }
+}
+
 /// A read-only label/value row, as used throughout the detail sheet.
 fn detail_row(title: &str, value: &str) -> adw::ActionRow {
     let row = adw::ActionRow::new();
@@ -974,4 +1022,35 @@ fn detail_row(title: &str, value: &str) -> adw::ActionRow {
     row.set_subtitle(value);
     row.set_subtitle_lines(2);
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_urls_match_the_network() {
+        // Mainnet sits at the root; everything else is prefixed. Sending
+        // someone to the wrong one shows "transaction not found", which reads
+        // as the wallet lying rather than the link being wrong.
+        assert_eq!(
+            explorer_url("bitcoin", "abc123").as_deref(),
+            Some("https://mempool.space/tx/abc123")
+        );
+        assert_eq!(
+            explorer_url("signet", "abc123").as_deref(),
+            Some("https://mempool.space/signet/tx/abc123")
+        );
+        assert_eq!(
+            explorer_url("testnet", "abc123").as_deref(),
+            Some("https://mempool.space/testnet/tx/abc123")
+        );
+        assert_eq!(
+            explorer_url("testnet4", "abc123").as_deref(),
+            Some("https://mempool.space/testnet4/tx/abc123")
+        );
+
+        // No public explorer can see a chain running on this machine.
+        assert_eq!(explorer_url("regtest", "abc123"), None);
+    }
 }
