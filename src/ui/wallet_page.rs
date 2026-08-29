@@ -896,6 +896,11 @@ impl Component for WalletPage {
                                 // and reserve the height of the longest.
                                 set_max_width_chars: 32,
                                 set_height_request: 66,
+                                // Pango hyphenates at wrap points by default.
+                                // A hyphen inside a displayed address is not
+                                // cosmetic: someone reading it off the screen
+                                // could copy the character into a payment.
+                                set_attributes: Some(&unhyphenated),
                                 #[watch]
                                 set_label: &model.address(),
                             },
@@ -1155,6 +1160,10 @@ impl Component for WalletPage {
         };
         let tx_list = model.transactions.widget();
         let toast_overlay = model.toaster.overlay_widget();
+
+        // Wrapping must not put a hyphen inside an address.
+        let unhyphenated = gtk::pango::AttrList::new();
+        unhyphenated.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
         let peers_box = model.peers_list.widget();
         let path_model = model.path_model.clone();
         let widgets = view_output!();
