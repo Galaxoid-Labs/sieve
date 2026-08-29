@@ -1,0 +1,346 @@
+//! Derivation paths, and the wallets that live on them.
+//!
+//! One seed produces a different wallet on every standard derivation path, and
+//! they share nothing: an address derived under BIP84 tells you nothing about
+//! the coins sitting under BIP44. So restoring a seed means opening *all* the
+//! standard paths, not guessing one.
+//!
+//! This costs almost nothing to sync. A compact block filter covers an entire
+//! block regardless of what you are looking for, so the download is identical
+//! whether you watch one path or four — only the local script matching grows.
+//!
+//! BDK's `Wallet` holds exactly two descriptors (receive and change), so each
+//! path is its own wallet with its own database file, and `bdk_kyoto` drives
+//! them all from a single node.
+
+use std::fmt;
+use std::path::Path;
+
+use anyhow::{Result, anyhow};
+use bdk_wallet::bitcoin::Network;
+use bdk_wallet::bitcoin::bip32::Xpriv;
+use bdk_wallet::chain::DescriptorExt;
+use bdk_wallet::rusqlite::Connection;
+use bdk_wallet::template::{Bip44, Bip49, Bip84, Bip86};
+use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
+
+use super::restrict;
+
+/// A standard derivation path, identified by its BIP purpose field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ScriptType {
+    /// BIP44, `1...` addresses.
+    Legacy,
+    /// BIP49, `3...` addresses.
+    NestedSegwit,
+    /// BIP84, `bc1q...` addresses. What most wallets default to.
+    NativeSegwit,
+    /// BIP86, `bc1p...` addresses. What Sieve creates.
+    Taproot,
+}
+
+impl ScriptType {
+    /// Every path a restore should open, oldest first so the list reads the way
+    /// the ecosystem grew.
+    pub const ALL: [ScriptType; 4] = [
+        ScriptType::Legacy,
+        ScriptType::NestedSegwit,
+        ScriptType::NativeSegwit,
+        ScriptType::Taproot,
+    ];
+
+    pub fn purpose(self) -> u32 {
+        match self {
+            ScriptType::Legacy => 44,
+            ScriptType::NestedSegwit => 49,
+            ScriptType::NativeSegwit => 84,
+            ScriptType::Taproot => 86,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScriptType::Legacy => "Legacy",
+            ScriptType::NestedSegwit => "Nested SegWit",
+            ScriptType::NativeSegwit => "Native SegWit",
+            ScriptType::Taproot => "Taproot",
+        }
+    }
+
+    /// How addresses on this path look, which is how people actually recognise
+    /// which wallet a seed came from.
+    pub fn example_prefix(self, network: Network) -> &'static str {
+        match (self, network) {
+            (ScriptType::Legacy, Network::Bitcoin) => "1…",
+            (ScriptType::NestedSegwit, Network::Bitcoin) => "3…",
+            (ScriptType::NativeSegwit, Network::Bitcoin) => "bc1q…",
+            (ScriptType::Taproot, Network::Bitcoin) => "bc1p…",
+            (ScriptType::Legacy, _) => "m/n…",
+            (ScriptType::NestedSegwit, _) => "2…",
+            (ScriptType::NativeSegwit, _) => "tb1q…",
+            (ScriptType::Taproot, _) => "tb1p…",
+        }
+    }
+
+    /// The earliest block this path could possibly hold coins in.
+    ///
+    /// Taproot did not exist before block 709,632, so a BIP86 wallet scanned
+    /// from earlier is scanning blocks it cannot match. The others go back to
+    /// the beginning.
+    pub fn earliest_possible(self, network: Network) -> Option<u32> {
+        match (self, network) {
+            (ScriptType::Taproot, Network::Bitcoin) => Some(709_632),
+            _ => None,
+        }
+    }
+
+    /// The output descriptor wrapping a single key, for imports that carry one
+    /// key rather than a seed.
+    ///
+    /// A WIF key has no derivation, so the same key can have been used under
+    /// any of these script types and each has to be checked separately.
+    pub fn single_key_descriptor(self, key: &str) -> String {
+        match self {
+            ScriptType::Legacy => format!("pkh({key})"),
+            ScriptType::NestedSegwit => format!("sh(wpkh({key}))"),
+            ScriptType::NativeSegwit => format!("wpkh({key})"),
+            ScriptType::Taproot => format!("tr({key})"),
+        }
+    }
+
+    /// Its own database file — BDK's SQLite tables have fixed names, so paths
+    /// cannot share one.
+    pub fn db_file(self) -> String {
+        format!("wallet-bip{}.sqlite", self.purpose())
+    }
+}
+
+impl fmt::Display for ScriptType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (BIP{})", self.label(), self.purpose())
+    }
+}
+
+/// What the user brings to an import.
+///
+/// Each kind expands across the script types differently: a seed derives a
+/// full HD wallet per path, a bare key is watched under each path, and a
+/// descriptor already names its own script type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    /// 12 or 24 BIP-39 words, optionally with a BIP-39 passphrase.
+    Mnemonic,
+    /// A single private key in Wallet Import Format.
+    Wif,
+    /// An output descriptor or extended public key — watch-only, no keys.
+    Descriptor,
+}
+
+impl CredentialKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            CredentialKind::Mnemonic => "Recovery phrase",
+            CredentialKind::Wif => "Private key (WIF)",
+            CredentialKind::Descriptor => "Descriptor or xpub (watch-only)",
+        }
+    }
+
+    /// Whether importing this hands Sieve the ability to spend.
+    ///
+    /// Worth surfacing: a descriptor import cannot lose money to a bug in this
+    /// software, and the other two can.
+    pub fn carries_keys(self) -> bool {
+        !matches!(self, CredentialKind::Descriptor)
+    }
+
+    /// Whether this credential derives many addresses or holds exactly one.
+    pub fn is_hd(self) -> bool {
+        matches!(self, CredentialKind::Mnemonic)
+    }
+}
+
+/// One derivation path's wallet, with the connection that persists it.
+pub struct Account {
+    pub script_type: ScriptType,
+    pub wallet: PersistedWallet<Connection>,
+    pub conn: Connection,
+}
+
+impl Account {
+    /// Create the wallet for one path from an extended private key.
+    ///
+    /// The key goes in; only public descriptors come out into the database.
+    pub fn create(xprv: Xpriv, script_type: ScriptType, db: &Path, network: Network) -> Result<Self> {
+        if let Some(parent) = db.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut conn = Connection::open(db)?;
+        restrict(db)?;
+
+        // Each template has a different script context, so the builder chain
+        // has to complete inside the match arm.
+        let wallet = match script_type {
+            ScriptType::Legacy => Wallet::create(
+                Bip44(xprv, KeychainKind::External),
+                Bip44(xprv, KeychainKind::Internal),
+            )
+            .network(network)
+            .create_wallet(&mut conn),
+            ScriptType::NestedSegwit => Wallet::create(
+                Bip49(xprv, KeychainKind::External),
+                Bip49(xprv, KeychainKind::Internal),
+            )
+            .network(network)
+            .create_wallet(&mut conn),
+            ScriptType::NativeSegwit => Wallet::create(
+                Bip84(xprv, KeychainKind::External),
+                Bip84(xprv, KeychainKind::Internal),
+            )
+            .network(network)
+            .create_wallet(&mut conn),
+            ScriptType::Taproot => Wallet::create(
+                Bip86(xprv, KeychainKind::External),
+                Bip86(xprv, KeychainKind::Internal),
+            )
+            .network(network)
+            .create_wallet(&mut conn),
+        }
+        .map_err(|e| anyhow!("could not create the {script_type} wallet: {e}"))?;
+
+        Ok(Account { script_type, wallet, conn })
+    }
+
+    /// Create a wallet holding exactly one key, from WIF.
+    ///
+    /// `create_single` rather than `create`: a bare key has no change chain, so
+    /// there is no second descriptor to give it.
+    pub fn create_from_wif(
+        wif: &str,
+        script_type: ScriptType,
+        db: &Path,
+        network: Network,
+    ) -> Result<Self> {
+        Self::create_single(&script_type.single_key_descriptor(wif), script_type, db, network)
+    }
+
+    /// Create a watch-only wallet from a descriptor the user supplied.
+    ///
+    /// Accepts public descriptors, which is the safest way to import an
+    /// existing wallet: Sieve can see the coins and never the keys.
+    pub fn create_single(
+        descriptor: &str,
+        script_type: ScriptType,
+        db: &Path,
+        network: Network,
+    ) -> Result<Self> {
+        if let Some(parent) = db.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut conn = Connection::open(db)?;
+        restrict(db)?;
+
+        let wallet = Wallet::create_single(descriptor.to_owned())
+            .network(network)
+            .create_wallet(&mut conn)
+            .map_err(|e| anyhow!("could not import the {script_type} key: {e}"))?;
+
+        Ok(Account { script_type, wallet, conn })
+    }
+
+    /// Reopen a wallet watch-only. No key material is involved: the database
+    /// holds public descriptors, which is all that browsing needs.
+    pub fn load(script_type: ScriptType, db: &Path, network: Network) -> Result<Option<Self>> {
+        if !db.exists() {
+            return Ok(None);
+        }
+        let mut conn = Connection::open(db)?;
+        restrict(db)?;
+        let loaded = Wallet::load()
+            .check_network(network)
+            .load_wallet(&mut conn)
+            .map_err(|e| anyhow!("could not load the {script_type} wallet: {e}"))?;
+
+        Ok(loaded.map(|wallet| Account { script_type, wallet, conn }))
+    }
+
+    /// Identifies this account when updates arrive for several wallets at once.
+    pub fn descriptor_id(&self) -> bdk_wallet::chain::DescriptorId {
+        self.wallet
+            .public_descriptor(KeychainKind::External)
+            .descriptor_id()
+    }
+
+    pub fn persist(&mut self) -> Result<()> {
+        self.wallet
+            .persist(&mut self.conn)
+            .map(|_| ())
+            .map_err(|e| anyhow!("could not persist the {} wallet: {e}", self.script_type))
+    }
+}
+
+impl fmt::Debug for Account {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Account").field("script_type", &self.script_type).finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_path_has_its_own_database() {
+        let files: Vec<String> = ScriptType::ALL.iter().map(|s| s.db_file()).collect();
+        let unique: std::collections::HashSet<_> = files.iter().collect();
+        assert_eq!(files.len(), unique.len(), "paths must not share a database file");
+    }
+
+    #[test]
+    fn single_key_descriptors_are_well_formed() {
+        // A WIF key has no derivation, so the same key may have been used under
+        // any script type and each needs its own descriptor.
+        let key = "cVt4o7BGAig1UXywgGSmARhxMdzP5qvQsxKkSsc1XEkw3tDTQFpy";
+        assert_eq!(ScriptType::Legacy.single_key_descriptor(key), format!("pkh({key})"));
+        assert_eq!(
+            ScriptType::NestedSegwit.single_key_descriptor(key),
+            format!("sh(wpkh({key}))")
+        );
+        assert_eq!(ScriptType::NativeSegwit.single_key_descriptor(key), format!("wpkh({key})"));
+        assert_eq!(ScriptType::Taproot.single_key_descriptor(key), format!("tr({key})"));
+    }
+
+    #[test]
+    fn a_wif_key_imports_under_every_script_type() {
+        // Signet WIF. Every script type must accept it and produce a wallet.
+        let key = "cVt4o7BGAig1UXywgGSmARhxMdzP5qvQsxKkSsc1XEkw3tDTQFpy";
+        let dir = std::env::temp_dir().join(format!("sieve-wif-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for script_type in ScriptType::ALL {
+            let db = dir.join(script_type.db_file());
+            let mut account = Account::create_from_wif(key, script_type, &db, Network::Signet)
+                .unwrap_or_else(|e| panic!("{script_type} should accept a WIF key: {e}"));
+            let address = account
+                .wallet
+                .next_unused_address(KeychainKind::External)
+                .address
+                .to_string();
+            assert!(!address.is_empty(), "{script_type} produced no address");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_taproot_has_an_activation_floor() {
+        for script_type in ScriptType::ALL {
+            let floor = script_type.earliest_possible(Network::Bitcoin);
+            if script_type == ScriptType::Taproot {
+                assert_eq!(floor, Some(709_632));
+            } else {
+                assert_eq!(floor, None, "{script_type} predates taproot and has no floor");
+            }
+        }
+    }
+}

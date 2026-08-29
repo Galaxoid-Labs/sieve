@@ -28,6 +28,7 @@ use bdk_wallet::template::Bip86;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use zeroize::Zeroizing;
 
+pub mod accounts;
 pub mod node;
 
 use crate::vault;
