@@ -67,6 +67,7 @@ pub enum AppMsg {
     ToggleDenomination,
     ForgetPeers,
     SetAppearance(crate::settings::Appearance),
+    RenameWallet { paths: Paths, name: String },
     SetShowFiat(bool),
     /// Slide the wallet list in over preferences.
     ShowWallets,
@@ -192,6 +193,27 @@ impl Component for App {
         // app still came up light. So the setting is read directly and
         // mirrored, which is still following the desktop, just by a route that
         // works here. Nothing is chosen by Sieve.
+        // Registering a resource is not the same as GTK finding icons in it,
+        // and a missing icon draws a placeholder rather than logging anything.
+        // Checked here rather than in main: there is no display that early, so
+        // anything touching the icon theme there silently does nothing.
+        if let Some(display) = gtk::gdk::Display::default() {
+            let theme = gtk::IconTheme::for_display(&display);
+            // Said explicitly rather than relying on GtkApplication to derive
+            // it from the application id. It is one line, and the failure mode
+            // of assuming otherwise is a broken picture with nothing in the
+            // log.
+            theme.add_resource_path("/com/jdavis/Sieve/icons");
+
+            for name in ["sieve-receive-symbolic", "sieve-send-symbolic"] {
+                if theme.has_icon(name) {
+                    tracing::debug!(name, "icon available");
+                } else {
+                    tracing::error!(name, "icon missing from the resource bundle");
+                }
+            }
+        }
+
         let style = adw::StyleManager::default();
         let desktop = desktop_interface_settings();
         let settings = crate::settings::Settings::load();
@@ -354,6 +376,25 @@ impl Component for App {
                 self.settings.appearance = appearance;
                 self.settings.save();
                 apply_appearance(&adw::StyleManager::default(), appearance);
+            }
+
+            AppMsg::RenameWallet { paths, name } => {
+                match wallet::Meta::rename(&paths, &name) {
+                    Ok(()) => {
+                        let id = paths
+                            .dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let shown = wallet::Meta::load(&paths)
+                            .map(|m| m.display_name(&id))
+                            .unwrap_or(id);
+                        // The header carries the name, and so does the list.
+                        self.wallet.emit(WalletPageMsg::SetName(shown));
+                        self.chooser.emit(ChooserMsg::Refresh);
+                    }
+                    Err(e) => tracing::warn!(%e, "could not rename the wallet"),
+                }
             }
 
             AppMsg::ForgetPeers => {
@@ -708,6 +749,35 @@ impl App {
 
         let this = adw::PreferencesGroup::new();
         this.set_title("This wallet");
+
+        if let Some(paths) = self.active.clone() {
+            let id = paths
+                .dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let current = wallet::Meta::load(&paths)
+                .map(|m| m.display_name(&id))
+                .unwrap_or_default();
+
+            let name = adw::EntryRow::new();
+            name.set_title("Name");
+            name.set_text(&current);
+            // Applied when the row is done being edited rather than on every
+            // keystroke, so a half-typed name is never what gets saved.
+            {
+                let sender = sender.clone();
+                let paths = paths.clone();
+                name.connect_apply(move |row| {
+                    sender.input(AppMsg::RenameWallet {
+                        paths: paths.clone(),
+                        name: row.text().to_string(),
+                    });
+                });
+            }
+            name.set_show_apply_button(true);
+            this.add(&name);
+        }
 
         if let Some(paths) = &self.active
             && let Some(meta) = wallet::Meta::load(paths)

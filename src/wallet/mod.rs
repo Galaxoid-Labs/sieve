@@ -349,6 +349,18 @@ impl Meta {
     pub fn save(&self, paths: &Paths) -> Result<()> {
         crate::vault::write_atomic(&paths.meta, &serde_json::to_vec_pretty(self)?)
     }
+
+    /// Rename a wallet.
+    ///
+    /// The name is the only part of a wallet a person chooses, and it lives in
+    /// metadata rather than the vault so renaming never needs a password —
+    /// asking for one to change a label would be theatre.
+    pub fn rename(paths: &Paths, name: &str) -> Result<()> {
+        let mut meta = Self::load(paths).context("this wallet has no metadata file")?;
+        let trimmed = name.trim();
+        meta.name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        meta.save(paths)
+    }
 }
 
 /// The database holds no keys, but it does hold the wallet's xpub-derived
