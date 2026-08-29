@@ -249,6 +249,34 @@ impl Session {
         Summary::from_portfolio(&mut portfolio)
     }
 
+    /// Reveal a fresh receive address on one path.
+    ///
+    /// `next_unused_address` returns the same address until someone pays to it,
+    /// which is correct for a single payer but links two payers who are each
+    /// given it. This advances the keychain so a second payer gets a different
+    /// address, and persists the reveal so the new script is watched.
+    pub async fn reveal_next(
+        &self,
+        script_type: super::accounts::ScriptType,
+    ) -> Result<(String, Summary)> {
+        let mut portfolio = self.portfolio.lock().await;
+        let address = {
+            let account = portfolio
+                .accounts
+                .iter_mut()
+                .find(|a| a.script_type == script_type)
+                .context("that derivation path is not part of this wallet")?;
+            let revealed = account
+                .wallet
+                .reveal_next_address(bdk_wallet::KeychainKind::External);
+            account.persist()?;
+            revealed.address.to_string()
+        };
+
+        let summary = Summary::from_portfolio(&mut portfolio)?;
+        Ok((address, summary))
+    }
+
     /// Await the next progress event. `None` when the node has stopped.
     ///
     /// Silence is itself reportable: if nothing arrives for a while the caller

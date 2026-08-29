@@ -61,6 +61,16 @@ Two axes, kept separate:
 Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
 one `bdk_kyoto` node drives them all via `build_with_wallets`.
 
+## Receiving
+
+`next_unused_address` never returns a *used* address, but it returns the same unused one
+every time — which links two payers who are each handed it. The refresh button calls
+`reveal_next_address`, advancing the keychain and persisting the reveal so the new script is
+watched. Show a fresh address per payer; never present one address as "the" wallet address.
+
+The derivation-path list is a balance breakdown and must not show addresses: it duplicated
+the receive row and read as address reuse.
+
 ## Layout
 
 ```

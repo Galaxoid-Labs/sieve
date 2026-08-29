@@ -13,7 +13,6 @@ use crate::wallet::{AccountSummary, Summary};
 #[derive(Debug)]
 pub struct PathRow {
     label: String,
-    address: String,
     amount: String,
 }
 
@@ -28,8 +27,6 @@ impl FactoryComponent for PathRow {
     view! {
         adw::ActionRow {
             set_title: &self.label,
-            set_subtitle: &self.address,
-            set_subtitle_lines: 1,
 
             add_suffix = &gtk::Label {
                 add_css_class: "numeric",
@@ -45,7 +42,6 @@ impl FactoryComponent for PathRow {
     ) -> Self {
         PathRow {
             label: summary.script_type.to_string(),
-            address: summary.next_address,
             amount: denomination.format(summary.balance_sats),
         }
     }
@@ -54,6 +50,8 @@ impl FactoryComponent for PathRow {
 #[derive(Debug)]
 pub enum WalletPageOutput {
     SwitchWallet,
+    /// Reveal a new address on this path.
+    NewAddress(crate::wallet::accounts::ScriptType),
 }
 
 pub struct WalletPage {
@@ -64,6 +62,20 @@ pub struct WalletPage {
     note: Option<String>,
     error: Option<String>,
     settings: Settings,
+    /// Backing model for the address-type picker.
+    ///
+    /// Held and mutated in place rather than rebuilt under `#[watch]`: swapping
+    /// a ComboRow's model resets its selection, so a rebuild on every view
+    /// update would snap the picker back while someone was using it.
+    path_model: gtk::StringList,
+    /// Labels currently in `path_model`, so it is only rewritten when the set
+    /// of paths genuinely changes.
+    path_labels: Vec<String>,
+    receive_index: u32,
+    /// A freshly revealed address, shown instead of the next unused one until
+    /// the path or wallet changes. Giving the same unused address to two payers
+    /// links them, so asking for a new one has to actually produce one.
+    fresh_address: Option<String>,
 }
 
 #[derive(Debug)]
@@ -78,6 +90,12 @@ pub enum WalletPageMsg {
     SwitchWallet,
     /// Swap between decimal BTC and satoshis.
     ToggleDenomination,
+    /// Choose which derivation path to receive on.
+    SelectReceivePath(u32),
+    /// Ask for an address that has not been handed to anyone yet.
+    NewAddress,
+    /// The freshly revealed address came back.
+    ShowFreshAddress(String),
     /// Clear everything that belonged to a different wallet.
     Reset,
 }
@@ -90,11 +108,37 @@ impl WalletPage {
         }
     }
 
+    /// The address for the selected path, falling back to the wallet's primary
+    /// one when there is no breakdown to choose from.
     fn address(&self) -> String {
-        match &self.summary {
-            Some(s) => s.next_address.clone(),
-            None => "—".into(),
+        if let Some(fresh) = &self.fresh_address {
+            return fresh.clone();
         }
+        let Some(summary) = &self.summary else { return "—".into() };
+        summary
+            .accounts
+            .get(self.receive_index as usize)
+            .map(|a| a.next_address.clone())
+            .unwrap_or_else(|| summary.next_address.clone())
+    }
+
+    fn has_path_choice(&self) -> bool {
+        self.summary.as_ref().is_some_and(|s| s.accounts.len() > 1)
+    }
+
+    /// What the selected path's addresses look like, so the choice is
+    /// recognisable without knowing BIP numbers.
+    fn address_hint(&self) -> String {
+        let Some(summary) = &self.summary else { return String::new() };
+        let Some(account) = summary.accounts.get(self.receive_index as usize) else {
+            return String::new();
+        };
+        let network = summary.network.parse().unwrap_or(bdk_wallet::bitcoin::Network::Signet);
+        format!(
+            "{} addresses start with {}",
+            account.script_type.label(),
+            account.script_type.example_prefix(network)
+        )
     }
 
     fn peers(&self) -> String {
@@ -283,12 +327,35 @@ impl SimpleComponent for WalletPage {
 
                 adw::PreferencesGroup {
                     set_title: "Receive",
+                    #[watch]
+                    set_description: Some(&model.address_hint()),
+
+                    #[name(path_picker)]
+                    adw::ComboRow {
+                        set_title: "Address type",
+                        // Model set once and mutated in place; see path_model.
+                        set_model: Some(&path_model),
+                        // Only worth showing when there is a real choice.
+                        #[watch]
+                        set_visible: model.has_path_choice(),
+                        connect_selected_notify[sender] => move |row| {
+                            sender.input(WalletPageMsg::SelectReceivePath(row.selected()));
+                        },
+                    },
 
                     adw::ActionRow {
                         set_title: "Next address",
                         #[watch]
                         set_subtitle: &model.address(),
                         set_subtitle_lines: 2,
+
+                        add_suffix = &gtk::Button {
+                            set_icon_name: "view-refresh-symbolic",
+                            set_tooltip_text: Some("New address — use a different one for each payer"),
+                            set_valign: gtk::Align::Center,
+                            add_css_class: "flat",
+                            connect_clicked => WalletPageMsg::NewAddress,
+                        },
 
                         add_suffix = &gtk::Button {
                             set_icon_name: "edit-copy-symbolic",
@@ -319,12 +386,16 @@ impl SimpleComponent for WalletPage {
     fn init(
         _init: Self::Init,
         root: Self::Root,
-        _sender: ComponentSender<Self>,
+        sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let paths = FactoryVecDeque::builder().launch_default().detach();
         let model = WalletPage {
             paths,
             settings: Settings::load(),
+            path_model: gtk::StringList::new(&[]),
+            path_labels: Vec::new(),
+            receive_index: 0,
+            fresh_address: None,
             summary: None,
             progress: Progress::Connecting,
             peers: None,
@@ -332,12 +403,26 @@ impl SimpleComponent for WalletPage {
             error: None,
         };
         let paths_box = model.paths.widget();
+        let path_model = model.path_model.clone();
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
+            WalletPageMsg::SelectReceivePath(index) => {
+                self.receive_index = index;
+                // The fresh address belonged to the path being left.
+                self.fresh_address = None;
+            }
+            WalletPageMsg::NewAddress => {
+                if let Some(summary) = &self.summary
+                    && let Some(account) = summary.accounts.get(self.receive_index as usize)
+                {
+                    let _ = sender.output(WalletPageOutput::NewAddress(account.script_type));
+                }
+            }
+            WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
             WalletPageMsg::ToggleDenomination => {
                 self.settings.denomination = self.settings.denomination.toggled();
                 self.settings.save();
@@ -352,6 +437,10 @@ impl SimpleComponent for WalletPage {
                 self.peers = None;
                 self.note = None;
                 self.error = None;
+                self.receive_index = 0;
+                self.fresh_address = None;
+                self.path_labels.clear();
+                self.path_model.splice(0, self.path_model.n_items(), &[]);
                 self.paths.guard().clear();
             }
             WalletPageMsg::SwitchWallet => {
@@ -360,6 +449,7 @@ impl SimpleComponent for WalletPage {
             WalletPageMsg::Show(summary) => {
                 // Rebuild rather than diff: four rows, and the set only changes
                 // when a sync lands.
+                self.sync_path_picker(&summary);
                 self.rebuild_paths(&summary);
                 self.summary = Some(summary);
             }
@@ -384,6 +474,31 @@ impl SimpleComponent for WalletPage {
 }
 
 impl WalletPage {
+    /// Rewrite the picker only when the set of paths actually changes, so a
+    /// routine sync update cannot reset a selection someone just made.
+    fn sync_path_picker(&mut self, summary: &Summary) {
+        let labels: Vec<String> = summary
+            .accounts
+            .iter()
+            .map(|a| a.script_type.to_string())
+            .collect();
+        if labels == self.path_labels {
+            return;
+        }
+
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        self.path_model.splice(0, self.path_model.n_items(), &refs);
+        self.path_labels = labels;
+
+        // Default to the wallet's primary path rather than whatever happens to
+        // be first: for an import that is Native SegWit, not Legacy.
+        self.receive_index = summary
+            .accounts
+            .iter()
+            .position(|a| a.next_address == summary.next_address)
+            .unwrap_or(0) as u32;
+    }
+
     /// Only paths holding something get a row; the rest are named in the group
     /// description instead.
     fn rebuild_paths(&mut self, summary: &Summary) {

@@ -56,6 +56,8 @@ pub enum AppMsg {
     ShowRestore,
     ShowWelcome,
     ShowChooser,
+    /// Reveal a fresh receive address on one derivation path.
+    RevealAddress(crate::wallet::accounts::ScriptType),
     /// Open a specific wallet from the chooser.
     OpenWallet(String),
     /// A wallet now exists on disk, or an existing one was unlocked. Both
@@ -79,6 +81,7 @@ pub enum AppCmd {
     /// `None` means the node stopped.
     Progress(Option<Progress>),
     Warning(Option<Notice>),
+    Revealed(Result<(String, Summary), String>),
 }
 
 #[relm4::component(pub)]
@@ -163,6 +166,9 @@ impl Component for App {
             sender.input_sender(),
             |out| match out {
                 crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowChooser,
+                crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
+                    AppMsg::RevealAddress(script_type)
+                }
             },
         );
 
@@ -227,6 +233,17 @@ impl Component for App {
             }
             AppMsg::ShowRestore => self.screen = Screen::Restore,
             AppMsg::ShowWelcome => self.screen = Screen::Onboarding,
+            AppMsg::RevealAddress(script_type) => {
+                let Some(session) = self.session.clone() else {
+                    // Nothing to reveal from until the client is up.
+                    return;
+                };
+                sender.oneshot_command(async move {
+                    AppCmd::Revealed(
+                        session.reveal_next(script_type).await.map_err(|e| e.to_string()),
+                    )
+                });
+            }
             AppMsg::ShowChooser => {
                 // Re-read from disk: a wallet may have been created since this
                 // screen was last shown.
@@ -296,6 +313,14 @@ impl Component for App {
                 self.await_warning(&sender);
             }
             AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
+            AppCmd::Revealed(Ok((address, summary))) => {
+                self.wallet.emit(WalletPageMsg::Show(summary));
+                self.wallet.emit(WalletPageMsg::ShowFreshAddress(address));
+            }
+            AppCmd::Revealed(Err(message)) => {
+                tracing::error!(%message, "could not reveal an address");
+                self.wallet.emit(WalletPageMsg::Failed(message));
+            }
         }
     }
 
