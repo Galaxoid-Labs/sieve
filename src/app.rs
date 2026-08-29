@@ -51,6 +51,30 @@ pub struct App {
     wallet: Controller<WalletPage>,
 }
 
+/// Every icon name the interface uses.
+///
+/// Checked at startup because GTK draws a placeholder for a name it cannot
+/// resolve and says nothing about it, so a typo or an icon that is simply not
+/// in the theme ships silently. Add to this list when adding an icon.
+const ICONS: &[&str] = &[
+    "channel-secure-symbolic",
+    "document-open-recent-symbolic",
+    "document-save-symbolic",
+    "edit-copy-symbolic",
+    "go-next-symbolic",
+    "go-previous-symbolic",
+    "list-add-symbolic",
+    "network-idle-symbolic",
+    "network-offline-symbolic",
+    "network-wireless-symbolic",
+    "open-menu-symbolic",
+    "preferences-system-symbolic",
+    "sieve-receive-symbolic",
+    "sieve-send-symbolic",
+    "view-refresh-symbolic",
+    "web-browser-symbolic",
+];
+
 #[derive(Debug)]
 pub enum AppMsg {
     /// Go back one page. Every screen's back button routes here so the history
@@ -205,11 +229,12 @@ impl Component for App {
             // log.
             theme.add_resource_path("/com/jdavis/Sieve/icons");
 
-            for name in ["sieve-receive-symbolic", "sieve-send-symbolic"] {
-                if theme.has_icon(name) {
-                    tracing::debug!(name, "icon available");
-                } else {
-                    tracing::error!(name, "icon missing from the resource bundle");
+            // Every icon the app names, not just its own. A name that is not
+            // in the theme draws a placeholder and logs nothing, so the only
+            // way to catch a wrong name is to ask.
+            for name in ICONS {
+                if !theme.has_icon(name) {
+                    tracing::error!(name, "icon missing — this will draw a broken picture");
                 }
             }
         }

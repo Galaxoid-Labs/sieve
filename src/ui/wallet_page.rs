@@ -1437,7 +1437,7 @@ impl WalletPage {
         explorer.set_subtitle("Opens your browser, and tells the explorer you looked at this transaction");
         explorer.set_subtitle_lines(2);
         explorer.set_activatable(true);
-        explorer.add_suffix(&gtk::Image::from_icon_name("external-link-symbolic"));
+        explorer.add_suffix(&gtk::Image::from_icon_name("web-browser-symbolic"));
 
         let launcher_parent = root.clone();
         let sender = sender.clone();
