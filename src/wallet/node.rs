@@ -25,14 +25,21 @@ use bdk_kyoto::bip157::HashCheckpoint;
 use super::accounts::Portfolio;
 use super::{Meta, Paths, Summary};
 
-/// How many peers to hold open.
+/// How many peers to hold open. Kyoto clamps this to 1–15 and defaults to 1.
 ///
-/// Filters are fetched in parallel across peers, so this is the main lever on
-/// sync speed. It is set high relative to a normal wallet because the peers
-/// that serve `NODE_COMPACT_FILTERS` are a small minority of the network — most
-/// nodes do not run `-blockfilterindex=1` — and connection attempts to peers
-/// that turn out not to serve filters are common.
-const REQUIRED_PEERS: u8 = 4;
+/// Eight, matching Bitcoin Core's outbound default, for two reasons that point
+/// the same way. Filters are fetched in parallel, so this is the main lever on
+/// sync speed, and the peers serving `NODE_COMPACT_FILTERS` are a small
+/// minority — most nodes do not run `-blockfilterindex=1` — so a good share of
+/// connections are useless for our purposes.
+///
+/// It also helps privacy rather than hurting it. When a filter matches, the
+/// block is fetched from one peer, and that peer learns a block interested us.
+/// Spreading those requests over more peers means no single one sees the whole
+/// pattern; holding few connections concentrates it.
+///
+/// The cost is bandwidth and memory, which is why this is not simply 15.
+const REQUIRED_PEERS: u8 = 8;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// If the node says nothing for this long, tell the user so rather than
 /// leaving a spinner turning against a frozen label.
