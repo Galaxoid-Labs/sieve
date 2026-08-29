@@ -76,9 +76,14 @@ bip157 0.6.3 accepts a `data_dir` and ignores it — `Node::new` destructures th
 are re-fetched on every launch. `chain/<network>/` is created in anticipation of a version
 that uses it; do not assume anything is in there.
 
-The impact is limited: the BDK wallet's own checkpoint still advances and is persisted, so
-filter scanning resumes where it left off. Only the header chain is re-downloaded, at 80
-bytes a header.
+The impact is smaller than it sounds. `ScanType::Sync` starts the node's chain at the
+*wallet's* checkpoint, which BDK does persist, walked back 7 blocks for reorg safety — so a
+restart fetches seven blocks, not the chain. Only a wallet still sitting at its birthday pays
+for a long header walk, and only once.
+
+What a restart actually costs is peer discovery: roughly a minute of DNS seeding, connecting
+and handshaking before anything syncs. If start-up feels slow, that is where the time is —
+not headers.
 
 ## Receiving
 
