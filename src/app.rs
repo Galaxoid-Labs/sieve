@@ -365,10 +365,12 @@ impl Component for App {
             // visibly changes underneath a dialog that is still up.
             AppMsg::ShowOnboarding => {
                 self.close_prefs();
-                // Reached from preferences, so there is a wallet to go back
-                // to and setup needs a way out of its first step.
-                self.onboarding
-                    .emit(OnboardingMsg::CanCancel(self.active.is_some()));
+                // Reached from the wallet list, where creating a wallet was
+                // already chosen — so start at the first question that has not
+                // been answered, and leave a way back out.
+                if self.active.is_some() {
+                    self.onboarding.emit(OnboardingMsg::EnteredByChoice);
+                }
                 self.nav.push_by_tag("onboarding");
             }
             AppMsg::ShowRestore => {

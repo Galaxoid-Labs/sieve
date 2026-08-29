@@ -57,6 +57,9 @@ impl Step {
 pub enum OnboardingMsg {
     Begin,
     Restore,
+    /// Entered from the wallet list rather than as a first run: there is
+    /// somewhere to go back to, and the welcome step has already been answered.
+    EnteredByChoice,
     /// Whether a wallet list sits behind this screen.
     CanCancel(bool),
     Back,
@@ -82,6 +85,12 @@ pub struct Onboarding {
     step: Step,
     /// Whether there is a screen behind this one to return to.
     can_cancel: bool,
+    /// Whether the welcome step is part of this run at all.
+    ///
+    /// Entered from the wallet list, "create a new wallet" has already been
+    /// chosen, and showing a screen whose job is to ask that question again is
+    /// a step nobody needs.
+    skip_welcome: bool,
     /// Held only between generation and sealing.
     mnemonic: Option<Zeroizing<String>>,
     password: Option<Zeroizing<String>>,
@@ -91,6 +100,18 @@ pub struct Onboarding {
 }
 
 impl Onboarding {
+    /// The step behind this one, for this run of the flow.
+    ///
+    /// With the welcome step skipped, the password step is the first, so going
+    /// back from it leaves setup rather than revealing a screen this run never
+    /// showed.
+    fn previous(&self) -> Option<Step> {
+        match (self.step, self.skip_welcome) {
+            (Step::Password, true) => None,
+            (step, _) => step.previous(),
+        }
+    }
+
     /// The phrase as two numbered columns of monospace text.
     fn phrase_display(&self) -> String {
         let Some(phrase) = &self.mnemonic else {
@@ -168,7 +189,7 @@ impl Component for Onboarding {
                     set_icon_name: "go-previous-symbolic",
                     set_tooltip_text: Some("Back"),
                     #[watch]
-                    set_visible: model.step.previous().is_some() || model.can_cancel,
+                    set_visible: model.previous().is_some() || model.can_cancel,
                     connect_clicked => OnboardingMsg::Back,
                 },
             },
@@ -375,6 +396,7 @@ impl Component for Onboarding {
         let model = Onboarding {
             step: Step::Welcome,
             can_cancel: false,
+            skip_welcome: false,
             mnemonic: None,
             password: None,
             challenge: [1, 2, 3],
@@ -387,6 +409,11 @@ impl Component for Onboarding {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         self.error = None;
         match msg {
+            OnboardingMsg::EnteredByChoice => {
+                self.can_cancel = true;
+                self.skip_welcome = true;
+                self.step = Step::Password;
+            }
             OnboardingMsg::CanCancel(can) => self.can_cancel = can,
             OnboardingMsg::Begin => self.step = Step::Password,
 
@@ -394,7 +421,7 @@ impl Component for Onboarding {
                 let _ = sender.output(OnboardingOutput::WantsRestore);
             }
 
-            OnboardingMsg::Back => match self.step.previous() {
+            OnboardingMsg::Back => match self.previous() {
                 Some(previous) => self.step = previous,
                 // Already at the first step, so back means leaving setup.
                 None => {
