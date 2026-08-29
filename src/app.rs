@@ -865,8 +865,13 @@ impl App {
             let sender = sender.clone();
             switch.connect_activated(move |_| sender.input(AppMsg::ShowWallets));
         }
-        this.add(&switch);
         page.add(&this);
+
+        // Its own group: everything above describes the wallet you are in,
+        // and this is the one row that leaves it.
+        let elsewhere = adw::PreferencesGroup::new();
+        elsewhere.add(&switch);
+        page.add(&elsewhere);
 
         // Replace whatever was there, so reopening never stacks pages.
         if let Some(existing) = self.prefs_page.take() {
