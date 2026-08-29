@@ -42,6 +42,8 @@ pub enum SendMsg {
     SetMinFee(Option<f64>),
     SelectFrom(u32),
     ToggleMax(bool),
+    /// The amount field was typed in.
+    AmountEdited,
     /// Build the transaction and show what it would cost.
     Review,
     Planned(Box<Result<Plan, String>>),
@@ -110,6 +112,12 @@ impl SendForm {
         self.settings
             .denomination
             .format(self.available_sats(), &self.network)
+    }
+
+    /// The same number without its unit, for a field that will be read back.
+    fn available_amount(&self) -> String {
+        let shown = self.available();
+        shown.rsplit_once(' ').map_or(shown.clone(), |(amount, _)| amount.to_string())
     }
 
     fn unit(&self) -> &'static str {
@@ -256,7 +264,15 @@ impl Component for SendForm {
                                 #[watch]
                                 set_title: &format!("Amount in {}", model.unit()),
                                 #[watch]
-                                set_sensitive: !model.busy && !model.max,
+                                set_sensitive: !model.busy,
+
+                                // Typing an amount is a way of saying "not
+                                // everything", so the field stays editable and
+                                // an edit releases Max rather than being
+                                // refused by a greyed-out row.
+                                connect_changed[sender] => move |_| {
+                                    sender.input(SendMsg::AmountEdited);
+                                },
 
                                 #[name(max_button)]
                                 add_suffix = &gtk::ToggleButton {
@@ -399,12 +415,22 @@ impl Component for SendForm {
 
             SendMsg::ToggleMax(max) => {
                 self.max = max;
-                if let Some(row) = &self.amount_row {
-                    if max {
-                        row.set_text(&self.available());
-                    } else {
-                        row.set_text("");
-                    }
+                // Filled in on the way up, and left alone on the way down: the
+                // number is a reasonable starting point for editing.
+                if max {
+                    widgets.amount_row.set_text(&self.available_amount());
+                }
+            }
+
+            SendMsg::AmountEdited => {
+                // Still the whole balance? Still a max send. Anything else and
+                // the toggle no longer describes what is in the field.
+                if self.max
+                    && self.settings.denomination.parse(&widgets.amount_row.text())
+                        != Ok(self.available_sats())
+                {
+                    self.max = false;
+                    widgets.max_button.set_active(false);
                 }
             }
 
