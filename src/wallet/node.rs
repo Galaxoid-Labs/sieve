@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use bdk_kyoto::builder::{Builder, BuilderExt};
-use bdk_kyoto::{Info, LightClient, ScanType, UpdateSubscriber, wallets::Single};
-use bdk_wallet::rusqlite::Connection;
-use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
+use bdk_kyoto::{Info, LightClient, ScanType, UpdateSubscriber, wallets::Multiple};
+use bdk_wallet::Wallet;
 use tokio::sync::Mutex as AsyncMutex;
 
 use bdk_kyoto::bip157::HashCheckpoint;
 
-use super::{Meta, Paths, Summary, restrict};
+use super::accounts::Portfolio;
+use super::{Meta, Paths, Summary};
 
 /// How many peers to hold open.
 ///
@@ -108,8 +108,8 @@ impl Progress {
 
 /// A running light client bound to one wallet.
 pub struct Session {
-    inner: Arc<AsyncMutex<Inner>>,
-    updates: Arc<AsyncMutex<UpdateSubscriber<Single>>>,
+    portfolio: Arc<AsyncMutex<Portfolio>>,
+    updates: Arc<AsyncMutex<UpdateSubscriber<Multiple>>>,
     info: Arc<AsyncMutex<bdk_kyoto::Receiver<Info>>>,
     warnings: Arc<AsyncMutex<bdk_kyoto::UnboundedReceiver<bdk_kyoto::Warning>>>,
     requester: bdk_kyoto::Requester,
@@ -118,70 +118,66 @@ pub struct Session {
     synced: Arc<AtomicBool>,
 }
 
-struct Inner {
-    wallet: PersistedWallet<Connection>,
-    conn: Connection,
-}
-
 impl Session {
-    /// Load the wallet, start the node, and begin fetching.
+    /// Load every watched path, start the node, and begin fetching.
     ///
     /// Must be called from inside the tokio runtime — the node is spawned onto
     /// it. Relm4's async commands satisfy that.
     pub async fn start(paths: &Paths) -> Result<Self> {
-        let meta = Meta::load(paths);
-        let network = meta.as_ref().map(|m| m.network()).unwrap_or(bdk_wallet::bitcoin::Network::Signet);
+        let meta = Meta::load(paths).context("this wallet has no metadata file")?;
+        let network = meta.network();
+        let dir = paths.db.parent().unwrap_or(&paths.db).to_path_buf();
 
-        let mut conn = Connection::open(&paths.db)?;
-        restrict(&paths.db)?;
-        let wallet: PersistedWallet<Connection> = Wallet::load()
-            .check_network(network)
-            .load_wallet(&mut conn)
-            .map_err(|e| anyhow!("could not load the wallet database: {e}"))?
-            .context("the wallet database is empty — unlock first")?;
+        let portfolio =
+            Portfolio::load(&dir, &meta.script_types, meta.primary, network)?;
+        if portfolio.is_empty() {
+            anyhow::bail!("no wallet databases found — unlock first");
+        }
 
-        let headers = paths.db.parent().unwrap_or(&paths.db).join("headers");
+        let headers = dir.join("headers");
         std::fs::create_dir_all(&headers)?;
 
-        // A wallet that has never synced sits at the genesis checkpoint, so
-        // `ScanType::Sync` would walk the entire chain. If we recorded a
-        // birthday when the wallet was created, start there instead.
-        let scan_type = match (wallet.latest_checkpoint().height(), meta.as_ref()) {
-            (0, Some(meta)) => match meta.birthday_hash.parse() {
-                Ok(hash) => {
-                    tracing::info!(
-                        height = meta.birthday_height,
-                        %network,
-                        "scanning from the wallet birthday"
-                    );
-                    ScanType::Recovery {
+        // Every path shares one node. A compact block filter covers a whole
+        // block regardless of what is being matched, so watching four paths
+        // downloads exactly what watching one would.
+        let mut wallets: Vec<(&Wallet, ScanType)> = Vec::new();
+        for account in &portfolio.accounts {
+            // A path that has never synced starts at the recorded birthday; one
+            // that has starts from its own checkpoint.
+            let scan_type = if account.wallet.latest_checkpoint().height() == 0 {
+                match meta.birthday_hash.parse() {
+                    Ok(hash) => ScanType::Recovery {
                         // A floor, not just the current index: recovery peeks
-                        // this many scripts when testing filters, and a fresh
-                        // wallet reporting 0 would check almost nothing.
-                        used_script_index: wallet
-                            .derivation_index(KeychainKind::External)
+                        // this many scripts, and a fresh wallet reporting 0
+                        // would check almost nothing against the filters.
+                        used_script_index: account
+                            .wallet
+                            .derivation_index(bdk_wallet::KeychainKind::External)
                             .unwrap_or(0)
                             .max(25),
                         checkpoint: HashCheckpoint::new(meta.birthday_height, hash),
+                    },
+                    Err(e) => {
+                        tracing::warn!(%e, "birthday hash unreadable; scanning from genesis");
+                        ScanType::Sync
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(%e, "birthday hash is unreadable; scanning from genesis");
-                    ScanType::Sync
-                }
-            },
-            (0, None) => {
-                tracing::warn!("no birthday recorded; scanning from genesis");
+            } else {
                 ScanType::Sync
-            }
-            _ => ScanType::Sync,
-        };
+            };
+            tracing::info!(
+                path = %account.script_type,
+                ?scan_type,
+                "watching derivation path"
+            );
+            wallets.push((&account.wallet, scan_type));
+        }
 
-        let client: LightClient<_, Single> = Builder::new(network)
+        let client: LightClient<_, Multiple> = Builder::new(network)
             .required_peers(REQUIRED_PEERS)
             .data_dir(headers)
             .response_timeout(RESPONSE_TIMEOUT)
-            .build_with_wallet(&wallet, scan_type)
+            .build_with_wallets(wallets)
             .map_err(|e| anyhow!("could not build the light client: {e}"))?;
 
         let (client, logging, updates) = client.subscribe();
@@ -191,7 +187,7 @@ impl Session {
         relm4::spawn(async move { node.run().await });
 
         Ok(Session {
-            inner: Arc::new(AsyncMutex::new(Inner { wallet, conn })),
+            portfolio: Arc::new(AsyncMutex::new(portfolio)),
             updates: Arc::new(AsyncMutex::new(updates)),
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
             warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
@@ -200,43 +196,36 @@ impl Session {
         })
     }
 
-    /// Await the next wallet update, apply it, and persist.
+    /// Await the next round of wallet updates, apply them, and persist.
     ///
     /// Returns once the node has caught up to the tip or a new block arrives,
     /// so the caller loops on it.
     pub async fn next_update(&self) -> Result<Summary> {
-        let update = {
-            let mut updates = self.updates.lock().await;
-            updates
-                .update()
+        let updates: Vec<_> = {
+            let mut subscriber = self.updates.lock().await;
+            subscriber
+                .updates()
                 .await
                 .map_err(|e| anyhow!("sync failed: {e}"))?
+                .collect()
         };
 
-        let mut inner = self.inner.lock().await;
-        let Inner { wallet, conn } = &mut *inner;
-        wallet
-            .apply_update(update)
-            .map_err(|e| anyhow!("could not apply the update: {e}"))?;
-        wallet
-            .persist(conn)
-            .map_err(|e| anyhow!("could not persist the wallet: {e}"))?;
-
-        let address = wallet.next_unused_address(KeychainKind::External);
-        wallet
-            .persist(conn)
-            .map_err(|e| anyhow!("could not persist the wallet: {e}"))?;
+        let mut portfolio = self.portfolio.lock().await;
+        for (id, update) in updates {
+            // Updates arrive tagged by descriptor, because one node feeds
+            // several wallets. An update with no matching account is not an
+            // error worth failing the sync over.
+            match portfolio.account_for(id) {
+                Some(account) => account
+                    .wallet
+                    .apply_update(update)
+                    .map_err(|e| anyhow!("could not apply the update: {e}"))?,
+                None => tracing::warn!(?id, "update for an unknown descriptor"),
+            }
+        }
 
         self.synced.store(true, Ordering::Relaxed);
-
-        let balance = wallet.balance();
-        Ok(Summary {
-            balance_sats: balance.confirmed.to_sat(),
-            pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
-            tip: wallet.latest_checkpoint().height(),
-            next_address: address.address.to_string(),
-            network: wallet.network().to_string(),
-        })
+        Summary::from_portfolio(&mut portfolio)
     }
 
     /// Await the next progress event. `None` when the node has stopped.

@@ -437,6 +437,10 @@ impl Component for Onboarding {
                 // newest checkpoint this build knows about.
                 let network = wallet::DEFAULT_NETWORK;
                 let birthday = wallet::checkpoints(network)[0];
+                // A wallet Sieve creates is taproot only. Other paths are for
+                // seeds that came from elsewhere.
+                let primary = wallet::accounts::ScriptType::Taproot;
+                let script_types = vec![primary];
                 // Argon2 and the database write both block. Off the main thread.
                 sender.spawn_oneshot_command(move || {
                     OnboardingCmd::Created(
@@ -447,6 +451,9 @@ impl Component for Onboarding {
                             crate::vault::KdfParams::default(),
                             network,
                             birthday,
+                            &script_types,
+                            primary,
+                            None,
                         )
                             .map_err(|e| e.to_string()),
                     )

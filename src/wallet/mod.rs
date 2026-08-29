@@ -157,14 +157,37 @@ pub struct Meta {
     /// The earliest block this wallet could hold a transaction in.
     pub birthday_height: u32,
     pub birthday_hash: String,
+    /// Which derivation paths this wallet watches. Recorded so a later build
+    /// that supports more paths does not silently start scanning for coins
+    /// that were never derived.
+    #[serde(default = "default_script_types")]
+    pub script_types: Vec<accounts::ScriptType>,
+    /// The path used for receiving.
+    #[serde(default = "default_primary")]
+    pub primary: accounts::ScriptType,
+}
+
+fn default_script_types() -> Vec<accounts::ScriptType> {
+    vec![accounts::ScriptType::Taproot]
+}
+
+fn default_primary() -> accounts::ScriptType {
+    accounts::ScriptType::Taproot
 }
 
 impl Meta {
-    pub fn new(network: Network, birthday: Checkpoint) -> Self {
+    pub fn new(
+        network: Network,
+        birthday: Checkpoint,
+        script_types: Vec<accounts::ScriptType>,
+        primary: accounts::ScriptType,
+    ) -> Self {
         Self {
             network: network.to_string(),
             birthday_height: birthday.height,
             birthday_hash: birthday.hash.to_owned(),
+            script_types,
+            primary,
         }
     }
 
@@ -192,17 +215,61 @@ pub(crate) fn restrict(path: &Path) -> Result<()> {
         .with_context(|| format!("cannot restrict {}", path.display()))
 }
 
-/// What the UI needs to render an unlocked wallet.
+/// One derivation path's share of the wallet.
 #[derive(Debug, Clone)]
+pub struct AccountSummary {
+    pub script_type: accounts::ScriptType,
+    pub balance_sats: u64,
+    pub pending_sats: u64,
+    pub next_address: String,
+}
+
+/// What the UI needs to render an unlocked wallet.
+#[derive(Debug, Clone, Default)]
 pub struct Summary {
-    /// Confirmed only. Compact block filters describe transactions in blocks,
-    /// so the mempool is invisible to this wallet by construction.
+    /// Confirmed, summed across every path. Compact block filters describe
+    /// transactions in blocks, so the mempool is invisible by construction.
     pub balance_sats: u64,
     pub pending_sats: u64,
     /// Height the wallet has verified up to.
     pub tip: u32,
     pub next_address: String,
     pub network: String,
+    /// Per-path breakdown. Seeing the other paths sit at zero is what proves
+    /// the scan actually covered them.
+    pub accounts: Vec<AccountSummary>,
+}
+
+impl Summary {
+    pub(crate) fn from_portfolio(portfolio: &mut accounts::Portfolio) -> Result<Self> {
+        let mut summary = Summary { ..Default::default() };
+        let primary = portfolio.primary;
+
+        for account in portfolio.accounts.iter_mut() {
+            let address = account
+                .wallet
+                .next_unused_address(bdk_wallet::KeychainKind::External);
+            let balance = account.wallet.balance();
+            let entry = AccountSummary {
+                script_type: account.script_type,
+                balance_sats: balance.confirmed.to_sat(),
+                pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
+                next_address: address.address.to_string(),
+            };
+            account.persist()?;
+
+            summary.balance_sats += entry.balance_sats;
+            summary.pending_sats += entry.pending_sats;
+            summary.tip = summary.tip.max(account.wallet.latest_checkpoint().height());
+            summary.network = account.wallet.network().to_string();
+            if account.script_type == primary {
+                summary.next_address = entry.next_address.clone();
+            }
+            summary.accounts.push(entry);
+        }
+
+        Ok(summary)
+    }
 }
 
 /// A fresh 12-word English mnemonic.
@@ -216,39 +283,38 @@ pub fn generate_mnemonic() -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(generated.to_string()))
 }
 
-/// Derive the BIP86 descriptors and hand back a persisted wallet.
-///
-/// The private key goes in, but `bdk_wallet::ChangeSet` persists only
-/// `Descriptor<DescriptorPublicKey>` — so the database this writes contains no
-/// key material.
-fn build(mnemonic: &str, db: &Path, network: Network) -> Result<PersistedWallet<Connection>> {
+/// Turn a mnemonic into the extended private key every path derives from.
+fn xprv_from_mnemonic(
+    mnemonic: &str,
+    passphrase: Option<&str>,
+    network: Network,
+) -> Result<bdk_wallet::bitcoin::bip32::Xpriv> {
     let parsed = Mnemonic::parse_in(Language::English, mnemonic)
         .map_err(|e| anyhow!("that is not a valid recovery phrase: {e}"))?;
-    let xkey: ExtendedKey<Tap> = parsed
+
+    // The BIP-39 passphrase is part of the seed, not the file encryption. A
+    // different passphrase silently derives a different, empty wallet, which is
+    // exactly why it is kept distinct from the wallet password everywhere.
+    // `(Mnemonic, Option<String>)` is BDK's form for a seed plus a BIP-39
+    // passphrase; `None` is the ordinary no-passphrase case.
+    let xkey: ExtendedKey<Tap> = (parsed, passphrase.map(str::to_owned))
         .into_extended_key()
         .map_err(|e| anyhow!("could not derive a key from the phrase: {e}"))?;
-    let xprv = xkey
-        .into_xprv(network.into())
-        .context("could not derive an extended private key")?;
 
-    if let Some(parent) = db.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut conn = Connection::open(db)?;
-    restrict(db)?;
-    Wallet::create(
-        Bip86(xprv, KeychainKind::External),
-        Bip86(xprv, KeychainKind::Internal),
-    )
-    .network(network)
-    .create_wallet(&mut conn)
-    .map_err(|e| anyhow!("could not create the wallet database: {e}"))
+    xkey.into_xprv(network.into())
+        .context("could not derive an extended private key")
 }
 
-/// Seal the seed and initialise the wallet database.
+/// Where the per-path databases live.
+fn data_dir(paths: &Paths) -> &Path {
+    paths.db.parent().unwrap_or(&paths.db)
+}
+
+/// Seal the seed and initialise every derivation path's database.
 ///
 /// Blocking and CPU-bound — Argon2 runs here. Call it from a command, never on
 /// the main thread.
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     mnemonic: &str,
     password: &[u8],
@@ -256,70 +322,78 @@ pub fn create(
     kdf: vault::KdfParams,
     network: Network,
     birthday: Checkpoint,
+    script_types: &[accounts::ScriptType],
+    primary: accounts::ScriptType,
+    bip39_passphrase: Option<&str>,
 ) -> Result<Summary> {
-    let mut wallet = build(mnemonic, &paths.db, network)?;
+    let xprv = xprv_from_mnemonic(mnemonic, bip39_passphrase, network)?;
+    let mut portfolio =
+        accounts::Portfolio::create_from_xprv(xprv, data_dir(paths), script_types, primary, network)?;
 
     // Recorded before the vault is written, so a wallet that exists at all has
     // a network and a birthday, and never falls back to scanning from genesis.
-    Meta::new(network, birthday).save(paths)?;
+    Meta::new(network, birthday, script_types.to_vec(), primary).save(paths)?;
 
-    let sealed = vault::seal(
-        mnemonic.as_bytes(),
-        password,
-        &network.to_string(),
-        kdf,
-    )?;
+    let sealed = vault::seal(mnemonic.as_bytes(), password, &network.to_string(), kdf)?;
     vault::write_atomic(&paths.vault, &sealed)?;
 
-    let mut conn = Connection::open(&paths.db)?;
-    let summary = summarise(&mut wallet, &mut conn)?;
-    Ok(summary)
+    Summary::from_portfolio(&mut portfolio)
 }
 
-/// Verify the passphrase against the vault, then load the wallet watch-only.
+/// Import a single WIF key, watched under every requested script type.
+pub fn import_wif(
+    wif: &str,
+    password: &[u8],
+    paths: &Paths,
+    kdf: vault::KdfParams,
+    network: Network,
+    birthday: Checkpoint,
+    script_types: &[accounts::ScriptType],
+    primary: accounts::ScriptType,
+) -> Result<Summary> {
+    let mut portfolio =
+        accounts::Portfolio::create_from_wif(wif, data_dir(paths), script_types, primary, network)?;
+    Meta::new(network, birthday, script_types.to_vec(), primary).save(paths)?;
+
+    let sealed = vault::seal(wif.as_bytes(), password, &network.to_string(), kdf)?;
+    vault::write_atomic(&paths.vault, &sealed)?;
+
+    Summary::from_portfolio(&mut portfolio)
+}
+
+/// Verify the password against the vault, then load every path watch-only.
 ///
-/// The seed is decrypted only to prove the passphrase is right; the wallet
-/// itself is loaded from public descriptors already in the database.
+/// The secret is decrypted only to prove the password is right; the wallets
+/// themselves are loaded from public descriptors already in the databases.
 pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
     let blob = std::fs::read(&paths.vault)
         .with_context(|| format!("cannot read {}", paths.vault.display()))?;
-    let mnemonic = vault::open(&blob, password)?;
+    let secret = vault::open(&blob, password)?;
 
-    let network = Meta::load(paths).map(|m| m.network()).unwrap_or(Network::Signet);
-    let mut conn = Connection::open(&paths.db)?;
-    restrict(&paths.db)?;
-    let mut wallet = match Wallet::load()
-        .check_network(network)
-        .load_wallet(&mut conn)
-        .map_err(|e| anyhow!("could not load the wallet database: {e}"))?
-    {
-        Some(wallet) => wallet,
-        // The vault opened but the database is missing or empty. Rebuild it
-        // from the seed we just decrypted rather than failing the unlock.
-        None => {
-            let phrase = std::str::from_utf8(&mnemonic)
-                .context("the vault does not contain a valid recovery phrase")?;
-            build(phrase, &paths.db, network)?
-        }
-    };
+    let meta = Meta::load(paths).context("this wallet has no metadata file")?;
+    let mut portfolio = accounts::Portfolio::load(
+        data_dir(paths),
+        &meta.script_types,
+        meta.primary,
+        meta.network(),
+    )?;
 
-    summarise(&mut wallet, &mut conn)
-}
+    // The databases hold no unrecoverable state, so losing them costs a rescan
+    // rather than the wallet. Rebuild from the secret we just decrypted.
+    if portfolio.is_empty() {
+        let phrase = std::str::from_utf8(&secret)
+            .context("the vault does not contain readable text")?;
+        let xprv = xprv_from_mnemonic(phrase, None, meta.network())?;
+        portfolio = accounts::Portfolio::create_from_xprv(
+            xprv,
+            data_dir(paths),
+            &meta.script_types,
+            meta.primary,
+            meta.network(),
+        )?;
+    }
 
-fn summarise(wallet: &mut PersistedWallet<Connection>, conn: &mut Connection) -> Result<Summary> {
-    let address = wallet.next_unused_address(KeychainKind::External);
-    wallet
-        .persist(conn)
-        .map_err(|e| anyhow!("could not persist the wallet: {e}"))?;
-
-    let balance = wallet.balance();
-    Ok(Summary {
-        balance_sats: balance.confirmed.to_sat(),
-        pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
-        tip: wallet.latest_checkpoint().height(),
-        next_address: address.address.to_string(),
-        network: wallet.network().to_string(),
-    })
+    Summary::from_portfolio(&mut portfolio)
 }
 
 #[cfg(test)]
@@ -344,6 +418,22 @@ mod tests {
     /// Cheap parameters: these tests exercise the plumbing, not the KDF.
     const FAST: vault::KdfParams = vault::KdfParams { m_cost: 8, t_cost: 1, p_cost: 1 };
 
+    /// The taproot-only wallet Sieve creates for itself.
+    fn create_for_test(phrase: &str, password: &[u8], paths: &Paths) -> Summary {
+        create(
+            phrase,
+            password,
+            paths,
+            FAST,
+            DEFAULT_NETWORK,
+            SIGNET_CHECKPOINTS[0],
+            &[accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            None,
+        )
+        .unwrap()
+    }
+
     fn scratch(name: &str) -> Paths {
         let dir = std::env::temp_dir()
             .join(format!("sieve-test-{}-{name}", std::process::id()));
@@ -362,7 +452,7 @@ mod tests {
         assert!(!paths.is_initialised());
 
         let phrase = generate_mnemonic().unwrap();
-        let created = create(&phrase, b"a good password", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
+        let created = create_for_test(&phrase, b"a good password", &paths);
 
         assert!(paths.is_initialised());
         assert!(created.next_address.starts_with("tb1p"));
@@ -406,12 +496,57 @@ mod tests {
     }
 
     #[test]
+    fn a_passphrase_derives_a_different_wallet() {
+        // The BIP-39 passphrase is part of the seed. This is the property that
+        // makes a mistyped passphrase silently produce an empty wallet, and the
+        // reason it is never conflated with the wallet password.
+        let phrase = "abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon about";
+
+        let plain = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
+        let with = xprv_from_mnemonic(phrase, Some("extra"), DEFAULT_NETWORK).unwrap();
+        let typo = xprv_from_mnemonic(phrase, Some("extar"), DEFAULT_NETWORK).unwrap();
+
+        assert_ne!(plain, with, "a passphrase must change the derived wallet");
+        assert_ne!(with, typo, "a mistyped passphrase derives a different wallet");
+    }
+
+    #[test]
+    fn every_script_type_derives_a_distinct_wallet() {
+        // If two paths produced the same addresses, scanning all four would be
+        // pointless. This is why importing under the wrong path finds nothing.
+        let phrase = "abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon about";
+        let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("sieve-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        for script_type in accounts::ScriptType::ALL {
+            let mut account = accounts::Account::create(
+                xprv, script_type, &dir.join(script_type.db_file()), DEFAULT_NETWORK,
+            ).unwrap();
+            let address = account
+                .wallet
+                .next_unused_address(KeychainKind::External)
+                .address
+                .to_string();
+            assert!(seen.insert(address.clone()), "{script_type} reused an address: {address}");
+        }
+        assert_eq!(seen.len(), 4);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn creating_a_wallet_records_a_birthday() {
         // Without this file the first sync falls back to the genesis block and
         // walks the entire chain.
         let paths = scratch("birthday");
         let phrase = generate_mnemonic().unwrap();
-        create(&phrase, b"a good password", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
+        create_for_test(&phrase, b"a good password", &paths);
 
         let meta = Meta::load(&paths).expect("a created wallet must record its metadata");
         assert_eq!(meta.network(), DEFAULT_NETWORK);
@@ -425,7 +560,7 @@ mod tests {
     fn unlock_rejects_the_wrong_password() {
         let paths = scratch("wrongpass");
         let phrase = generate_mnemonic().unwrap();
-        create(&phrase, b"the right one", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
+        create_for_test(&phrase, b"the right one", &paths);
 
         assert!(unlock(b"the wrong one", &paths).is_err());
 
@@ -436,10 +571,12 @@ mod tests {
     fn a_lost_database_is_rebuilt_from_the_vault() {
         let paths = scratch("rebuild");
         let phrase = generate_mnemonic().unwrap();
-        let created = create(&phrase, b"a good password", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
+        let created = create_for_test(&phrase, b"a good password", &paths);
 
-        // The database holds only public data, so losing it must be survivable.
-        std::fs::remove_file(&paths.db).unwrap();
+        // The databases hold only public data, so losing them must be survivable.
+        for script_type in accounts::ScriptType::ALL {
+            let _ = std::fs::remove_file(paths.db.parent().unwrap().join(script_type.db_file()));
+        }
         let rebuilt = unlock(b"a good password", &paths).unwrap();
         assert_eq!(created.next_address, rebuilt.next_address);
 
@@ -458,12 +595,18 @@ mod tests {
                       abandon abandon abandon abandon abandon about";
 
         let first = {
-            let mut w = build(phrase, &dir.join("a.sqlite"), DEFAULT_NETWORK).unwrap();
-            w.next_unused_address(KeychainKind::External).address.to_string()
+            let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
+            let mut a = accounts::Account::create(
+                xprv, accounts::ScriptType::Taproot, &dir.join("a.sqlite"), DEFAULT_NETWORK
+            ).unwrap();
+            a.wallet.next_unused_address(KeychainKind::External).address.to_string()
         };
         let second = {
-            let mut w = build(phrase, &dir.join("b.sqlite"), DEFAULT_NETWORK).unwrap();
-            w.next_unused_address(KeychainKind::External).address.to_string()
+            let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
+            let mut b = accounts::Account::create(
+                xprv, accounts::ScriptType::Taproot, &dir.join("b.sqlite"), DEFAULT_NETWORK
+            ).unwrap();
+            b.wallet.next_unused_address(KeychainKind::External).address.to_string()
         };
 
         assert_eq!(first, second, "the same phrase must derive the same address");

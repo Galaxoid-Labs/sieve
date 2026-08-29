@@ -344,3 +344,80 @@ mod tests {
         }
     }
 }
+
+/// Every derivation path being watched for one seed, and which of them the UI
+/// treats as the default for receiving.
+pub struct Portfolio {
+    pub accounts: Vec<Account>,
+    pub primary: ScriptType,
+}
+
+impl Portfolio {
+    /// Open all the paths an HD credential could have used.
+    ///
+    /// A path whose database is missing is simply absent — a wallet created
+    /// before a path was supported must still load.
+    pub fn load(
+        dir: &Path,
+        script_types: &[ScriptType],
+        primary: ScriptType,
+        network: Network,
+    ) -> Result<Self> {
+        let mut accounts = Vec::new();
+        for script_type in script_types {
+            let db = dir.join(script_type.db_file());
+            if let Some(account) = Account::load(*script_type, &db, network)? {
+                accounts.push(account);
+            }
+        }
+        Ok(Portfolio { accounts, primary })
+    }
+
+    pub fn create_from_xprv(
+        xprv: Xpriv,
+        dir: &Path,
+        script_types: &[ScriptType],
+        primary: ScriptType,
+        network: Network,
+    ) -> Result<Self> {
+        let mut accounts = Vec::new();
+        for script_type in script_types {
+            let db = dir.join(script_type.db_file());
+            accounts.push(Account::create(xprv, *script_type, &db, network)?);
+        }
+        Ok(Portfolio { accounts, primary })
+    }
+
+    pub fn create_from_wif(
+        wif: &str,
+        dir: &Path,
+        script_types: &[ScriptType],
+        primary: ScriptType,
+        network: Network,
+    ) -> Result<Self> {
+        let mut accounts = Vec::new();
+        for script_type in script_types {
+            let db = dir.join(script_type.db_file());
+            accounts.push(Account::create_from_wif(wif, *script_type, &db, network)?);
+        }
+        Ok(Portfolio { accounts, primary })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.accounts.is_empty()
+    }
+
+    /// Route an update to the account it belongs to.
+    pub fn account_for(&mut self, id: bdk_wallet::chain::DescriptorId) -> Option<&mut Account> {
+        self.accounts.iter_mut().find(|a| a.descriptor_id() == id)
+    }
+}
+
+impl fmt::Debug for Portfolio {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Portfolio")
+            .field("paths", &self.accounts.len())
+            .field("primary", &self.primary)
+            .finish()
+    }
+}
