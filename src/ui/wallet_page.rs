@@ -7,6 +7,7 @@ use relm4::{adw, gtk};
 
 use crate::wallet::node::Progress;
 use crate::settings::{Denomination, Settings};
+use crate::wallet::accounts::ScriptType;
 use crate::wallet::Summary;
 
 #[derive(Debug)]
@@ -269,6 +270,9 @@ pub struct WalletPage {
     /// of paths genuinely changes.
     path_labels: Vec<String>,
     receive_index: u32,
+    /// Which path the receive view is showing. By type, not by position: the
+    /// account list is rebuilt on every sync and an index would drift.
+    receive_path: Option<crate::wallet::accounts::ScriptType>,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -295,6 +299,7 @@ pub enum WalletPageMsg {
     RefreshChain,
     /// Choose which derivation path to receive on.
     SelectReceivePath(u32),
+    SelectPath(crate::wallet::accounts::ScriptType),
     /// Ask for an address that has not been handed to anyone yet.
     NewAddress,
     /// Open the detail sheet for one transaction.
@@ -324,11 +329,37 @@ impl WalletPage {
             return fresh.clone();
         }
         let Some(summary) = &self.summary else { return "—".into() };
-        summary
-            .accounts
-            .get(self.receive_index as usize)
+        self.receive_path
+            .and_then(|path| summary.accounts.iter().find(|a| a.script_type == path))
             .map(|a| a.next_address.clone())
             .unwrap_or_else(|| summary.next_address.clone())
+    }
+
+    /// The code a camera reads. Regenerated whenever the address changes.
+    fn qr(&self) -> Option<gtk::gdk::Texture> {
+        let address = self.address();
+        if address == "—" {
+            return None;
+        }
+        super::qr::texture(&super::qr::payment_uri(&address))
+    }
+
+    /// Whether this path is one the wallet actually watches.
+    fn has_path(&self, path: crate::wallet::accounts::ScriptType) -> bool {
+        self.summary
+            .as_ref()
+            .is_some_and(|s| s.accounts.iter().any(|a| a.script_type == path))
+    }
+
+    fn path_selected(&self, path: crate::wallet::accounts::ScriptType) -> bool {
+        match self.receive_path {
+            Some(selected) => selected == path,
+            None => self
+                .summary
+                .as_ref()
+                .and_then(|s| s.accounts.iter().find(|a| a.next_address == s.next_address))
+                .is_some_and(|a| a.script_type == path),
+        }
     }
 
     /// The balance in dollars, when a price is on hand.
@@ -468,7 +499,12 @@ impl WalletPage {
     /// recognisable without knowing BIP numbers.
     fn address_hint(&self) -> String {
         let Some(summary) = &self.summary else { return String::new() };
-        let Some(account) = summary.accounts.get(self.receive_index as usize) else {
+        let selected = self
+            .receive_path
+            .and_then(|path| summary.accounts.iter().find(|a| a.script_type == path));
+        let Some(account) =
+            selected.or_else(|| summary.accounts.iter().find(|a| a.next_address == summary.next_address))
+        else {
             return String::new();
         };
         let network = summary.network.parse().unwrap_or(bdk_wallet::bitcoin::Network::Signet);
@@ -720,45 +756,155 @@ impl Component for WalletPage {
                 },
 
                 add_titled_with_icon[Some("receive"), "Receive", "go-bottom-symbolic"] =
-                &adw::PreferencesPage {
+                &gtk::ScrolledWindow {
+                    set_vexpand: true,
 
-                    adw::PreferencesGroup {
-                        set_title: "Receive",
-                        #[watch]
-                        set_description: Some(&model.address_hint()),
+                    adw::Clamp {
+                        set_maximum_size: 420,
 
-                        #[name(path_picker)]
-                        adw::ComboRow {
-                            set_title: "Address type",
-                            // Model set once and mutated in place; see path_model.
-                            set_model: Some(&path_model),
-                            #[watch]
-                            set_visible: model.has_path_choice(),
-                            connect_selected_notify[sender] => move |row| {
-                                sender.input(WalletPageMsg::SelectReceivePath(row.selected()));
-                            },
-                        },
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 18,
+                            set_margin_all: 18,
+                            set_valign: gtk::Align::Center,
 
-                        adw::ActionRow {
-                            set_title: "Next address",
-                            #[watch]
-                            set_subtitle: &model.address(),
-                            set_subtitle_lines: 2,
+                            // A white card behind the code, in both themes. An
+                            // inverted QR looks better in dark mode and scans
+                            // worse, so the code keeps its own ground.
+                            gtk::Box {
+                                add_css_class: "card",
+                                set_halign: gtk::Align::Center,
+                                set_overflow: gtk::Overflow::Hidden,
 
-                            add_suffix = &gtk::Button {
-                                set_icon_name: "view-refresh-symbolic",
-                                set_tooltip_text: Some("New address — use a different one for each payer"),
-                                set_valign: gtk::Align::Center,
-                                add_css_class: "flat",
-                                connect_clicked => WalletPageMsg::NewAddress,
+                                gtk::Picture {
+                                    set_size_request: (260, 260),
+                                    set_content_fit: gtk::ContentFit::Contain,
+                                    #[watch]
+                                    set_paintable: model.qr().as_ref(),
+                                },
                             },
 
-                            add_suffix = &gtk::Button {
-                                set_icon_name: "edit-copy-symbolic",
-                                set_tooltip_text: Some("Copy address"),
-                                set_valign: gtk::Align::Center,
-                                add_css_class: "flat",
-                                connect_clicked => WalletPageMsg::CopyAddress,
+                            // All four at once rather than hidden in a
+                            // dropdown: which address type you are handing out
+                            // is worth seeing without opening anything.
+                            gtk::Box {
+                                add_css_class: "linked",
+                                set_halign: gtk::Align::Center,
+                                #[watch]
+                                set_visible: model.has_path_choice(),
+
+                                #[name(path_legacy)]
+                                gtk::ToggleButton {
+                                    set_label: "Legacy",
+                                    #[watch]
+                                    set_visible: model.has_path(ScriptType::Legacy),
+                                    #[watch]
+                                    #[block_signal(legacy_toggled)]
+                                    set_active: model.path_selected(ScriptType::Legacy),
+                                    connect_toggled[sender] => move |button| {
+                                        if button.is_active() {
+                                            sender.input(WalletPageMsg::SelectPath(
+                                                ScriptType::Legacy,
+                                            ));
+                                        }
+                                    } @legacy_toggled,
+                                },
+
+                                #[name(path_nested)]
+                                gtk::ToggleButton {
+                                    set_label: "Nested",
+                                    set_group: Some(&path_legacy),
+                                    #[watch]
+                                    set_visible: model.has_path(ScriptType::NestedSegwit),
+                                    #[watch]
+                                    #[block_signal(nested_toggled)]
+                                    set_active: model.path_selected(ScriptType::NestedSegwit),
+                                    connect_toggled[sender] => move |button| {
+                                        if button.is_active() {
+                                            sender.input(WalletPageMsg::SelectPath(
+                                                ScriptType::NestedSegwit,
+                                            ));
+                                        }
+                                    } @nested_toggled,
+                                },
+
+                                #[name(path_native)]
+                                gtk::ToggleButton {
+                                    set_label: "SegWit",
+                                    set_group: Some(&path_legacy),
+                                    #[watch]
+                                    set_visible: model.has_path(ScriptType::NativeSegwit),
+                                    #[watch]
+                                    #[block_signal(native_toggled)]
+                                    set_active: model.path_selected(ScriptType::NativeSegwit),
+                                    connect_toggled[sender] => move |button| {
+                                        if button.is_active() {
+                                            sender.input(WalletPageMsg::SelectPath(
+                                                ScriptType::NativeSegwit,
+                                            ));
+                                        }
+                                    } @native_toggled,
+                                },
+
+                                #[name(path_taproot)]
+                                gtk::ToggleButton {
+                                    set_label: "Taproot",
+                                    set_group: Some(&path_legacy),
+                                    #[watch]
+                                    set_visible: model.has_path(ScriptType::Taproot),
+                                    #[watch]
+                                    #[block_signal(taproot_toggled)]
+                                    set_active: model.path_selected(ScriptType::Taproot),
+                                    connect_toggled[sender] => move |button| {
+                                        if button.is_active() {
+                                            sender.input(WalletPageMsg::SelectPath(
+                                                ScriptType::Taproot,
+                                            ));
+                                        }
+                                    } @taproot_toggled,
+                                },
+                            },
+
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Center,
+                                set_wrap: true,
+                                set_justify: gtk::Justification::Center,
+                                #[watch]
+                                set_label: &model.address_hint(),
+                            },
+
+                            gtk::Label {
+                                add_css_class: "monospace",
+                                add_css_class: "card",
+                                set_wrap: true,
+                                set_wrap_mode: gtk::pango::WrapMode::WordChar,
+                                set_selectable: true,
+                                set_justify: gtk::Justification::Center,
+                                set_margin_all: 4,
+                                #[watch]
+                                set_label: &model.address(),
+                            },
+
+                            gtk::Box {
+                                set_halign: gtk::Align::Center,
+                                set_spacing: 12,
+
+                                gtk::Button {
+                                    add_css_class: "pill",
+                                    add_css_class: "suggested-action",
+                                    set_label: "Copy",
+                                    connect_clicked => WalletPageMsg::CopyAddress,
+                                },
+
+                                gtk::Button {
+                                    add_css_class: "pill",
+                                    set_label: "New address",
+                                    set_tooltip_text: Some(
+                                        "Use a different address for each payer"
+                                    ),
+                                    connect_clicked => WalletPageMsg::NewAddress,
+                                },
                             },
                         },
                     },
@@ -985,6 +1131,7 @@ impl Component for WalletPage {
             path_model: gtk::StringList::new(&[]),
             path_labels: Vec::new(),
             receive_index: 0,
+            receive_path: None,
             fresh_address: None,
             summary: None,
             progress: Progress::Connecting,
@@ -1022,6 +1169,11 @@ impl Component for WalletPage {
         match msg {
             WalletPageMsg::ShowTransaction(txid) => {
                 self.show_transaction(&txid, root, &sender)
+            }
+            WalletPageMsg::SelectPath(path) => {
+                self.receive_path = Some(path);
+                // The fresh address belonged to the path being left.
+                self.fresh_address = None;
             }
             WalletPageMsg::SelectReceivePath(index) => {
                 self.receive_index = index;
@@ -1079,6 +1231,7 @@ impl Component for WalletPage {
                 self.note = None;
                 self.error = None;
                 self.receive_index = 0;
+                self.receive_path = None;
                 self.fresh_address = None;
                 self.path_labels.clear();
                 self.path_model.splice(0, self.path_model.n_items(), &[]);

@@ -27,6 +27,9 @@ secrecy = "0.10"
 # person turns it on. Blocking and small, with rustls rather than OpenSSL.
 ureq = "3"
 
+# QR rendering. Pure Rust, no C dependency, and nothing leaves the machine.
+qrcode = { version = "0.14", default-features = false }
+
 # Plumbing.
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
