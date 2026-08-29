@@ -88,9 +88,8 @@ factories, Adwaita patterns). Consult it rather than guessing at macro syntax.
 
 ## Not yet built
 
-First-run onboarding (seed generation, mnemonic display, `vault::seal`), the signer worker, the
-`bdk_kyoto` node wiring, and the primary menu. `vault::seal` and `vault::write_atomic` exist and
-are tested but not yet called — hence the `#![allow(dead_code)]` in `vault`.
+Restore-from-phrase, the signer worker, the `bdk_kyoto` node wiring, and the primary menu.
+Nothing signs yet, and the balance never changes because there is no chain sync.
 
 The full milestone plan (M0–M8, with the decisions that gate M1 and the mainnet gate at M8) is in
 `ROADMAP.md`.

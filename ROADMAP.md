@@ -24,16 +24,17 @@ a migration and a re-scan.
 Adwaita shell, vault (Argon2id KEK wrapping a random DEK, XChaCha20-Poly1305, header bound
 as AAD), atomic writes, process hardening, six vault tests.
 
-### M1 — Wallet creation and unlock — IN PROGRESS
+### M1 — Wallet creation and unlock — MOSTLY DONE
 *Done when: create a wallet, close the app, reopen, unlock back into the same wallet.*
 
-- First-run detection routes to onboarding instead of unlock
-- 12-word mnemonic via `bdk_wallet::keys::bip39`
-- Display-once screen; three-word verification challenge before the wallet is created
-- Passphrase with confirmation; mismatch error names the offending field
-- Seal to `vault.sieve`, derive public descriptors, initialise the BDK SQLite store
-- Restore-from-phrase with word and checksum validation
-- Signer worker owning the decrypted descriptor, one message at a time
+- [x] First-run detection routes to onboarding instead of unlock
+- [x] 12-word mnemonic via `bdk_wallet::keys::bip39`
+- [x] Display-once screen; three-word verification challenge before the wallet is created
+- [x] Passphrase with confirmation and a minimum length
+- [x] Seal to `vault.sieve`, derive BIP86 descriptors, initialise the BDK SQLite store
+- [x] Unlock loads watch-only from the database; a lost database is rebuilt from the vault
+- [ ] Restore-from-phrase with word and checksum validation
+- [ ] Signer worker owning the decrypted descriptor, one message at a time
 
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never
 crosses a component boundary as a message.

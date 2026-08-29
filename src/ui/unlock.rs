@@ -4,14 +4,12 @@
 //! visibly stall the frame clock, so it runs on the thread pool via
 //! `spawn_oneshot_command` and reports back as a `CommandOutput`.
 
-use std::path::PathBuf;
-
 use adw::prelude::*;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
 use zeroize::Zeroizing;
 
-use crate::vault;
+use crate::wallet::{self, Paths, Summary};
 
 /// Passphrase with a redacted `Debug`.
 ///
@@ -33,31 +31,41 @@ pub enum UnlockMsg {
 
 #[derive(Debug)]
 pub enum UnlockOutput {
-    /// The vault opened. The decrypted material is deliberately *not* carried
-    /// in this message — it goes to the signer worker, not through the UI tree.
-    Unlocked,
+    /// The vault opened. Only the watch-only summary travels — the decrypted
+    /// seed never crosses a component boundary.
+    Unlocked(Summary),
 }
 
 #[derive(Debug)]
 pub enum UnlockCmd {
-    Finished(Result<(), String>),
+    Finished(Result<Summary, String>),
 }
 
 pub struct Unlock {
-    vault_path: PathBuf,
+    paths: Paths,
     busy: bool,
     error: Option<String>,
 }
 
 #[relm4::component(pub)]
 impl Component for Unlock {
-    type Init = PathBuf;
+    type Init = Paths;
     type Input = UnlockMsg;
     type Output = UnlockOutput;
     type CommandOutput = UnlockCmd;
 
     view! {
-        adw::StatusPage {
+        adw::ToolbarView {
+            add_top_bar = &adw::HeaderBar {
+                #[wrap(Some)]
+                set_title_widget = &adw::WindowTitle {
+                    set_title: "Sieve",
+                    set_subtitle: "Locked",
+                },
+            },
+
+            #[wrap(Some)]
+            set_content = &adw::StatusPage {
             set_icon_name: Some("channel-secure-symbolic"),
             set_title: "Sieve",
             set_description: Some("Enter your passphrase to unlock this wallet."),
@@ -110,15 +118,16 @@ impl Component for Unlock {
                     },
                 },
             },
+            },
         }
     }
 
     fn init(
-        vault_path: Self::Init,
+        paths: Self::Init,
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let model = Unlock { vault_path, busy: false, error: None };
+        let model = Unlock { paths, busy: false, error: None };
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
@@ -132,20 +141,14 @@ impl Component for Unlock {
                 self.busy = true;
                 self.error = None;
 
-                let path = self.vault_path.clone();
+                let paths = self.paths.clone();
                 // Blocking and CPU-bound: goes to the thread pool, not the
                 // main loop. `spawn_oneshot_command` cancels on shutdown.
                 sender.spawn_oneshot_command(move || {
-                    let result = std::fs::read(&path)
-                        .map_err(|e| format!("Cannot read the vault: {e}"))
-                        .and_then(|blob| {
-                            vault::open(&blob, passphrase.0.as_bytes())
-                                .map_err(|e| e.to_string())
-                        })
-                        // TODO: hand the decrypted seed to the signer worker
-                        // instead of dropping it here.
-                        .map(|seed| drop(seed));
-                    UnlockCmd::Finished(result)
+                    UnlockCmd::Finished(
+                        wallet::unlock(passphrase.0.as_bytes(), &paths)
+                            .map_err(|e| e.to_string()),
+                    )
                 });
             }
         }
@@ -160,8 +163,8 @@ impl Component for Unlock {
         let UnlockCmd::Finished(result) = msg;
         self.busy = false;
         match result {
-            Ok(()) => {
-                let _ = sender.output(UnlockOutput::Unlocked);
+            Ok(summary) => {
+                let _ = sender.output(UnlockOutput::Unlocked(summary));
             }
             Err(message) => self.error = Some(message),
         }
