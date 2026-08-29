@@ -269,8 +269,17 @@ impl Component for App {
             AppMsg::Back => {
                 self.nav.pop();
             }
-            AppMsg::ShowOnboarding => self.nav.push_by_tag("onboarding"),
-            AppMsg::ShowRestore => self.nav.push_by_tag("restore"),
+            // Both are reached from the wallet list inside preferences, and
+            // both take over the window. Leave the dialog first, or the window
+            // visibly changes underneath a dialog that is still up.
+            AppMsg::ShowOnboarding => {
+                self.close_prefs();
+                self.nav.push_by_tag("onboarding");
+            }
+            AppMsg::ShowRestore => {
+                self.close_prefs();
+                self.nav.push_by_tag("restore");
+            }
 
             AppMsg::ShowPreferences => {
                 self.rebuild_preferences(&sender);
