@@ -205,6 +205,17 @@ impl Component for App {
             });
         }
 
+        // Text size and font come from the same schema and are missed in the
+        // same sessions, so they are mirrored the same way.
+        if let Some(gio_settings) = &desktop {
+            apply_desktop_typography(gio_settings);
+            for key in ["text-scaling-factor", "font-name"] {
+                gio_settings.connect_changed(Some(key), |settings, _| {
+                    apply_desktop_typography(settings);
+                });
+            }
+        }
+
         tracing::debug!(
             dark = style.is_dark(),
             desktop = desktop.as_ref().map(|s| s.string("color-scheme").to_string()),
@@ -548,6 +559,29 @@ fn desktop_interface_settings() -> Option<gtk::gio::Settings> {
     gtk::gio::SettingsSchemaSource::default()
         .and_then(|source| source.lookup(SCHEMA, true))
         .map(|_| gtk::gio::Settings::new(SCHEMA))
+}
+
+/// Mirror the desktop's font and text scaling onto GTK.
+///
+/// The same gap as the colour scheme: these are the keys every desktop is meant
+/// to set, and GTK does not always read them itself. A desktop that sets
+/// neither — Omarchy keeps its own text size in its own config — gets the
+/// defaults, which is correct: Sieve follows the standard setting rather than
+/// learning one desktop's file format.
+fn apply_desktop_typography(settings: &gtk::gio::Settings) {
+    let Some(gtk_settings) = gtk::Settings::default() else { return };
+
+    let font = settings.string("font-name");
+    if !font.is_empty() {
+        gtk_settings.set_gtk_font_name(Some(&font));
+    }
+
+    // GTK expresses text scaling as DPI in 1024ths, against a 96 DPI base.
+    let scale = settings.double("text-scaling-factor");
+    if scale > 0.0 {
+        gtk_settings.set_gtk_xft_dpi((scale * 96.0 * 1024.0) as i32);
+    }
+    tracing::debug!(%font, scale, "following the desktop's typography");
 }
 
 /// Apply the chosen appearance.
