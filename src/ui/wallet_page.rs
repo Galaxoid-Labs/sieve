@@ -289,7 +289,7 @@ impl Component for WalletPage {
                 // Preferences belong in a dialog reached from the header, not
                 // in the switcher beside the things you actually do with money.
                 pack_end = &gtk::Button {
-                    set_icon_name: "preferences-system-symbolic",
+                    set_icon_name: "open-menu-symbolic",
                     set_tooltip_text: Some("Preferences"),
                     connect_clicked => WalletPageMsg::ShowPreferences,
                 },
