@@ -62,6 +62,7 @@ pub enum AppCmd {
     Update(Result<Summary, String>),
     /// `None` means the node stopped.
     Progress(Option<Progress>),
+    Warning(Option<String>),
 }
 
 #[relm4::component(pub)]
@@ -178,6 +179,7 @@ impl Component for App {
                 // models a stream.
                 self.await_update(&sender);
                 self.await_progress(&sender);
+                self.await_warning(&sender);
             }
             AppCmd::Started(Err(message)) => {
                 tracing::error!(%message, "could not start the light client");
@@ -199,6 +201,11 @@ impl Component for App {
                 self.await_progress(&sender);
             }
             AppCmd::Progress(None) => tracing::warn!("the node stopped emitting progress"),
+            AppCmd::Warning(Some(note)) => {
+                self.wallet.emit(WalletPageMsg::Note(note));
+                self.await_warning(&sender);
+            }
+            AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
         }
     }
 
@@ -220,5 +227,10 @@ impl App {
     fn await_progress(&self, sender: &ComponentSender<Self>) {
         let Some(session) = self.session.clone() else { return };
         sender.oneshot_command(async move { AppCmd::Progress(session.next_progress().await) });
+    }
+
+    fn await_warning(&self, sender: &ComponentSender<Self>) {
+        let Some(session) = self.session.clone() else { return };
+        sender.oneshot_command(async move { AppCmd::Warning(session.next_warning().await) });
     }
 }

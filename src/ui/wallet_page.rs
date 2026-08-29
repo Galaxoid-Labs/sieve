@@ -10,6 +10,7 @@ use crate::wallet::{NETWORK, Summary};
 pub struct WalletPage {
     summary: Option<Summary>,
     progress: Progress,
+    note: Option<String>,
     error: Option<String>,
 }
 
@@ -17,6 +18,8 @@ pub struct WalletPage {
 pub enum WalletPageMsg {
     Show(Summary),
     SetProgress(Progress),
+    /// A non-fatal report from the node — a slow peer, a peer without filters.
+    Note(String),
     Failed(String),
     CopyAddress,
 }
@@ -90,6 +93,16 @@ impl SimpleComponent for WalletPage {
                         },
                     },
 
+                    adw::ActionRow {
+                        add_css_class: "dim-label",
+                        set_title: "Last report",
+                        #[watch]
+                        set_visible: model.note.is_some(),
+                        #[watch]
+                        set_subtitle: model.note.as_deref().unwrap_or_default(),
+                        set_subtitle_lines: 2,
+                    },
+
                     // Only meaningful once the node reports a real fraction;
                     // before that the work is unbounded and a bar would lie.
                     gtk::ProgressBar {
@@ -147,6 +160,7 @@ impl SimpleComponent for WalletPage {
         let model = WalletPage {
             summary: None,
             progress: Progress::Connecting,
+            note: None,
             error: None,
         };
         let widgets = view_output!();
@@ -160,6 +174,7 @@ impl SimpleComponent for WalletPage {
                 self.progress = progress;
                 self.error = None;
             }
+            WalletPageMsg::Note(note) => self.note = Some(note),
             WalletPageMsg::Failed(message) => self.error = Some(message),
             WalletPageMsg::CopyAddress => {
                 if let Some(summary) = &self.summary

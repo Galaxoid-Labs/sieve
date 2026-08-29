@@ -26,24 +26,53 @@ use super::{NETWORK, Paths, Summary, restrict};
 /// without making the wallet noisy on the network.
 const REQUIRED_PEERS: u8 = 2;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// If the node says nothing for this long, tell the user so rather than
+/// leaving a spinner turning against a frozen label.
+const QUIET_BEFORE_WAITING: Duration = Duration::from_secs(20);
+
+/// Group digits so six-figure block heights stay readable.
+fn thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// Sync progress, as the UI wants to render it.
 #[derive(Debug, Clone)]
 pub enum Progress {
     Connecting,
     Connected,
+    /// Block headers still coming in. Carries the chain height reached so far.
+    ///
+    /// This phase has no meaningful fraction — the node does not know the tip
+    /// until it gets there — so it reports height rather than a percentage.
+    Headers(u32),
     /// Filters downloading, 0.0 to 1.0.
     Scanning(f64),
     Synced,
+    /// The node has been silent long enough to be worth mentioning.
+    Waiting,
 }
 
 impl Progress {
     pub fn label(&self) -> String {
         match self {
             Progress::Connecting => "Looking for peers…".into(),
-            Progress::Connected => "Connected, requesting filters…".into(),
-            Progress::Scanning(f) => format!("Scanning block filters — {:.0}%", f * 100.0),
+            Progress::Connected => "Connected to peers".into(),
+            Progress::Headers(height) => {
+                format!("Downloading block headers — {} blocks", thousands(*height))
+            }
+            // Two decimals: on a chain of this size one decimal would sit
+            // still for thousands of filters and read as frozen.
+            Progress::Scanning(f) => format!("Scanning block filters — {:.2}%", f * 100.0),
             Progress::Synced => "Up to date".into(),
+            Progress::Waiting => "Waiting for peers to respond…".into(),
         }
     }
 
@@ -62,6 +91,7 @@ pub struct Session {
     inner: Arc<AsyncMutex<Inner>>,
     updates: Arc<AsyncMutex<UpdateSubscriber<Single>>>,
     info: Arc<AsyncMutex<bdk_kyoto::Receiver<Info>>>,
+    warnings: Arc<AsyncMutex<bdk_kyoto::UnboundedReceiver<bdk_kyoto::Warning>>>,
     requester: bdk_kyoto::Requester,
 }
 
@@ -108,6 +138,7 @@ impl Session {
             inner: Arc::new(AsyncMutex::new(Inner { wallet, conn })),
             updates: Arc::new(AsyncMutex::new(updates)),
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
+            warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
             requester: client.requester(),
         })
     }
@@ -146,17 +177,58 @@ impl Session {
     }
 
     /// Await the next progress event. `None` when the node has stopped.
+    ///
+    /// Silence is itself reportable: if nothing arrives for a while the caller
+    /// gets `Waiting`, so the UI can distinguish "working" from "hung" instead
+    /// of spinning against a label that never changes.
     pub async fn next_progress(&self) -> Option<Progress> {
         let mut info = self.info.lock().await;
-        let event = info.recv().await?;
+        let event = match tokio::time::timeout(QUIET_BEFORE_WAITING, info.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => return None,
+            Err(_elapsed) => return Some(Progress::Waiting),
+        };
         Some(match event {
             Info::SuccessfulHandshake => Progress::Connecting,
             Info::ConnectionsMet => Progress::Connected,
             Info::Progress(p) => {
                 let fraction = p.fraction_complete() as f64;
-                if fraction >= 1.0 { Progress::Synced } else { Progress::Scanning(fraction) }
+                // A zero fraction means no filter header has arrived yet, so
+                // the node is still walking the header chain. Reporting that as
+                // "scanning filters, 0%" reads as stuck when it is not.
+                if fraction <= 0.0 {
+                    Progress::Headers(p.chain_height())
+                } else if fraction >= 1.0 {
+                    Progress::Synced
+                } else {
+                    Progress::Scanning(fraction)
+                }
             }
             Info::BlockReceived(_) => Progress::Connected,
+        })
+    }
+
+    /// Await the next warning from the node. `None` when it has stopped.
+    ///
+    /// Without this, a node that cannot find peers serving compact filters
+    /// stalls in complete silence.
+    pub async fn next_warning(&self) -> Option<String> {
+        let mut warnings = self.warnings.lock().await;
+        let warning = warnings.recv().await?;
+        tracing::warn!(%warning, "node warning");
+        Some(match warning {
+            bdk_kyoto::Warning::NeedConnections { .. } => {
+                "Looking for more peers…".into()
+            }
+            bdk_kyoto::Warning::CouldNotConnect => "A peer refused the connection".into(),
+            bdk_kyoto::Warning::PeerTimedOut => "A peer stopped responding".into(),
+            bdk_kyoto::Warning::NoCompactFilters => {
+                "Connected peers do not serve compact block filters. Looking for others…".into()
+            }
+            bdk_kyoto::Warning::PotentialStaleTip => {
+                "No new blocks for a while — the connection may be stale".into()
+            }
+            other => format!("{other}"),
         })
     }
 
@@ -168,5 +240,27 @@ impl Session {
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Session")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heights_are_grouped() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(205_008), "205,008");
+    }
+
+    #[test]
+    fn the_header_phase_is_indeterminate() {
+        // A bar cannot be drawn for a phase with no known total.
+        assert!(Progress::Headers(1000).fraction().is_none());
+        assert!(Progress::Connecting.fraction().is_none());
+        assert_eq!(Progress::Scanning(0.5).fraction(), Some(0.5));
+        assert_eq!(Progress::Synced.fraction(), Some(1.0));
     }
 }
