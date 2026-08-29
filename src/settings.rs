@@ -96,7 +96,7 @@ impl Appearance {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub denomination: Denomination,
@@ -109,6 +109,12 @@ pub struct Settings {
     pub show_fiat: bool,
     #[serde(default)]
     pub appearance: Appearance,
+    /// The wallet opened last, so a restart returns to it.
+    ///
+    /// Without this, startup opens whichever wallet sorts first by name, which
+    /// is not a choice anybody made.
+    #[serde(default)]
+    pub last_wallet: Option<String>,
 }
 
 fn path() -> PathBuf {

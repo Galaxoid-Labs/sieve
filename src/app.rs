@@ -320,7 +320,16 @@ impl Component for App {
         };
         let widgets = view_output!();
 
-        match wallets.first() {
+        // The one opened last, if it is still there. Falling back to the
+        // first by name is a sort order, not a choice anybody made.
+        let opening = model
+            .settings
+            .last_wallet
+            .as_ref()
+            .and_then(|id| wallets.iter().find(|w| &w.id == id))
+            .or_else(|| wallets.first());
+
+        match opening {
             // Nothing to open, so setup is the whole app.
             None => model.nav.replace_with_tags(&["onboarding"]),
             // The wallet is the root. Opening the app puts you on it
@@ -452,6 +461,11 @@ impl Component for App {
                 let name = wallet::Meta::load(&paths)
                     .map(|m| m.display_name(&id))
                     .unwrap_or_else(|| id.clone());
+                // Remembered before the password, so closing at the unlock
+                // prompt still returns here next time — that was a choice too.
+                self.settings.last_wallet = Some(id.clone());
+                self.settings.save();
+
                 self.unlock.emit(UnlockMsg::Open { paths, name: name.clone() });
                 self.wallet.emit(WalletPageMsg::SetLocked(true));
                 self.wallet.emit(WalletPageMsg::SetName(name));
