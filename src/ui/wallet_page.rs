@@ -768,10 +768,7 @@ impl Component for WalletPage {
                 }
             }
             WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
-            WalletPageMsg::Toast(message) => {
-                tracing::debug!(%message, "toast");
-                self.toaster.add_toast(adw::Toast::new(&message));
-            }
+            WalletPageMsg::Toast(message) => self.toaster.add_toast(adw::Toast::new(&message)),
             WalletPageMsg::SetPrice(price) => {
                 self.price = price;
                 if let Some(summary) = self.summary.clone() {
