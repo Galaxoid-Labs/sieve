@@ -374,6 +374,38 @@ pub struct AccountSummary {
     pub next_address: String,
 }
 
+/// One transaction, as the activity list needs it.
+#[derive(Debug, Clone)]
+pub struct TxSummary {
+    pub txid: String,
+    /// Received minus sent: positive is money in, negative is money out.
+    /// A self-transfer nets to just the fee.
+    pub net_sats: i64,
+    /// `None` when inputs are not all known to this wallet, which is normal
+    /// for an incoming payment someone else built.
+    pub fee_sats: Option<u64>,
+    /// `None` means unconfirmed — and for a filter wallet, invisible until
+    /// mined, so this is almost always `Some`.
+    pub height: Option<u32>,
+    pub seen_at: Option<u64>,
+    /// Which derivation path it belongs to.
+    pub script_type: accounts::ScriptType,
+}
+
+impl TxSummary {
+    pub fn is_incoming(&self) -> bool {
+        self.net_sats >= 0
+    }
+
+    /// How deep it is buried, given the tip the wallet has verified to.
+    pub fn confirmations(&self, tip: u32) -> u32 {
+        match self.height {
+            Some(height) if tip >= height => tip - height + 1,
+            _ => 0,
+        }
+    }
+}
+
 /// What the UI needs to render an unlocked wallet.
 #[derive(Debug, Clone, Default)]
 pub struct Summary {
@@ -388,6 +420,8 @@ pub struct Summary {
     /// Per-path breakdown. Seeing the other paths sit at zero is what proves
     /// the scan actually covered them.
     pub accounts: Vec<AccountSummary>,
+    /// Newest first, across every path.
+    pub transactions: Vec<TxSummary>,
 }
 
 impl Summary {
@@ -416,7 +450,40 @@ impl Summary {
                 summary.next_address = entry.next_address.clone();
             }
             summary.accounts.push(entry);
+
+            for wallet_tx in account.wallet.transactions() {
+                let tx = wallet_tx.tx_node.tx.as_ref();
+                let (sent, received) = account.wallet.sent_and_received(tx);
+                let (height, seen_at) = match wallet_tx.chain_position {
+                    bdk_wallet::chain::ChainPosition::Confirmed { anchor, .. } => (
+                        Some(anchor.block_id.height),
+                        Some(anchor.confirmation_time),
+                    ),
+                    bdk_wallet::chain::ChainPosition::Unconfirmed { first_seen, .. } => {
+                        (None, first_seen)
+                    }
+                };
+
+                summary.transactions.push(TxSummary {
+                    txid: wallet_tx.tx_node.txid.to_string(),
+                    net_sats: received.to_sat() as i64 - sent.to_sat() as i64,
+                    // Only knowable when every input belongs to this wallet.
+                    fee_sats: account.wallet.calculate_fee(tx).ok().map(|f| f.to_sat()),
+                    height,
+                    seen_at,
+                    script_type: account.script_type,
+                });
+            }
         }
+
+        // Newest first: unconfirmed at the top, then by height, then by time so
+        // several in one block still have a stable order.
+        summary.transactions.sort_by(|a, b| {
+            b.height
+                .unwrap_or(u32::MAX)
+                .cmp(&a.height.unwrap_or(u32::MAX))
+                .then(b.seen_at.cmp(&a.seen_at))
+        });
 
         Ok(summary)
     }

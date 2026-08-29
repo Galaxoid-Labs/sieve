@@ -54,6 +54,109 @@ pub enum WalletPageOutput {
     NewAddress(crate::wallet::accounts::ScriptType),
 }
 
+/// One transaction in the activity list.
+#[derive(Debug)]
+pub struct TxRow {
+    txid: String,
+    title: String,
+    subtitle: String,
+    amount: String,
+    incoming: bool,
+}
+
+#[derive(Debug)]
+pub enum TxRowOutput {
+    Selected(String),
+}
+
+#[relm4::factory(pub)]
+impl FactoryComponent for TxRow {
+    type Init = (crate::wallet::TxSummary, Denomination, u32);
+    type Input = ();
+    type Output = TxRowOutput;
+    type CommandOutput = ();
+    type ParentWidget = gtk::ListBox;
+
+    view! {
+        adw::ActionRow {
+            set_title: &self.title,
+            set_subtitle: &self.subtitle,
+            set_activatable: true,
+
+            add_prefix = &gtk::Image {
+                set_icon_name: Some(if self.incoming {
+                    "go-down-symbolic"
+                } else {
+                    "go-up-symbolic"
+                }),
+            },
+
+            add_suffix = &gtk::Label {
+                add_css_class: "numeric",
+                // Direction carries the colour, so a glance at the column
+                // reads without parsing the sign.
+                set_css_classes: if self.incoming {
+                    &["numeric", "success"]
+                } else {
+                    &["numeric", "dim-label"]
+                },
+                set_label: &self.amount,
+            },
+
+            connect_activated[sender, txid = self.txid.clone()] => move |_| {
+                let _ = sender.output(TxRowOutput::Selected(txid.clone()));
+            },
+        }
+    }
+
+    fn init_model(
+        (tx, denomination, tip): Self::Init,
+        _index: &DynamicIndex,
+        _sender: FactorySender<Self>,
+    ) -> Self {
+        let incoming = tx.is_incoming();
+        let magnitude = tx.net_sats.unsigned_abs();
+        let confirmations = tx.confirmations(tip);
+
+        TxRow {
+            title: if incoming { "Received".into() } else { "Sent".into() },
+            subtitle: match (tx.height, confirmations) {
+                // A filter wallet cannot see the mempool, so this is rare and
+                // worth naming rather than showing a blank.
+                (None, _) => "Unconfirmed".to_string(),
+                (Some(height), c) if c < 6 => {
+                    format!("{} · block {height}", plural_confirmations(c))
+                }
+                (Some(height), _) => format!("{} · block {height}", format_when(tx.seen_at)),
+            },
+            amount: format!(
+                "{}{}",
+                if incoming { "+" } else { "−" },
+                denomination.format(magnitude)
+            ),
+            incoming,
+            txid: tx.txid,
+        }
+    }
+}
+
+fn plural_confirmations(n: u32) -> String {
+    match n {
+        0 => "Awaiting confirmation".into(),
+        1 => "1 confirmation".into(),
+        n => format!("{n} confirmations"),
+    }
+}
+
+/// A date, or nothing if the node never told us when.
+fn format_when(seen_at: Option<u64>) -> String {
+    let Some(seconds) = seen_at else { return "Confirmed".into() };
+    gtk::glib::DateTime::from_unix_local(seconds as i64)
+        .and_then(|d| d.format("%e %b %Y"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "Confirmed".into())
+}
+
 pub struct WalletPage {
     summary: Option<Summary>,
     progress: Progress,
@@ -62,6 +165,7 @@ pub struct WalletPage {
     note: Option<String>,
     error: Option<String>,
     settings: Settings,
+    transactions: FactoryVecDeque<TxRow>,
     /// Backing model for the address-type picker.
     ///
     /// Held and mutated in place rather than rebuilt under `#[watch]`: swapping
@@ -94,6 +198,8 @@ pub enum WalletPageMsg {
     SelectReceivePath(u32),
     /// Ask for an address that has not been handed to anyone yet.
     NewAddress,
+    /// Open the detail sheet for one transaction.
+    ShowTransaction(String),
     /// The freshly revealed address came back.
     ShowFreshAddress(String),
     /// Clear everything that belonged to a different wallet.
@@ -120,6 +226,10 @@ impl WalletPage {
             .get(self.receive_index as usize)
             .map(|a| a.next_address.clone())
             .unwrap_or_else(|| summary.next_address.clone())
+    }
+
+    fn has_transactions(&self) -> bool {
+        self.summary.as_ref().is_some_and(|s| !s.transactions.is_empty())
     }
 
     fn has_path_choice(&self) -> bool {
@@ -208,10 +318,11 @@ impl WalletPage {
 }
 
 #[relm4::component(pub)]
-impl SimpleComponent for WalletPage {
+impl Component for WalletPage {
     type Init = ();
     type Input = WalletPageMsg;
     type Output = WalletPageOutput;
+    type CommandOutput = ();
 
     view! {
         adw::BreakpointBin {
@@ -309,6 +420,15 @@ impl SimpleComponent for WalletPage {
                                 set_label: &format!("{} pending", model.pending()),
                             },
 
+                            #[local_ref]
+                            tx_list -> gtk::ListBox {
+                                add_css_class: "boxed-list",
+                                set_selection_mode: gtk::SelectionMode::None,
+                                set_margin_top: 12,
+                                #[watch]
+                                set_visible: model.has_transactions(),
+                            },
+
                             adw::StatusPage {
                                 set_icon_name: Some("document-open-recent-symbolic"),
                                 set_title: "No transactions yet",
@@ -317,6 +437,8 @@ impl SimpleComponent for WalletPage {
                                      from block filters, so an unconfirmed payment stays invisible \
                                      until it confirms."
                                 ),
+                                #[watch]
+                                set_visible: !model.has_transactions(),
                             },
                         },
                     },
@@ -534,9 +656,16 @@ impl SimpleComponent for WalletPage {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let paths = FactoryVecDeque::builder().launch_default().detach();
+        let transactions = FactoryVecDeque::builder().launch_default().forward(
+            sender.input_sender(),
+            |out| match out {
+                TxRowOutput::Selected(txid) => WalletPageMsg::ShowTransaction(txid),
+            },
+        );
         let model = WalletPage {
             paths,
             settings: Settings::load(),
+            transactions,
             path_model: gtk::StringList::new(&[]),
             path_labels: Vec::new(),
             receive_index: 0,
@@ -548,6 +677,7 @@ impl SimpleComponent for WalletPage {
             error: None,
         };
         let paths_box = model.paths.widget();
+        let tx_list = model.transactions.widget();
         let path_model = model.path_model.clone();
         let widgets = view_output!();
 
@@ -571,8 +701,9 @@ impl SimpleComponent for WalletPage {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match msg {
+            WalletPageMsg::ShowTransaction(txid) => self.show_transaction(&txid, root),
             WalletPageMsg::SelectReceivePath(index) => {
                 self.receive_index = index;
                 // The fresh address belonged to the path being left.
@@ -592,6 +723,7 @@ impl SimpleComponent for WalletPage {
                 // The rows hold formatted text, so they are rebuilt.
                 if let Some(summary) = self.summary.clone() {
                     self.rebuild_paths(&summary);
+                    self.rebuild_transactions(&summary);
                 }
             }
             WalletPageMsg::Reset => {
@@ -605,6 +737,7 @@ impl SimpleComponent for WalletPage {
                 self.path_labels.clear();
                 self.path_model.splice(0, self.path_model.n_items(), &[]);
                 self.paths.guard().clear();
+                self.transactions.guard().clear();
             }
             WalletPageMsg::SwitchWallet => {
                 let _ = sender.output(WalletPageOutput::SwitchWallet);
@@ -614,6 +747,7 @@ impl SimpleComponent for WalletPage {
                 // when a sync lands.
                 self.sync_path_picker(&summary);
                 self.rebuild_paths(&summary);
+                self.rebuild_transactions(&summary);
                 self.summary = Some(summary);
             }
             WalletPageMsg::SetProgress(progress) => {
@@ -637,6 +771,91 @@ impl SimpleComponent for WalletPage {
 }
 
 impl WalletPage {
+    /// Rebuild the activity list. Rows carry formatted text, so they are
+    /// rebuilt when the summary or the denomination changes.
+    fn rebuild_transactions(&mut self, summary: &Summary) {
+        let mut guard = self.transactions.guard();
+        guard.clear();
+        for tx in &summary.transactions {
+            guard.push_back((tx.clone(), self.settings.denomination, summary.tip));
+        }
+    }
+
+    /// Present the detail sheet for one transaction.
+    fn show_transaction(&self, txid: &str, root: &adw::BreakpointBin) {
+        let Some(summary) = &self.summary else { return };
+        let Some(tx) = summary.transactions.iter().find(|t| t.txid == txid) else {
+            return;
+        };
+
+        let page = adw::PreferencesPage::new();
+
+        let amounts = adw::PreferencesGroup::new();
+        amounts.set_title("Amount");
+        let magnitude = tx.net_sats.unsigned_abs();
+        amounts.add(&detail_row(
+            if tx.is_incoming() { "Received" } else { "Sent" },
+            &self.settings.denomination.format(magnitude),
+        ));
+        match tx.fee_sats {
+            Some(fee) => amounts.add(&detail_row("Fee", &self.settings.denomination.format(fee))),
+            // Only knowable when every input is ours, which an incoming payment
+            // built by someone else will not be.
+            None => amounts.add(&detail_row("Fee", "Not known — inputs are not all yours")),
+        }
+        page.add(&amounts);
+
+        let status = adw::PreferencesGroup::new();
+        status.set_title("Status");
+        match tx.height {
+            Some(height) => {
+                status.add(&detail_row(
+                    "Confirmations",
+                    &plural_confirmations(tx.confirmations(summary.tip)),
+                ));
+                status.add(&detail_row("Block", &height.to_string()));
+                status.add(&detail_row("Date", &format_when(tx.seen_at)));
+            }
+            None => status.add(&detail_row(
+                "Confirmations",
+                "Unconfirmed — not yet in a block",
+            )),
+        }
+        status.add(&detail_row("Derivation path", &tx.script_type.to_string()));
+        page.add(&status);
+
+        let identity = adw::PreferencesGroup::new();
+        identity.set_title("Transaction ID");
+        let txid_row = adw::ActionRow::new();
+        txid_row.set_title(&tx.txid);
+        txid_row.set_title_lines(2);
+        txid_row.add_css_class("property");
+        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy.set_tooltip_text(Some("Copy transaction ID"));
+        copy.set_valign(gtk::Align::Center);
+        copy.add_css_class("flat");
+        let to_copy = tx.txid.clone();
+        copy.connect_clicked(move |_| {
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&to_copy);
+            }
+        });
+        txid_row.add_suffix(&copy);
+        identity.add(&txid_row);
+        page.add(&identity);
+
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&page));
+
+        let dialog = adw::Dialog::new();
+        dialog.set_title("Transaction");
+        dialog.set_content_width(420);
+        dialog.set_content_height(560);
+        dialog.set_child(Some(&toolbar));
+        dialog.present(Some(root));
+    }
+
     /// Rewrite the picker only when the set of paths actually changes, so a
     /// routine sync update cannot reset a selection someone just made.
     fn sync_path_picker(&mut self, summary: &Summary) {
@@ -675,4 +894,13 @@ impl WalletPage {
             }
         }
     }
+}
+
+/// A read-only label/value row, as used throughout the detail sheet.
+fn detail_row(title: &str, value: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+    row.set_subtitle(value);
+    row.set_subtitle_lines(2);
+    row
 }
