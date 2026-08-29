@@ -1078,6 +1078,12 @@ impl Component for WalletPage {
                 self.path_labels.clear();
                 self.path_model.splice(0, self.path_model.n_items(), &[]);
                 self.transactions.guard().clear();
+                // The chain belongs to a network, not just a wallet: leaving
+                // it up meant a signet wallet briefly showing mainnet's
+                // difficulty and peers.
+                self.chain = None;
+                self.peers_list.guard().clear();
+                self.price = None;
             }
             WalletPageMsg::SwitchWallet => {
                 let _ = sender.output(WalletPageOutput::SwitchWallet);
