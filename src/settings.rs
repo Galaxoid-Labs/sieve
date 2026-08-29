@@ -59,6 +59,29 @@ fn group(n: u64) -> String {
     out
 }
 
+/// Light, dark, or whatever the desktop says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Appearance {
+    /// Follow the desktop. The default, and the right answer for most people:
+    /// the desktop already knows, and an app that ignores it looks foreign.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => "Follow the system",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -70,6 +93,8 @@ pub struct Settings {
     /// disclosures should not make one nobody asked for.
     #[serde(default)]
     pub show_fiat: bool,
+    #[serde(default)]
+    pub appearance: Appearance,
 }
 
 fn path() -> PathBuf {
@@ -107,6 +132,14 @@ mod tests {
         assert_eq!(Denomination::Btc.format(2_100_000_000_000_000), "21,000,000.00000000 BTC");
         assert_eq!(Denomination::Btc.format(1), "0.00000001 BTC");
         assert_eq!(Denomination::Sats.format(0), "0 sats");
+    }
+
+    #[test]
+    fn appearance_defaults_to_the_desktop() {
+        // An app that picks its own look before being asked is an app that
+        // looks foreign on somebody's desktop.
+        assert_eq!(Appearance::default(), Appearance::System);
+        assert_eq!(Settings::default().appearance, Appearance::System);
     }
 
     #[test]

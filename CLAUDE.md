@@ -42,8 +42,13 @@ These are not preferences. Violating one is a bug, not a style difference.
    in every session — on Hyprland the portal and gsettings both said `prefer-dark` and the app
    still came up light. So `org.gnome.desktop.interface color-scheme` is read directly and
    mirrored onto the style manager, and watched for changes. That is still following the
-   desktop, by a route that works. Never set the scheme from an app preference: Sieve has no
-   opinion about light and dark and must not grow one. Consequently: no hardcoded
+   desktop, by a route that works.
+
+   There is now an Appearance preference — Follow the system, Light, Dark — defaulting to
+   following the system. "Follow the system" still reads the desktop directly. The QR code is
+   the one place a colour is hardcoded: it needs dark modules on a light ground to scan, so it
+   carries its own white ground in both themes via the `.qr-ground` class rather than sitting
+   on a card, which is dark exactly when the code needs light. Consequently: no hardcoded
    colors, ever. Use Adwaita style classes (`suggested-action`, `destructive-action`, `error`,
    `warning`, `dim-label`, `pill`, `card`) and Adwaita named colors in any custom CSS, since those
    recolor themselves. Anything drawn by hand into a `gtk::DrawingArea` must read

@@ -45,5 +45,16 @@ fn main() {
 
     harden();
 
-    RelmApp::new(APP_ID).run::<app::App>(());
+    let app = RelmApp::new(APP_ID);
+
+    // The one place Sieve hardcodes a colour, and it has to. A QR code must be
+    // dark modules on a light ground to scan; inverting it for dark mode looks
+    // tidier and fails on plenty of readers. So the code carries its own white
+    // ground in both themes rather than sitting on the theme's card, which is
+    // dark exactly when the code needs light.
+    app.set_global_css(
+        ".qr-ground { background-color: #ffffff; border-radius: 12px; padding: 12px; }",
+    );
+
+    app.run::<app::App>(());
 }

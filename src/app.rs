@@ -66,6 +66,7 @@ pub enum AppMsg {
     UnlockClosed,
     ToggleDenomination,
     ForgetPeers,
+    SetAppearance(crate::settings::Appearance),
     SetShowFiat(bool),
     /// Slide the wallet list in over preferences.
     ShowWallets,
@@ -193,12 +194,14 @@ impl Component for App {
         // works here. Nothing is chosen by Sieve.
         let style = adw::StyleManager::default();
         let desktop = desktop_interface_settings();
+        let settings = crate::settings::Settings::load();
 
-        if let Some(settings) = &desktop {
-            apply_desktop_scheme(&style, settings);
-            settings.connect_changed(Some("color-scheme"), {
-                let style = style.clone();
-                move |settings, _| apply_desktop_scheme(&style, settings)
+        apply_appearance(&style, settings.appearance);
+        if let Some(gio_settings) = &desktop {
+            // Keep following it while the choice is to follow.
+            gio_settings.connect_changed(Some("color-scheme"), move |_, _| {
+                let current = crate::settings::Settings::load();
+                apply_appearance(&adw::StyleManager::default(), current.appearance);
             });
         }
 
@@ -236,7 +239,6 @@ impl Component for App {
             nav.add(&page);
         }
 
-        let settings = crate::settings::Settings::load();
         wallet.emit(WalletPageMsg::SetDenomination(settings.denomination));
 
         unlock_dialog.connect_closed({
@@ -346,6 +348,12 @@ impl Component for App {
                 } else {
                     self.wallet.emit(WalletPageMsg::SetPrice(None));
                 }
+            }
+
+            AppMsg::SetAppearance(appearance) => {
+                self.settings.appearance = appearance;
+                self.settings.save();
+                apply_appearance(&adw::StyleManager::default(), appearance);
             }
 
             AppMsg::ForgetPeers => {
@@ -542,13 +550,26 @@ fn desktop_interface_settings() -> Option<gtk::gio::Settings> {
         .map(|_| gtk::gio::Settings::new(SCHEMA))
 }
 
-/// Mirror the desktop's colour scheme onto the style manager.
-fn apply_desktop_scheme(style: &adw::StyleManager, settings: &gtk::gio::Settings) {
-    let scheme = match settings.string("color-scheme").as_str() {
-        "prefer-dark" => adw::ColorScheme::PreferDark,
-        "prefer-light" => adw::ColorScheme::PreferLight,
-        // Anything else means the desktop has no opinion, and neither should we.
-        _ => adw::ColorScheme::Default,
+/// Apply the chosen appearance.
+///
+/// Following the system means reading the desktop's setting directly rather
+/// than leaving it to `ColorScheme::Default`, which does not find the source in
+/// every session.
+fn apply_appearance(style: &adw::StyleManager, appearance: crate::settings::Appearance) {
+    use crate::settings::Appearance;
+
+    let scheme = match appearance {
+        Appearance::Light => adw::ColorScheme::ForceLight,
+        Appearance::Dark => adw::ColorScheme::ForceDark,
+        Appearance::System => match desktop_interface_settings()
+            .map(|s| s.string("color-scheme").to_string())
+            .as_deref()
+        {
+            Some("prefer-dark") => adw::ColorScheme::PreferDark,
+            Some("prefer-light") => adw::ColorScheme::PreferLight,
+            // No opinion from the desktop, so none from us either.
+            _ => adw::ColorScheme::Default,
+        },
     };
     style.set_color_scheme(scheme);
 }
@@ -659,20 +680,28 @@ impl App {
         // row says what it is currently reading, which is the only way to tell
         // "the app ignores my theme" apart from "the desktop is not telling
         // it", and those have very different fixes.
-        let manager = adw::StyleManager::default();
-        // What the desktop says, read directly, next to what libadwaita made
-        // of it. If these disagree the setting is reaching the machine but not
-        // the toolkit, which is a different problem from the app ignoring it.
-        let desktop = desktop_interface_settings()
-            .map(|settings| settings.string("color-scheme").to_string())
-            .unwrap_or_else(|| "unknown".into());
-
-        let appearance = adw::ActionRow::new();
+        let appearance = adw::ComboRow::new();
         appearance.set_title("Appearance");
-        appearance.set_subtitle(&format!("Desktop says {desktop}"));
-        let detected = gtk::Label::new(Some(if manager.is_dark() { "Dark" } else { "Light" }));
-        detected.add_css_class("dim-label");
-        appearance.add_suffix(&detected);
+        appearance.set_model(Some(&gtk::StringList::new(
+            &crate::settings::Appearance::ALL.map(|a| a.label()),
+        )));
+        appearance.set_selected(
+            crate::settings::Appearance::ALL
+                .iter()
+                .position(|a| *a == self.settings.appearance)
+                .unwrap_or(0) as u32,
+        );
+        // Connected after the initial selection, so setting it does not fire.
+        {
+            let sender = sender.clone();
+            appearance.connect_selected_notify(move |row| {
+                if let Some(choice) =
+                    crate::settings::Appearance::ALL.get(row.selected() as usize)
+                {
+                    sender.input(AppMsg::SetAppearance(*choice));
+                }
+            });
+        }
         display.add(&appearance);
 
         page.add(&display);

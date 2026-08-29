@@ -772,7 +772,10 @@ impl Component for WalletPage {
                             // inverted QR looks better in dark mode and scans
                             // worse, so the code keeps its own ground.
                             gtk::Box {
-                                add_css_class: "card",
+                                // Its own white ground, not the theme's card:
+                                // a card is dark in dark mode, which is
+                                // exactly when a QR code needs light.
+                                add_css_class: "qr-ground",
                                 set_halign: gtk::Align::Center,
                                 set_valign: gtk::Align::Center,
                                 set_overflow: gtk::Overflow::Hidden,
@@ -785,7 +788,6 @@ impl Component for WalletPage {
                                 gtk::Picture {
                                     set_hexpand: true,
                                     set_vexpand: true,
-                                    set_margin_all: 10,
                                     set_content_fit: gtk::ContentFit::Contain,
                                     #[watch]
                                     set_paintable: model.qr().as_ref(),
