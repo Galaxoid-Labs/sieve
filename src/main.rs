@@ -49,16 +49,16 @@ fn main() {
 
     let app = RelmApp::new(APP_ID);
 
-    // Sieve's own icons. Adwaita has no plain vertical arrow — its options are
-    // a bare chevron, an arrow welded to a bar, or a diagonal — and "money in"
-    // and "money out" deserve the obvious shape.
+    // Sieve's own icons, compiled into the binary. Adwaita has no plain
+    // vertical arrow — its options are a bare chevron, an arrow welded to a
+    // bar, or a diagonal — and "money in" and "money out" deserve the obvious
+    // shape.
     //
-    // Loaded from the source tree for now; packaging in M8 installs them to
-    // the usual icon directory instead.
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::IconTheme::for_display(&display)
-            .add_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/data/icons"));
-    }
+    // Registered as a resource rather than loaded from a path: a path built
+    // from CARGO_MANIFEST_DIR only exists on the machine that compiled it, and
+    // does not exist at all inside a sandbox.
+    gtk::gio::resources_register_include!("sieve.gresource")
+        .expect("the icon resource is compiled into this binary");
 
     // The one place Sieve hardcodes a colour, and it has to. A QR code must be
     // dark modules on a light ground to scan; inverting it for dark mode looks

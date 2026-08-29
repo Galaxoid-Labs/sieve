@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Compiled into the binary at build time, so the icons are available with no
+     filesystem path. GTK picks up icons under /com/jdavis/Sieve/icons
+     automatically once the resource is registered. -->
+<gresources>
+  <gresource prefix="/com/jdavis/Sieve/icons/scalable/actions">
+    <file preprocess="xml-stripblanks">icons/hicolor/scalable/actions/sieve-receive-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/hicolor/scalable/actions/sieve-send-symbolic.svg</file>
+  </gresource>
+</gresources>
