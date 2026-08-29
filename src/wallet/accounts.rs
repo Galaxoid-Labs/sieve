@@ -26,6 +26,20 @@ use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 
 use super::restrict;
 
+/// How many unused addresses past the last used one must be checked before a
+/// keychain is considered exhausted. Twenty is the figure every other wallet
+/// uses, so a wallet created elsewhere will not have left a wider hole.
+pub const GAP_LIMIT: u32 = 20;
+
+/// How far ahead to derive scripts when importing.
+///
+/// BDK's default is 25, which is fine for a wallet starting empty but far too
+/// small for one that already has history: a recovery scan only tests the
+/// scripts it has derived, so an address used at index 60 would never be seen.
+/// The scan cost of a wider window is local matching only — the filters
+/// downloaded are identical.
+pub const IMPORT_LOOKAHEAD: u32 = 200;
+
 /// A standard derivation path, identified by its BIP purpose field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScriptType {
@@ -174,7 +188,13 @@ impl Account {
     /// Create the wallet for one path from an extended private key.
     ///
     /// The key goes in; only public descriptors come out into the database.
-    pub fn create(xprv: Xpriv, script_type: ScriptType, db: &Path, network: Network) -> Result<Self> {
+    pub fn create(
+        xprv: Xpriv,
+        script_type: ScriptType,
+        db: &Path,
+        network: Network,
+        lookahead: u32,
+    ) -> Result<Self> {
         if let Some(parent) = db.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -189,24 +209,28 @@ impl Account {
                 Bip44(xprv, KeychainKind::Internal),
             )
             .network(network)
+            .lookahead(lookahead)
             .create_wallet(&mut conn),
             ScriptType::NestedSegwit => Wallet::create(
                 Bip49(xprv, KeychainKind::External),
                 Bip49(xprv, KeychainKind::Internal),
             )
             .network(network)
+            .lookahead(lookahead)
             .create_wallet(&mut conn),
             ScriptType::NativeSegwit => Wallet::create(
                 Bip84(xprv, KeychainKind::External),
                 Bip84(xprv, KeychainKind::Internal),
             )
             .network(network)
+            .lookahead(lookahead)
             .create_wallet(&mut conn),
             ScriptType::Taproot => Wallet::create(
                 Bip86(xprv, KeychainKind::External),
                 Bip86(xprv, KeychainKind::Internal),
             )
             .network(network)
+            .lookahead(lookahead)
             .create_wallet(&mut conn),
         }
         .map_err(|e| anyhow!("could not create the {script_type} wallet: {e}"))?;
@@ -337,6 +361,17 @@ mod tests {
     }
 
     #[test]
+    fn the_import_window_clears_the_standard_gap_limit() {
+        // BDK's default of 25 is barely above the gap limit every other wallet
+        // uses, which leaves no room for a wallet that already has history.
+        assert!(
+            IMPORT_LOOKAHEAD > GAP_LIMIT * 4,
+            "an import window of {IMPORT_LOOKAHEAD} is too tight for a gap limit of {GAP_LIMIT}"
+        );
+        assert_eq!(GAP_LIMIT, 20, "the ecosystem standard");
+    }
+
+    #[test]
     fn only_taproot_has_an_activation_floor() {
         for script_type in ScriptType::ALL {
             let floor = script_type.earliest_possible(Network::Bitcoin);
@@ -383,11 +418,12 @@ impl Portfolio {
         script_types: &[ScriptType],
         primary: ScriptType,
         network: Network,
+        lookahead: u32,
     ) -> Result<Self> {
         let mut accounts = Vec::new();
         for script_type in script_types {
             let db = dir.join(script_type.db_file());
-            accounts.push(Account::create(xprv, *script_type, &db, network)?);
+            accounts.push(Account::create(xprv, *script_type, &db, network, lookahead)?);
         }
         Ok(Portfolio { accounts, primary })
     }
@@ -409,6 +445,41 @@ impl Portfolio {
 
     pub fn is_empty(&self) -> bool {
         self.accounts.is_empty()
+    }
+
+    /// Extend each keychain so there are always `GAP_LIMIT` unused addresses
+    /// past the last used one, and report whether anything moved.
+    ///
+    /// A recovery scan only tests scripts that have been derived. If a wallet's
+    /// last used address sits near the edge of what was derived, there may be
+    /// more beyond it that were never checked — so the window is widened and
+    /// the caller rescans. Without this, coins past the initial window are
+    /// invisible and nothing says so.
+    pub fn extend_gaps(&mut self) -> Result<bool> {
+        let mut extended = false;
+        for account in self.accounts.iter_mut() {
+            for keychain in [KeychainKind::External, KeychainKind::Internal] {
+                let Some(last_used) = account.wallet.spk_index().last_used_index(keychain) else {
+                    continue;
+                };
+                let revealed = account.wallet.derivation_index(keychain).unwrap_or(0);
+                let target = last_used.saturating_add(GAP_LIMIT);
+                if revealed < target {
+                    tracing::info!(
+                        path = %account.script_type,
+                        ?keychain,
+                        last_used,
+                        revealed,
+                        target,
+                        "extending the gap window; a rescan will follow"
+                    );
+                    let _ = account.wallet.reveal_addresses_to(keychain, target);
+                    extended = true;
+                }
+            }
+            account.persist()?;
+        }
+        Ok(extended)
     }
 
     /// Route an update to the account it belongs to.

@@ -116,6 +116,9 @@ pub struct Session {
     /// Once the first sync lands, silence from the node is normal rather than
     /// a symptom, and must not be reported as waiting.
     synced: Arc<AtomicBool>,
+    /// Set once the node reports real scan progress, after which connection
+    /// events stop driving the status line.
+    scanning: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -196,6 +199,7 @@ impl Session {
             warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
             requester: client.requester(),
             synced: Arc::new(AtomicBool::new(false)),
+            scanning: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -227,7 +231,21 @@ impl Session {
             }
         }
 
-        self.synced.store(true, Ordering::Relaxed);
+        // A recovery scan only tests scripts that have been derived. If the
+        // last used address sits near the edge of the derived window, there may
+        // be more beyond it that were never checked, so widen and go round
+        // again. Without this, coins past the window are silently invisible.
+        if portfolio.extend_gaps()? {
+            tracing::info!("gap window widened; requesting a rescan");
+            if let Err(e) = self.requester.rescan() {
+                tracing::warn!(%e, "could not request a rescan");
+            }
+            // Not synced: there is more to check before the balance is final.
+            self.synced.store(false, Ordering::Relaxed);
+        } else {
+            self.synced.store(true, Ordering::Relaxed);
+        }
+
         Summary::from_portfolio(&mut portfolio)
     }
 
@@ -238,6 +256,7 @@ impl Session {
     /// of spinning against a label that never changes.
     pub async fn next_progress(&self) -> Option<Progress> {
         let mut info = self.info.lock().await;
+        loop {
         let event = match tokio::time::timeout(QUIET_BEFORE_WAITING, info.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => return None,
@@ -252,10 +271,21 @@ impl Session {
                 });
             }
         };
-        Some(match event {
+        // Peer churn is constant and orthogonal to scan progress. Once
+        // scanning has started, a handshake must not overwrite the status with
+        // something that reads like going backwards — the peer count has its
+        // own row for that.
+        let scanning = self.scanning.load(Ordering::Relaxed);
+        return Some(match event {
+            Info::SuccessfulHandshake | Info::ConnectionsMet | Info::BlockReceived(_)
+                if scanning =>
+            {
+                continue;
+            }
             Info::SuccessfulHandshake => Progress::Connecting,
             Info::ConnectionsMet => Progress::Connected,
             Info::Progress(p) => {
+                self.scanning.store(true, Ordering::Relaxed);
                 let fraction = p.fraction_complete() as f64;
                 // A zero fraction means no filter header has arrived yet, so
                 // the node is still walking the header chain. Reporting that as
@@ -269,7 +299,8 @@ impl Session {
                 }
             }
             Info::BlockReceived(_) => Progress::Connected,
-        })
+        });
+        }
     }
 
     /// Await the next warning from the node. `None` when it has stopped.

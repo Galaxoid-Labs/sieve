@@ -476,10 +476,18 @@ pub fn create(
     primary: accounts::ScriptType,
     bip39_passphrase: Option<&str>,
     name: Option<String>,
+    lookahead: u32,
 ) -> Result<Summary> {
     let xprv = xprv_from_mnemonic(mnemonic, bip39_passphrase, network)?;
     let mut portfolio =
-        accounts::Portfolio::create_from_xprv(xprv, data_dir(paths), script_types, primary, network)?;
+        accounts::Portfolio::create_from_xprv(
+            xprv,
+            data_dir(paths),
+            script_types,
+            primary,
+            network,
+            lookahead,
+        )?;
 
     // Recorded before the vault is written, so a wallet that exists at all has
     // a network and a birthday, and never falls back to scanning from genesis.
@@ -513,7 +521,14 @@ pub fn import_xprv(
         .map_err(|e| anyhow!("that is not a valid extended private key: {e}"))?;
 
     let mut portfolio =
-        accounts::Portfolio::create_from_xprv(xprv, data_dir(paths), script_types, primary, network)?;
+        accounts::Portfolio::create_from_xprv(
+            xprv,
+            data_dir(paths),
+            script_types,
+            primary,
+            network,
+            accounts::IMPORT_LOOKAHEAD,
+        )?;
     Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
 
     let sealed = vault::seal(xprv_text.trim().as_bytes(), password, &network.to_string(), kdf)?;
@@ -573,6 +588,7 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
             &meta.script_types,
             meta.primary,
             meta.network(),
+            accounts::IMPORT_LOOKAHEAD,
         )?;
     }
 
@@ -614,6 +630,7 @@ mod tests {
             accounts::ScriptType::Taproot,
             None,
             None,
+            25,
         )
         .unwrap()
     }
@@ -711,7 +728,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for script_type in accounts::ScriptType::ALL {
             let mut account = accounts::Account::create(
-                xprv, script_type, &dir.join(script_type.db_file()), DEFAULT_NETWORK,
+                xprv, script_type, &dir.join(script_type.db_file()), DEFAULT_NETWORK, 25,
             ).unwrap();
             let address = account
                 .wallet
@@ -763,7 +780,7 @@ mod tests {
 
         let from_phrase = {
             let mut a = accounts::Account::create(
-                xprv, accounts::ScriptType::NativeSegwit, &dir.join("a.sqlite"), DEFAULT_NETWORK,
+                xprv, accounts::ScriptType::NativeSegwit, &dir.join("a.sqlite"), DEFAULT_NETWORK, 25,
             ).unwrap();
             a.wallet.next_unused_address(KeychainKind::External).address.to_string()
         };
@@ -772,7 +789,7 @@ mod tests {
         let reparsed: bdk_wallet::bitcoin::bip32::Xpriv = xprv.to_string().parse().unwrap();
         let from_xprv = {
             let mut b = accounts::Account::create(
-                reparsed, accounts::ScriptType::NativeSegwit, &dir.join("b.sqlite"), DEFAULT_NETWORK,
+                reparsed, accounts::ScriptType::NativeSegwit, &dir.join("b.sqlite"), DEFAULT_NETWORK, 25,
             ).unwrap();
             b.wallet.next_unused_address(KeychainKind::External).address.to_string()
         };
@@ -877,14 +894,14 @@ mod tests {
         let first = {
             let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
             let mut a = accounts::Account::create(
-                xprv, accounts::ScriptType::Taproot, &dir.join("a.sqlite"), DEFAULT_NETWORK
+                xprv, accounts::ScriptType::Taproot, &dir.join("a.sqlite"), DEFAULT_NETWORK, 25
             ).unwrap();
             a.wallet.next_unused_address(KeychainKind::External).address.to_string()
         };
         let second = {
             let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
             let mut b = accounts::Account::create(
-                xprv, accounts::ScriptType::Taproot, &dir.join("b.sqlite"), DEFAULT_NETWORK
+                xprv, accounts::ScriptType::Taproot, &dir.join("b.sqlite"), DEFAULT_NETWORK, 25
             ).unwrap();
             b.wallet.next_unused_address(KeychainKind::External).address.to_string()
         };

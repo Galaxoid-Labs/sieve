@@ -429,6 +429,9 @@ impl Component for Restore {
                             ScriptType::NativeSegwit,
                             bip39.as_deref(),
                             None,
+                            // An imported wallet already has history, so the
+                            // window has to be wide enough to find it.
+                            crate::wallet::accounts::IMPORT_LOOKAHEAD,
                         ),
                         CredentialKind::ExtendedKey => wallet::import_xprv(
                             &credential,

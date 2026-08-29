@@ -461,6 +461,9 @@ impl Component for Onboarding {
                             primary,
                             None,
                             None,
+                            // A wallet created here starts empty, so BDK's
+                            // default window is plenty.
+                            25,
                         )
                         .map(|summary| (created_paths, summary))
                         .map_err(|e| e.to_string()),
