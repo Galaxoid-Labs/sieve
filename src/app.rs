@@ -619,9 +619,16 @@ impl App {
         // "the app ignores my theme" apart from "the desktop is not telling
         // it", and those have very different fixes.
         let manager = adw::StyleManager::default();
+        // What the desktop says, read directly, next to what libadwaita made
+        // of it. If these disagree the setting is reaching the machine but not
+        // the toolkit, which is a different problem from the app ignoring it.
+        let desktop = gtk::gio::Settings::new("org.gnome.desktop.interface")
+            .string("color-scheme")
+            .to_string();
+
         let appearance = adw::ActionRow::new();
         appearance.set_title("Appearance");
-        appearance.set_subtitle("Follows your desktop setting");
+        appearance.set_subtitle(&format!("Desktop says {desktop}"));
         let detected = gtk::Label::new(Some(if manager.is_dark() { "Dark" } else { "Light" }));
         detected.add_css_class("dim-label");
         appearance.add_suffix(&detected);
