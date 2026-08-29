@@ -189,13 +189,21 @@ impl Component for Restore {
                         set_title: model.credential_title(),
                     },
 
-                    #[name(bip39_row)]
-                    adw::PasswordEntryRow {
-                        set_title: "BIP-39 passphrase (optional)",
+                    #[name(bip39_expander)]
+                    adw::ExpanderRow {
+                        set_title: "My seed has a passphrase",
+                        set_subtitle: "Sometimes called a 25th word. Most seeds do not have one — leave this off if you were never asked to choose one.",
+                        set_show_enable_switch: true,
+                        set_enable_expansion: false,
                         // Only meaningful for a seed, and dangerous to confuse
                         // with the wallet password, so it is hidden otherwise.
                         #[watch]
-                        set_visible: model.kind == CredentialKind::Mnemonic,
+                        set_visible: model.kind.is_hd(),
+
+                        #[name(bip39_row)]
+                        add_row = &adw::PasswordEntryRow {
+                            set_title: "BIP-39 passphrase",
+                        },
                     },
                 },
 
@@ -257,18 +265,20 @@ impl Component for Restore {
                 },
 
                 adw::PreferencesGroup {
-                    set_title: "Wallet password",
+                    set_title: "Choose a password for this wallet",
                     set_description: Some(
-                        "Encrypts this wallet on this computer. Not part of the seed."
+                        "New — you are choosing it now. It locks this wallet on this \
+                         computer and has nothing to do with your recovery phrase or \
+                         your old wallet. Forgetting it costs this copy, not your coins."
                     ),
 
                     #[name(password_row)]
                     adw::PasswordEntryRow {
-                        set_title: "Password",
+                        set_title: "New password",
                     },
                     #[name(confirm_row)]
                     adw::PasswordEntryRow {
-                        set_title: "Confirm password",
+                        set_title: "Confirm new password",
                     },
                 },
 
@@ -282,7 +292,7 @@ impl Component for Restore {
                         #[watch]
                         set_label: if model.busy { "Importing…" } else { "Import wallet" },
                         connect_clicked[
-                            sender, kind_row, credential_row, bip39_row,
+                            sender, kind_row, credential_row, bip39_row, bip39_expander,
                             network_row, birthday_row, password_row, confirm_row,
                             acknowledge_row
                         ] => move |_| {
@@ -291,8 +301,14 @@ impl Component for Restore {
                                 credential: Secret(Zeroizing::new(
                                     credential_row.text().to_string()
                                 )),
+                                // Only when the switch is on: an empty field
+                                // and "no passphrase" must mean the same thing.
                                 bip39_passphrase: Secret(Zeroizing::new(
-                                    bip39_row.text().to_string()
+                                    if bip39_expander.enables_expansion() {
+                                        bip39_row.text().to_string()
+                                    } else {
+                                        String::new()
+                                    }
                                 )),
                                 password: Secret(Zeroizing::new(password_row.text().to_string())),
                                 confirm: Secret(Zeroizing::new(confirm_row.text().to_string())),
