@@ -64,13 +64,6 @@ impl Component for Unlock {
     view! {
         adw::ToolbarView {
             add_top_bar = &adw::HeaderBar {
-                pack_start = &gtk::Button {
-                    set_icon_name: "view-list-symbolic",
-                    set_tooltip_text: Some("Switch wallet"),
-                    #[watch]
-                    set_visible: model.many_wallets,
-                    connect_clicked => UnlockMsg::SwitchWallet,
-                },
                 #[wrap(Some)]
                 set_title_widget = &adw::WindowTitle {
                     set_title: "Sieve",

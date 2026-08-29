@@ -18,29 +18,10 @@ use crate::ui::wallet_page::{WalletPage, WalletPageMsg};
 use crate::wallet::node::{Notice, Progress, Session};
 use crate::wallet::{self, Paths, Summary};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Screen {
-    Chooser,
-    Onboarding,
-    Restore,
-    Locked,
-    Unlocked,
-}
-
-impl Screen {
-    fn page(self) -> &'static str {
-        match self {
-            Screen::Chooser => "chooser",
-            Screen::Onboarding => "onboarding",
-            Screen::Restore => "restore",
-            Screen::Locked => "unlock",
-            Screen::Unlocked => "wallet",
-        }
-    }
-}
-
 pub struct App {
-    screen: Screen,
+    /// The navigation history. Held here so every screen's back button routes
+    /// through one place instead of each inventing its own.
+    nav: adw::NavigationView,
     /// The wallet currently open, if any.
     active: Option<Paths>,
     session: Option<Arc<Session>>,
@@ -53,18 +34,20 @@ pub struct App {
 
 #[derive(Debug)]
 pub enum AppMsg {
+    /// Go back one page. Every screen's back button routes here so the history
+    /// lives in one place.
+    Back,
+    ShowOnboarding,
     ShowRestore,
-    ShowWelcome,
-    ShowChooser,
-    /// Reveal a fresh receive address on one derivation path.
-    RevealAddress(crate::wallet::accounts::ScriptType),
-    /// Open a specific wallet from the chooser.
+    /// Open a specific wallet from the list.
     OpenWallet(String),
     /// A wallet now exists on disk, or an existing one was unlocked. Both
     /// arrive with a watch-only summary and nothing secret. The paths say
     /// *which* wallet, which is what decides whether the running light client
     /// still belongs to what is on screen.
     Ready { paths: Paths, summary: Summary },
+    /// Reveal a fresh receive address on one derivation path.
+    RevealAddress(crate::wallet::accounts::ScriptType),
     /// The desktop switched between light and dark.
     ///
     /// Stock Adwaita widgets and style classes recolour themselves, so nothing
@@ -98,23 +81,7 @@ impl Component for App {
             // activity list room, tall enough for a preferences page.
             set_default_size: (820, 760),
 
-            #[wrap(Some)]
-            #[name(stack)]
-            set_content = &gtk::Stack {
-                // named so `init` can select the right screen after the children exist
-                set_transition_type: gtk::StackTransitionType::Crossfade,
-                // skip_init: the stack has no children yet when init-time
-                // property assignment runs, and it defaults to showing the
-                // first one added.
-                #[watch(skip_init)]
-                set_visible_child_name: model.screen.page(),
-
-                add_named: (model.chooser.widget(), Some("chooser")),
-                add_named: (model.onboarding.widget(), Some("onboarding")),
-                add_named: (model.restore.widget(), Some("restore")),
-                add_named: (model.unlock.widget(), Some("unlock")),
-                add_named: (model.wallet.widget(), Some("wallet")),
-            },
+            set_content: Some(&nav),
         }
     }
 
@@ -128,20 +95,17 @@ impl Component for App {
         wallet::migrate_legacy_layout();
 
         let wallets = wallet::list_wallets();
-        let screen = match wallets.len() {
-            0 => Screen::Onboarding,
-            // One wallet needs no chooser; go straight to its unlock screen.
-            1 => Screen::Locked,
-            _ => Screen::Chooser,
-        };
-        tracing::debug!(?screen, wallets = wallets.len(), "starting");
+        tracing::debug!(wallets = wallets.len(), "starting");
+
+        let nav = adw::NavigationView::new();
 
         let chooser = Chooser::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
                 ChooserOutput::Open(id) => AppMsg::OpenWallet(id),
-                ChooserOutput::New => AppMsg::ShowWelcome,
+                ChooserOutput::New => AppMsg::ShowOnboarding,
                 ChooserOutput::Import => AppMsg::ShowRestore,
+                ChooserOutput::Back => AppMsg::Back,
             },
         );
         let onboarding = Onboarding::builder().launch(()).forward(
@@ -149,25 +113,26 @@ impl Component for App {
             |out| match out {
                 OnboardingOutput::Created { paths, summary } => AppMsg::Ready { paths, summary },
                 OnboardingOutput::WantsRestore => AppMsg::ShowRestore,
+                OnboardingOutput::Cancelled => AppMsg::Back,
             },
         );
         let restore = Restore::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
                 RestoreOutput::Imported { paths, summary } => AppMsg::Ready { paths, summary },
-                RestoreOutput::Cancelled => AppMsg::ShowWelcome,
+                RestoreOutput::Cancelled => AppMsg::Back,
             },
         );
         let unlock = Unlock::builder()
             .launch(())
             .forward(sender.input_sender(), |out| match out {
                 UnlockOutput::Unlocked { paths, summary } => AppMsg::Ready { paths, summary },
-                UnlockOutput::SwitchWallet => AppMsg::ShowChooser,
+                UnlockOutput::SwitchWallet => AppMsg::Back,
             });
         let wallet = WalletPage::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
-                crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowChooser,
+                crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::Back,
                 crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                     AppMsg::RevealAddress(script_type)
                 }
@@ -175,8 +140,8 @@ impl Component for App {
         );
 
         // `ColorScheme::Default` follows the desktop setting, which is what we
-        // want — GNOME owns this preference, not the app. It is never overridden;
-        // we only listen so custom-drawn content can repaint.
+        // want — GNOME owns this preference, not the app. It is never
+        // overridden; we only listen so custom-drawn content can repaint.
         let style = adw::StyleManager::default();
         tracing::debug!(dark = style.is_dark(), "following the system color scheme");
         style.connect_dark_notify({
@@ -184,30 +149,78 @@ impl Component for App {
             move |manager| sender.input(AppMsg::ColorSchemeChanged(manager.is_dark()))
         });
 
-        let active = wallets.first().map(|w| Paths::for_wallet(&w.id));
-        if let (Screen::Locked, Some(entry)) = (screen, wallets.first()) {
-            unlock.emit(UnlockMsg::Open {
-                paths: Paths::for_wallet(&entry.id),
-                name: entry.name.clone(),
-            });
+        // Pages are registered up front and navigated by tag. The view owns
+        // the history, which is what lets back work everywhere without each
+        // screen inventing its own.
+        for (tag, title, child, can_pop) in [
+            ("chooser", "Wallets", chooser.widget().clone().upcast::<gtk::Widget>(), true),
+            ("unlock", "Unlock", unlock.widget().clone().upcast(), true),
+            ("wallet", "Wallet", wallet.widget().clone().upcast(), true),
+            // Setup and import drive their own back button: theirs steps
+            // backwards through a flow before leaving it, and two back buttons
+            // in one header is worse than one that does both jobs.
+            ("onboarding", "New wallet", onboarding.widget().clone().upcast(), false),
+            ("restore", "Import", restore.widget().clone().upcast(), false),
+        ] {
+            let page = adw::NavigationPage::new(&child, title);
+            page.set_tag(Some(tag));
+            page.set_can_pop(can_pop);
+            nav.add(&page);
         }
 
         let model = App {
-            screen, active, session: None, chooser, onboarding, restore, unlock, wallet,
+            nav: nav.clone(),
+            active: None,
+            session: None,
+            chooser,
+            onboarding,
+            restore,
+            unlock,
+            wallet,
         };
         let widgets = view_output!();
 
-        // The stack shows its first child until told otherwise, and that child
-        // is the onboarding page.
-        widgets
-            .stack
-            .set_visible_child_name(model.screen.page());
+        match wallets.len() {
+            // Nothing to choose between, so setup is the whole app.
+            0 => model.nav.replace_with_tags(&["onboarding"]),
+            // The list stays the root even for a single wallet: it is where
+            // "make another" lives, and it gives every other page a home to
+            // go back to.
+            _ => {
+                model.nav.replace_with_tags(&["chooser"]);
+                if wallets.len() == 1 {
+                    // One wallet needs no picking, so go straight to unlocking
+                    // it — with the list still underneath.
+                    sender.input(AppMsg::OpenWallet(wallets[0].id.clone()));
+                }
+            }
+        }
 
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
+    fn update(
+        &mut self,
+        msg: Self::Input,
+        sender: ComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
         match msg {
+            AppMsg::Back => {
+                self.nav.pop();
+            }
+            AppMsg::ShowOnboarding => self.nav.push_by_tag("onboarding"),
+            AppMsg::ShowRestore => self.nav.push_by_tag("restore"),
+
+            AppMsg::OpenWallet(id) => {
+                let paths = Paths::for_wallet(&id);
+                let name = wallet::Meta::load(&paths)
+                    .map(|m| m.display_name(&id))
+                    .unwrap_or_else(|| id.clone());
+                self.unlock.emit(UnlockMsg::Open { paths, name });
+                self.nav.push_by_tag("unlock");
+            }
+
             AppMsg::Ready { paths, summary } => {
                 // Opening a different wallet must retire the running client.
                 // Otherwise the previous wallet's node keeps feeding this
@@ -223,7 +236,11 @@ impl Component for App {
 
                 self.active = Some(paths.clone());
                 self.wallet.emit(WalletPageMsg::Show(summary));
-                self.screen = Screen::Unlocked;
+                self.chooser.emit(ChooserMsg::Refresh);
+
+                // The list stays underneath, so leaving a wallet lands on the
+                // list rather than back on the password screen just satisfied.
+                self.nav.replace_with_tags(&["chooser", "wallet"]);
 
                 if self.session.is_none() {
                     sender.oneshot_command(async move {
@@ -233,8 +250,7 @@ impl Component for App {
                     });
                 }
             }
-            AppMsg::ShowRestore => self.screen = Screen::Restore,
-            AppMsg::ShowWelcome => self.screen = Screen::Onboarding,
+
             AppMsg::RevealAddress(script_type) => {
                 let Some(session) = self.session.clone() else {
                     // Nothing to reveal from until the client is up.
@@ -246,21 +262,7 @@ impl Component for App {
                     )
                 });
             }
-            AppMsg::ShowChooser => {
-                // Re-read from disk: a wallet may have been created since this
-                // screen was last shown.
-                self.chooser.emit(ChooserMsg::Refresh);
-                self.screen = Screen::Chooser;
-            }
-            AppMsg::OpenWallet(id) => {
-                let paths = Paths::for_wallet(&id);
-                let name = wallet::Meta::load(&paths)
-                    .map(|m| m.display_name(&id))
-                    .unwrap_or_else(|| id.clone());
-                self.unlock.emit(UnlockMsg::Open { paths: paths.clone(), name });
-                self.active = Some(paths);
-                self.screen = Screen::Locked;
-            }
+
             AppMsg::ColorSchemeChanged(dark) => {
                 tracing::debug!(dark, "system color scheme changed");
             }

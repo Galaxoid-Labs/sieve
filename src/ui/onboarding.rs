@@ -57,6 +57,8 @@ impl Step {
 pub enum OnboardingMsg {
     Begin,
     Restore,
+    /// Whether a wallet list sits behind this screen.
+    CanCancel(bool),
     Back,
     SetPassword(Secret, Secret),
     PhraseWritten,
@@ -67,6 +69,8 @@ pub enum OnboardingMsg {
 pub enum OnboardingOutput {
     Created { paths: Paths, summary: Summary },
     WantsRestore,
+    /// Backed out of the first step; there is a screen behind this one.
+    Cancelled,
 }
 
 #[derive(Debug)]
@@ -76,6 +80,8 @@ pub enum OnboardingCmd {
 
 pub struct Onboarding {
     step: Step,
+    /// Whether there is a screen behind this one to return to.
+    can_cancel: bool,
     /// Held only between generation and sealing.
     mnemonic: Option<Zeroizing<String>>,
     password: Option<Zeroizing<String>>,
@@ -162,7 +168,7 @@ impl Component for Onboarding {
                     set_icon_name: "go-previous-symbolic",
                     set_tooltip_text: Some("Back"),
                     #[watch]
-                    set_visible: model.step.previous().is_some(),
+                    set_visible: model.step.previous().is_some() || model.can_cancel,
                     connect_clicked => OnboardingMsg::Back,
                 },
             },
@@ -368,6 +374,7 @@ impl Component for Onboarding {
     ) -> ComponentParts<Self> {
         let model = Onboarding {
             step: Step::Welcome,
+            can_cancel: false,
             mnemonic: None,
             password: None,
             challenge: [1, 2, 3],
@@ -380,17 +387,20 @@ impl Component for Onboarding {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         self.error = None;
         match msg {
+            OnboardingMsg::CanCancel(can) => self.can_cancel = can,
             OnboardingMsg::Begin => self.step = Step::Password,
 
             OnboardingMsg::Restore => {
                 let _ = sender.output(OnboardingOutput::WantsRestore);
             }
 
-            OnboardingMsg::Back => {
-                if let Some(previous) = self.step.previous() {
-                    self.step = previous;
+            OnboardingMsg::Back => match self.step.previous() {
+                Some(previous) => self.step = previous,
+                // Already at the first step, so back means leaving setup.
+                None => {
+                    let _ = sender.output(OnboardingOutput::Cancelled);
                 }
-            }
+            },
 
             OnboardingMsg::SetPassword(pass, confirm) => {
                 if pass.0.len() < 8 {

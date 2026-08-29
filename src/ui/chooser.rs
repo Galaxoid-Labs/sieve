@@ -53,12 +53,18 @@ impl FactoryComponent for WalletRow {
 pub struct Chooser {
     wallets: FactoryVecDeque<WalletRow>,
     count: usize,
+    /// Whether there is somewhere to go back to. False at startup, when this
+    /// is the first screen and nothing has been opened yet.
+    can_go_back: bool,
 }
 
 #[derive(Debug)]
 pub enum ChooserMsg {
     /// Re-read the wallet list from disk.
     Refresh,
+    /// Whether a wallet is already open behind this screen.
+    CanGoBack(bool),
+    Back,
     Chosen(String),
     New,
     Import,
@@ -67,6 +73,7 @@ pub enum ChooserMsg {
 #[derive(Debug)]
 pub enum ChooserOutput {
     Open(String),
+    Back,
     New,
     Import,
 }
@@ -137,7 +144,7 @@ impl SimpleComponent for Chooser {
                 WalletRowOutput::Chosen(id) => ChooserMsg::Chosen(id),
             });
 
-        let mut model = Chooser { wallets, count: 0 };
+        let mut model = Chooser { wallets, count: 0, can_go_back: false };
         model.reload();
 
         let wallet_list = model.wallets.widget();
@@ -148,6 +155,10 @@ impl SimpleComponent for Chooser {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             ChooserMsg::Refresh => self.reload(),
+            ChooserMsg::CanGoBack(can) => self.can_go_back = can,
+            ChooserMsg::Back => {
+                let _ = sender.output(ChooserOutput::Back);
+            }
             ChooserMsg::Chosen(id) => {
                 let _ = sender.output(ChooserOutput::Open(id));
             }
