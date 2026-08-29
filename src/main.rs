@@ -1,6 +1,7 @@
 //! Sieve — a privacy-focused Bitcoin wallet.
 
 mod app;
+mod settings;
 mod ui;
 mod vault;
 mod wallet;
