@@ -37,9 +37,13 @@ These are not preferences. Violating one is a bug, not a style difference.
 4. **The wallet is watch-only by default.** `bdk_wallet::ChangeSet` persists only
    `Descriptor<DescriptorPublicKey>`, so the SQLite store contains no private keys. Browsing
    balances and building PSBTs must not require an unlock. Decrypt only to sign.
-5. **Light and dark follow the desktop, automatically.** The `libadwaita` feature makes
-   `RelmApp::new` build an `adw::Application`, and `ColorScheme::Default` already follows the
-   system preference — never call `set_color_scheme` to force one. Consequently: no hardcoded
+5. **Light and dark follow the desktop, automatically.** `ColorScheme::Default` is supposed
+   to follow the system on its own, but libadwaita's settings backend does not find the source
+   in every session — on Hyprland the portal and gsettings both said `prefer-dark` and the app
+   still came up light. So `org.gnome.desktop.interface color-scheme` is read directly and
+   mirrored onto the style manager, and watched for changes. That is still following the
+   desktop, by a route that works. Never set the scheme from an app preference: Sieve has no
+   opinion about light and dark and must not grow one. Consequently: no hardcoded
    colors, ever. Use Adwaita style classes (`suggested-action`, `destructive-action`, `error`,
    `warning`, `dim-label`, `pill`, `card`) and Adwaita named colors in any custom CSS, since those
    recolor themselves. Anything drawn by hand into a `gtk::DrawingArea` must read

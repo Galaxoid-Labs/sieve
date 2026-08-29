@@ -184,11 +184,29 @@ impl Component for App {
             },
         );
 
-        // `ColorScheme::Default` follows the desktop setting, which is what we
-        // want — GNOME owns this preference, not the app. It is never
-        // overridden; we only listen so custom-drawn content can repaint.
+        // The desktop owns this preference, not the app. Normally
+        // `ColorScheme::Default` follows it on its own — but libadwaita's
+        // settings backend does not find the source in every session, and on
+        // one where the portal and gsettings both plainly say prefer-dark the
+        // app still came up light. So the setting is read directly and
+        // mirrored, which is still following the desktop, just by a route that
+        // works here. Nothing is chosen by Sieve.
         let style = adw::StyleManager::default();
-        tracing::debug!(dark = style.is_dark(), "following the system color scheme");
+        let desktop = desktop_interface_settings();
+
+        if let Some(settings) = &desktop {
+            apply_desktop_scheme(&style, settings);
+            settings.connect_changed(Some("color-scheme"), {
+                let style = style.clone();
+                move |settings, _| apply_desktop_scheme(&style, settings)
+            });
+        }
+
+        tracing::debug!(
+            dark = style.is_dark(),
+            desktop = desktop.as_ref().map(|s| s.string("color-scheme").to_string()),
+            "following the system color scheme"
+        );
         style.connect_dark_notify({
             let sender = sender.clone();
             move |manager| sender.input(AppMsg::ColorSchemeChanged(manager.is_dark()))
@@ -512,6 +530,29 @@ impl Component for App {
     }
 }
 
+/// The desktop's interface settings, if the schema is installed.
+///
+/// Returns `None` rather than panicking: `gio::Settings::new` aborts on a
+/// missing schema, and a desktop without it is a reason to fall back to
+/// libadwaita's own detection, not to refuse to start.
+fn desktop_interface_settings() -> Option<gtk::gio::Settings> {
+    const SCHEMA: &str = "org.gnome.desktop.interface";
+    gtk::gio::SettingsSchemaSource::default()
+        .and_then(|source| source.lookup(SCHEMA, true))
+        .map(|_| gtk::gio::Settings::new(SCHEMA))
+}
+
+/// Mirror the desktop's colour scheme onto the style manager.
+fn apply_desktop_scheme(style: &adw::StyleManager, settings: &gtk::gio::Settings) {
+    let scheme = match settings.string("color-scheme").as_str() {
+        "prefer-dark" => adw::ColorScheme::PreferDark,
+        "prefer-light" => adw::ColorScheme::PreferLight,
+        // Anything else means the desktop has no opinion, and neither should we.
+        _ => adw::ColorScheme::Default,
+    };
+    style.set_color_scheme(scheme);
+}
+
 impl App {
     /// Ask again shortly.
     ///
@@ -622,9 +663,9 @@ impl App {
         // What the desktop says, read directly, next to what libadwaita made
         // of it. If these disagree the setting is reaching the machine but not
         // the toolkit, which is a different problem from the app ignoring it.
-        let desktop = gtk::gio::Settings::new("org.gnome.desktop.interface")
-            .string("color-scheme")
-            .to_string();
+        let desktop = desktop_interface_settings()
+            .map(|settings| settings.string("color-scheme").to_string())
+            .unwrap_or_else(|| "unknown".into());
 
         let appearance = adw::ActionRow::new();
         appearance.set_title("Appearance");
