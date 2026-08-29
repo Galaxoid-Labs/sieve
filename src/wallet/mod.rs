@@ -491,6 +491,37 @@ pub fn create(
     Summary::from_portfolio(&mut portfolio)
 }
 
+/// Import an extended private key.
+///
+/// Derivation is identical to a recovery phrase — a phrase is only a way of
+/// writing one of these down — so this reuses the same path expansion.
+#[allow(clippy::too_many_arguments)]
+pub fn import_xprv(
+    xprv_text: &str,
+    password: &[u8],
+    paths: &Paths,
+    kdf: vault::KdfParams,
+    network: Network,
+    birthday: Checkpoint,
+    script_types: &[accounts::ScriptType],
+    primary: accounts::ScriptType,
+    name: Option<String>,
+) -> Result<Summary> {
+    let xprv: bdk_wallet::bitcoin::bip32::Xpriv = xprv_text
+        .trim()
+        .parse()
+        .map_err(|e| anyhow!("that is not a valid extended private key: {e}"))?;
+
+    let mut portfolio =
+        accounts::Portfolio::create_from_xprv(xprv, data_dir(paths), script_types, primary, network)?;
+    Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
+
+    let sealed = vault::seal(xprv_text.trim().as_bytes(), password, &network.to_string(), kdf)?;
+    vault::write_atomic(&paths.vault, &sealed)?;
+
+    Summary::from_portfolio(&mut portfolio)
+}
+
 /// Import a single WIF key, watched under every requested script type.
 pub fn import_wif(
     wif: &str,
@@ -715,6 +746,39 @@ mod tests {
         assert_eq!(reread.birthday_height, 319_000);
 
         std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    #[test]
+    fn an_xprv_derives_the_same_wallet_as_its_phrase() {
+        // A recovery phrase is only a way of writing an extended key down, so
+        // importing either form must land on the same wallet. If this ever
+        // diverges, an import silently produces an empty wallet.
+        let phrase = "abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon about";
+        let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("sieve-xprv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let from_phrase = {
+            let mut a = accounts::Account::create(
+                xprv, accounts::ScriptType::NativeSegwit, &dir.join("a.sqlite"), DEFAULT_NETWORK,
+            ).unwrap();
+            a.wallet.next_unused_address(KeychainKind::External).address.to_string()
+        };
+
+        // Round-trip the key through its text form, which is what an import does.
+        let reparsed: bdk_wallet::bitcoin::bip32::Xpriv = xprv.to_string().parse().unwrap();
+        let from_xprv = {
+            let mut b = accounts::Account::create(
+                reparsed, accounts::ScriptType::NativeSegwit, &dir.join("b.sqlite"), DEFAULT_NETWORK,
+            ).unwrap();
+            b.wallet.next_unused_address(KeychainKind::External).address.to_string()
+        };
+
+        assert_eq!(from_phrase, from_xprv);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

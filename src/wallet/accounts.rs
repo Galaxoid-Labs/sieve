@@ -132,6 +132,9 @@ pub enum CredentialKind {
     Mnemonic,
     /// A single private key in Wallet Import Format.
     Wif,
+    /// A BIP32 extended private key. Many wallets export one of these and
+    /// never show a recovery phrase at all.
+    ExtendedKey,
     /// An output descriptor or extended public key — watch-only, no keys.
     Descriptor,
 }
@@ -141,6 +144,7 @@ impl CredentialKind {
         match self {
             CredentialKind::Mnemonic => "Recovery phrase",
             CredentialKind::Wif => "Private key (WIF)",
+            CredentialKind::ExtendedKey => "Extended private key (xprv)",
             CredentialKind::Descriptor => "Descriptor or xpub (watch-only)",
         }
     }
@@ -155,7 +159,7 @@ impl CredentialKind {
 
     /// Whether this credential derives many addresses or holds exactly one.
     pub fn is_hd(self) -> bool {
-        matches!(self, CredentialKind::Mnemonic)
+        matches!(self, CredentialKind::Mnemonic | CredentialKind::ExtendedKey)
     }
 }
 

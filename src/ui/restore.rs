@@ -13,8 +13,12 @@ use zeroize::Zeroizing;
 use crate::wallet::accounts::{CredentialKind, ScriptType};
 use crate::wallet::{self, Paths, Summary};
 
-const KINDS: [CredentialKind; 3] =
-    [CredentialKind::Mnemonic, CredentialKind::Wif, CredentialKind::Descriptor];
+const KINDS: [CredentialKind; 4] = [
+    CredentialKind::Mnemonic,
+    CredentialKind::ExtendedKey,
+    CredentialKind::Wif,
+    CredentialKind::Descriptor,
+];
 
 /// Secret with a redacted `Debug`, so relm4's message tracing cannot print a
 /// seed phrase, a key, or a password.
@@ -41,6 +45,7 @@ pub struct Submission {
 #[derive(Debug)]
 pub enum RestoreMsg {
     KindChanged(u32),
+    BirthdayChanged(u32),
     NetworkChanged(u32),
     Submit(Box<Submission>),
     Cancel,
@@ -60,6 +65,7 @@ pub enum RestoreCmd {
 pub struct Restore {
     kind: CredentialKind,
     network: bdk_wallet::bitcoin::Network,
+    birthday_index: u32,
     busy: bool,
     error: Option<String>,
 }
@@ -77,6 +83,7 @@ impl Restore {
     fn credential_title(&self) -> &'static str {
         match self.kind {
             CredentialKind::Mnemonic => "Recovery phrase",
+            CredentialKind::ExtendedKey => "Extended private key",
             CredentialKind::Wif => "Private key",
             CredentialKind::Descriptor => "Descriptor or xpub",
         }
@@ -85,6 +92,7 @@ impl Restore {
     fn credential_hint(&self) -> &'static str {
         match self.kind {
             CredentialKind::Mnemonic => "The 12 or 24 words, separated by spaces",
+            CredentialKind::ExtendedKey => "An xprv, tprv or vprv. No recovery phrase needed",
             CredentialKind::Wif => "A single private key in Wallet Import Format",
             CredentialKind::Descriptor => "Watch-only. Sieve will never hold a key for this wallet",
         }
@@ -102,12 +110,22 @@ impl Restore {
         }
     }
 
-    fn birthday_model(&self) -> gtk::StringList {
-        let list = gtk::StringList::new(&[]);
-        for checkpoint in wallet::checkpoints(self.network) {
-            list.append(&format!("{} — block {}", checkpoint.when, checkpoint.height));
-        }
-        list
+    /// Resolve a choice to a checkpoint on the current network.
+    ///
+    /// Index 0 is the most recent checkpoint, and the last choice is always the
+    /// floor, so "I don't know" is always available and always correct.
+    fn birthday_for(&self, index: u32) -> wallet::Checkpoint {
+        let all = wallet::checkpoints(self.network);
+        all.get(index as usize)
+            .copied()
+            .unwrap_or_else(|| *all.last().expect("a floor checkpoint exists"))
+    }
+
+    /// What the chosen birthday actually resolves to, so the consequence of the
+    /// choice is visible before importing.
+    fn birthday_label(&self, index: u32) -> String {
+        let checkpoint = self.birthday_for(index);
+        format!("{} — from block {}", checkpoint.when, checkpoint.height)
     }
 }
 
@@ -214,10 +232,27 @@ impl Component for Restore {
                     #[name(birthday_row)]
                     adw::ComboRow {
                         set_title: "Earliest possible payment",
+                        // Fixed choices, so selecting the network never resets
+                        // this and this never resets anything else.
+                        set_model: Some(&gtk::StringList::new(&[
+                            "Recently",
+                            "Within about a year",
+                            "One to two years ago",
+                            "Two to three years ago",
+                            "Three or more years ago",
+                            "I don't know",
+                        ])),
+                        set_selected: 1,
+                        connect_selected_notify[sender] => move |row| {
+                            sender.input(RestoreMsg::BirthdayChanged(row.selected()));
+                        },
+                    },
+
+                    adw::ActionRow {
+                        add_css_class: "dim-label",
+                        set_title: "Scanning from",
                         #[watch]
-                        #[block_signal(birthday_handler)]
-                        set_model: Some(&model.birthday_model()),
-                        connect_selected_notify => RestoreMsg::KindChanged(0) @birthday_handler,
+                        set_subtitle: &model.birthday_label(model.birthday_index),
                     },
                 },
 
@@ -291,6 +326,7 @@ impl Component for Restore {
         let model = Restore {
             kind: CredentialKind::Mnemonic,
             network: bdk_wallet::bitcoin::Network::Signet,
+            birthday_index: 1,
             busy: false,
             error: None,
         };
@@ -304,6 +340,10 @@ impl Component for Restore {
                 if let Some(kind) = KINDS.get(index as usize) {
                     self.kind = *kind;
                 }
+                self.error = None;
+            }
+            RestoreMsg::BirthdayChanged(index) => {
+                self.birthday_index = index;
                 self.error = None;
             }
             RestoreMsg::NetworkChanged(index) => {
@@ -325,7 +365,14 @@ impl Component for Restore {
                     return;
                 }
                 if submission.credential.0.trim().is_empty() {
-                    self.error = Some(format!("Enter the {}.", self.credential_title().to_lowercase()));
+                    // Judge the submission, not the model: they can disagree if
+                    // a row changed after the last view update.
+                    self.error = Some(match submission.kind {
+                        CredentialKind::Mnemonic => "Enter your recovery phrase.".into(),
+                        CredentialKind::Wif => "Enter the private key.".into(),
+                        CredentialKind::ExtendedKey => "Enter the extended key.".into(),
+                        CredentialKind::Descriptor => "Enter the descriptor.".into(),
+                    });
                     return;
                 }
                 if submission.password.0.len() < 8 {
@@ -337,11 +384,7 @@ impl Component for Restore {
                     return;
                 }
 
-                let checkpoints = wallet::checkpoints(network);
-                let birthday = checkpoints
-                    .get(submission.birthday_index as usize)
-                    .copied()
-                    .unwrap_or_else(|| *checkpoints.last().expect("a floor checkpoint exists"));
+                let birthday = self.birthday_for(submission.birthday_index);
 
                 self.busy = true;
                 self.error = None;
@@ -368,6 +411,17 @@ impl Component for Restore {
                             &ScriptType::ALL,
                             ScriptType::NativeSegwit,
                             bip39.as_deref(),
+                            None,
+                        ),
+                        CredentialKind::ExtendedKey => wallet::import_xprv(
+                            &credential,
+                            password.as_bytes(),
+                            &paths,
+                            crate::vault::KdfParams::default(),
+                            network,
+                            birthday,
+                            &ScriptType::ALL,
+                            ScriptType::NativeSegwit,
                             None,
                         ),
                         CredentialKind::Wif => wallet::import_wif(
