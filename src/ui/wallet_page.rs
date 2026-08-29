@@ -888,6 +888,14 @@ impl Component for WalletPage {
                                 set_wrap_mode: gtk::pango::WrapMode::WordChar,
                                 set_selectable: true,
                                 set_justify: gtk::Justification::Center,
+                                set_valign: gtk::Align::Center,
+                                // A taproot address is 62 characters where a
+                                // legacy one is 34, so the label wraps to a
+                                // different number of lines and everything
+                                // below it moves. Wrap them all the same way
+                                // and reserve the height of the longest.
+                                set_max_width_chars: 32,
+                                set_height_request: 66,
                                 #[watch]
                                 set_label: &model.address(),
                             },
