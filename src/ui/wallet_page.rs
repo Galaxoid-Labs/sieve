@@ -11,6 +11,7 @@ use crate::wallet::Summary;
 #[derive(Debug)]
 pub enum WalletPageOutput {
     SwitchWallet,
+    ShowPreferences,
     /// Ask for the password again — the wallet is on screen but locked.
     Unlock,
     /// Reveal a new address on this path.
@@ -158,8 +159,9 @@ pub enum WalletPageMsg {
     Failed(String),
     CopyAddress,
     SwitchWallet,
-    /// Swap between decimal BTC and satoshis.
-    ToggleDenomination,
+    /// Which unit amounts are shown in. Owned by the app, since the
+    /// preferences dialog is where it is changed.
+    SetDenomination(crate::settings::Denomination),
     /// Choose which derivation path to receive on.
     SelectReceivePath(u32),
     /// Ask for an address that has not been handed to anyone yet.
@@ -382,7 +384,7 @@ impl Component for WalletPage {
                                 set_tooltip_text: Some("Switch between BTC and satoshis"),
                                 #[watch]
                                 set_label: model.settings.denomination.label(),
-                                connect_clicked => WalletPageMsg::ToggleDenomination,
+                                connect_clicked => WalletPageMsg::ShowPreferences,
                             },
 
                             gtk::Label {
@@ -624,15 +626,16 @@ impl Component for WalletPage {
                 }
             }
             WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
-            WalletPageMsg::ToggleDenomination => {
-                self.settings.denomination = self.settings.denomination.toggled();
-                self.settings.save();
+            WalletPageMsg::SetDenomination(denomination) => {
+                self.settings.denomination = denomination;
                 // The rows hold formatted text, so they are rebuilt.
                 if let Some(summary) = self.summary.clone() {
                         self.rebuild_transactions(&summary);
                 }
             }
-            WalletPageMsg::ShowPreferences => self.show_preferences(root, &sender),
+            WalletPageMsg::ShowPreferences => {
+                let _ = sender.output(WalletPageOutput::ShowPreferences);
+            }
             WalletPageMsg::SetLocked(locked) => self.locked = locked,
             WalletPageMsg::SetName(name) => self.name = name,
             WalletPageMsg::RequestUnlock => {
@@ -689,82 +692,6 @@ impl WalletPage {
         for tx in &summary.transactions {
             guard.push_back((tx.clone(), self.settings.denomination, summary.tip));
         }
-    }
-
-    /// Present preferences.
-    ///
-    /// Built fresh each time rather than held: it is a snapshot of a handful of
-    /// values, and keeping a live dialog around means keeping references to its
-    /// rows just to update text nobody is looking at most of the time.
-    fn show_preferences(&self, root: &adw::BreakpointBin, sender: &ComponentSender<Self>) {
-        let page = adw::PreferencesPage::new();
-
-        let display = adw::PreferencesGroup::new();
-        display.set_title("Display");
-
-        let amounts = adw::ActionRow::new();
-        amounts.set_title("Amounts");
-        amounts.set_activatable(true);
-        let unit = gtk::Label::new(None);
-        unit.add_css_class("dim-label");
-        amounts.add_suffix(&unit);
-
-        // The row keeps its own copy so it can relabel itself while open; the
-        // message keeps the component and the saved setting in step.
-        let current = std::cell::Cell::new(self.settings.denomination);
-        let describe = |d: crate::settings::Denomination| match d {
-            crate::settings::Denomination::Sats => "Satoshis",
-            crate::settings::Denomination::Btc => "Decimal BTC",
-        };
-        amounts.set_subtitle(describe(current.get()));
-        unit.set_label(current.get().label());
-
-        {
-            let sender = sender.clone();
-            let row = amounts.clone();
-            let unit = unit.clone();
-            amounts.connect_activated(move |_| {
-                let next = current.get().toggled();
-                current.set(next);
-                row.set_subtitle(describe(next));
-                unit.set_label(next.label());
-                sender.input(WalletPageMsg::ToggleDenomination);
-            });
-        }
-        display.add(&amounts);
-        page.add(&display);
-
-        let this = adw::PreferencesGroup::new();
-        this.set_title("This wallet");
-        this.add(&detail_row(
-            "Chain",
-            self.summary.as_ref().map_or("—", |s| s.network.as_str()),
-        ));
-        this.add(&detail_row("Derivation paths watched", &self.paths_watched()));
-
-        let switch = adw::ActionRow::new();
-        switch.set_title("Switch wallet");
-        switch.set_subtitle("Open a different wallet, or make another");
-        switch.set_activatable(true);
-        switch.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-        page.add(&this);
-
-        let dialog = adw::PreferencesDialog::new();
-        dialog.add(&page);
-
-        {
-            let sender = sender.clone();
-            let dialog = dialog.clone();
-            switch.connect_activated(move |_| {
-                // Close first: the list is a different place, not something
-                // layered over this one.
-                dialog.close();
-                sender.input(WalletPageMsg::SwitchWallet);
-            });
-        }
-        this.add(&switch);
-
-        dialog.present(Some(root));
     }
 
     /// Present the detail sheet for one transaction.

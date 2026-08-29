@@ -22,6 +22,16 @@ pub struct App {
     /// The navigation history. Held here so every screen's back button routes
     /// through one place instead of each inventing its own.
     nav: adw::NavigationView,
+    /// Preferences, built once and kept: it owns the wallet list as a subpage,
+    /// and a widget cannot be re-parented between short-lived dialogs.
+    prefs: adw::PreferencesDialog,
+    /// The wallet list, wrapped so preferences can slide it in.
+    chooser_page: adw::NavigationPage,
+    /// The page currently inside the dialog, so reopening replaces it rather
+    /// than stacking another copy.
+    prefs_page: Option<adw::PreferencesPage>,
+    /// Owned here because preferences is where it is changed.
+    settings: crate::settings::Settings,
     /// Unlocking is a dialog over the wallet, not a page you walk through.
     /// Landing straight on the wallet is the whole point: the thing you opened
     /// the app for is on screen from the first frame, just not filled in yet.
@@ -43,7 +53,9 @@ pub enum AppMsg {
     Back,
     ShowOnboarding,
     ShowRestore,
-    /// Open the wallet list — a detour, not part of the main path.
+    ShowPreferences,
+    ToggleDenomination,
+    /// Slide the wallet list in over preferences.
     ShowWallets,
     /// Re-present the password dialog for the wallet already on screen.
     PromptUnlock,
@@ -146,6 +158,9 @@ impl Component for App {
             sender.input_sender(),
             |out| match out {
                 crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowWallets,
+                crate::ui::wallet_page::WalletPageOutput::ShowPreferences => {
+                    AppMsg::ShowPreferences
+                }
                 crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
                 crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                     AppMsg::RevealAddress(script_type)
@@ -168,9 +183,13 @@ impl Component for App {
         // screen inventing its own.
         unlock_dialog.set_child(Some(unlock.widget()));
 
+        // The wallet list is not part of the main path any more: it lives
+        // inside preferences, which is where you go to change wallets.
+        let chooser_page = adw::NavigationPage::new(chooser.widget(), "Wallets");
+        chooser_page.set_tag(Some("wallets"));
+
         for (tag, title, child, can_pop) in [
             ("wallet", "Wallet", wallet.widget().clone().upcast::<gtk::Widget>(), true),
-            ("chooser", "Wallets", chooser.widget().clone().upcast(), true),
             // Setup and import drive their own back button: theirs steps
             // backwards through a flow before leaving it, and two back buttons
             // in one header is worse than one that does both jobs.
@@ -183,8 +202,15 @@ impl Component for App {
             nav.add(&page);
         }
 
+        let settings = crate::settings::Settings::load();
+        wallet.emit(WalletPageMsg::SetDenomination(settings.denomination));
+
         let model = App {
             nav: nav.clone(),
+            prefs: adw::PreferencesDialog::new(),
+            chooser_page,
+            prefs_page: None,
+            settings,
             unlock_dialog: unlock_dialog.clone(),
             active: None,
             session: None,
@@ -223,9 +249,25 @@ impl Component for App {
             AppMsg::ShowOnboarding => self.nav.push_by_tag("onboarding"),
             AppMsg::ShowRestore => self.nav.push_by_tag("restore"),
 
+            AppMsg::ShowPreferences => {
+                self.rebuild_preferences(&sender);
+                if let Some(window) = self.nav.root() {
+                    self.prefs.present(Some(&window));
+                }
+            }
+
+            AppMsg::ToggleDenomination => {
+                self.settings.denomination = self.settings.denomination.toggled();
+                self.settings.save();
+                self.wallet.emit(WalletPageMsg::SetDenomination(self.settings.denomination));
+                self.rebuild_preferences(&sender);
+            }
+
             AppMsg::ShowWallets => {
                 self.chooser.emit(ChooserMsg::Refresh);
-                self.nav.push_by_tag("chooser");
+                // Slides in over preferences with its own back button, rather
+                // than throwing the dialog away to navigate the window behind.
+                self.prefs.push_subpage(&self.chooser_page);
             }
 
             AppMsg::PromptUnlock => {
@@ -243,8 +285,8 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetLocked(true));
                 self.wallet.emit(WalletPageMsg::SetName(name));
 
-                // Chosen from the list, so leave the detour before asking.
-                self.nav.pop_to_tag("wallet");
+                // Chosen from the list, so close preferences before asking.
+                self.prefs.close();
                 sender.input(AppMsg::PromptUnlock);
             }
 
@@ -267,6 +309,7 @@ impl Component for App {
                 self.chooser.emit(ChooserMsg::Refresh);
 
                 self.unlock_dialog.close();
+                self.prefs.close();
                 // Whether this came from a password, a new wallet or an
                 // import, the wallet is where you end up — and it is the root,
                 // so nothing is left behind to walk back through.
@@ -366,6 +409,58 @@ impl Component for App {
 }
 
 impl App {
+    /// Fill the preferences dialog with the current state.
+    ///
+    /// The dialog itself is long-lived — it owns the wallet-list subpage, and a
+    /// widget cannot be re-parented between short-lived dialogs — so its page
+    /// is replaced rather than the dialog rebuilt.
+    fn rebuild_preferences(&mut self, sender: &ComponentSender<Self>) {
+        let page = adw::PreferencesPage::new();
+        page.set_title("Preferences");
+
+        let display = adw::PreferencesGroup::new();
+        display.set_title("Display");
+
+        let amounts = adw::ActionRow::new();
+        amounts.set_title("Amounts");
+        amounts.set_activatable(true);
+        amounts.set_subtitle(match self.settings.denomination {
+            crate::settings::Denomination::Sats => "Satoshis",
+            crate::settings::Denomination::Btc => "Decimal BTC",
+        });
+        let unit = gtk::Label::new(Some(self.settings.denomination.label()));
+        unit.add_css_class("dim-label");
+        amounts.add_suffix(&unit);
+        {
+            let sender = sender.clone();
+            amounts.connect_activated(move |_| sender.input(AppMsg::ToggleDenomination));
+        }
+        display.add(&amounts);
+        page.add(&display);
+
+        let this = adw::PreferencesGroup::new();
+        this.set_title("This wallet");
+
+        let switch = adw::ActionRow::new();
+        switch.set_title("Switch wallet");
+        switch.set_subtitle("Open a different wallet, or make another");
+        switch.set_activatable(true);
+        switch.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        {
+            let sender = sender.clone();
+            switch.connect_activated(move |_| sender.input(AppMsg::ShowWallets));
+        }
+        this.add(&switch);
+        page.add(&this);
+
+        // Replace whatever was there, so reopening never stacks pages.
+        if let Some(existing) = self.prefs_page.take() {
+            self.prefs.remove(&existing);
+        }
+        self.prefs.add(&page);
+        self.prefs_page = Some(page);
+    }
+
     fn await_update(&self, sender: &ComponentSender<Self>) {
         let Some(session) = self.session.clone() else { return };
         sender.oneshot_command(async move {
