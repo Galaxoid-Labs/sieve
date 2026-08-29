@@ -56,15 +56,22 @@ impl FactoryComponent for TxRow {
             },
 
             add_suffix = &gtk::Label {
-                add_css_class: "numeric",
+                // set_css_classes replaces the whole list, so the weight has
+                // to be part of it rather than added separately.
                 // Direction carries the colour, so a glance at the column
                 // reads without parsing the sign.
                 set_css_classes: if self.incoming {
-                    &["numeric", "success"]
+                    &["numeric", "heading", "success"]
                 } else {
-                    &["numeric", "dim-label"]
+                    &["numeric", "heading", "dim-label"]
                 },
                 set_label: &self.amount,
+            },
+
+            // The row opens a page, so it carries the chevron that promises one.
+            add_suffix = &gtk::Image {
+                set_icon_name: Some("go-next-symbolic"),
+                add_css_class: "dim-label",
             },
 
             connect_activated[sender, txid = self.txid.clone()] => move |_| {
