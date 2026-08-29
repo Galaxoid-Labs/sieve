@@ -721,6 +721,23 @@ impl App {
         let page = adw::PreferencesPage::new();
         page.set_title("Preferences");
 
+        // First, because it is the one thing here you might have opened
+        // preferences to do, and everything else describes a wallet you would
+        // be leaving anyway.
+        let switch = adw::ActionRow::new();
+        switch.set_title("Switch wallet");
+        switch.set_subtitle("Open a different wallet, or make another");
+        switch.set_activatable(true);
+        switch.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        {
+            let sender = sender.clone();
+            switch.connect_activated(move |_| sender.input(AppMsg::ShowWallets));
+        }
+
+        let leaving = adw::PreferencesGroup::new();
+        leaving.add(&switch);
+        page.add(&leaving);
+
         let display = adw::PreferencesGroup::new();
         display.set_title("Display");
 
@@ -878,22 +895,7 @@ impl App {
             this.add(&peers);
         }
 
-        let switch = adw::ActionRow::new();
-        switch.set_title("Switch wallet");
-        switch.set_subtitle("Open a different wallet, or make another");
-        switch.set_activatable(true);
-        switch.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-        {
-            let sender = sender.clone();
-            switch.connect_activated(move |_| sender.input(AppMsg::ShowWallets));
-        }
         page.add(&this);
-
-        // Its own group: everything above describes the wallet you are in,
-        // and this is the one row that leaves it.
-        let elsewhere = adw::PreferencesGroup::new();
-        elsewhere.add(&switch);
-        page.add(&elsewhere);
 
         // Replace whatever was there, so reopening never stacks pages.
         if let Some(existing) = self.prefs_page.take() {
