@@ -69,6 +69,17 @@ wallet was opened, so it is off by default, stated plainly in its preference row
 made on a test network. If any other outbound call is ever added, it gets the same treatment:
 opt-in, disclosed, and justified in the row that enables it.
 
+## Known upstream gap: no header persistence
+
+bip157 0.6.3 accepts a `data_dir` and ignores it — `Node::new` destructures the config as
+`data_path: _` and the field is read nowhere else. So block headers live in memory only and
+are re-fetched on every launch. `chain/<network>/` is created in anticipation of a version
+that uses it; do not assume anything is in there.
+
+The impact is limited: the BDK wallet's own checkpoint still advances and is persisted, so
+filter scanning resumes where it left off. Only the header chain is re-downloaded, at 80
+bytes a header.
+
 ## Receiving
 
 `next_unused_address` never returns a *used* address, but it returns the same unused one

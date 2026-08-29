@@ -984,11 +984,21 @@ impl WalletPage {
                 None::<&gtk::gio::Cancellable>,
                 move |result| {
                     if let Err(e) = result {
-                        // Opening a browser fails for reasons this app cannot
-                        // fix — no handler registered, a sandbox without the
-                        // OpenURI portal. Hand over the link rather than doing
-                        // nothing visible at all.
-                        tracing::warn!(%e, "could not open the block explorer");
+                        // UriLauncher goes through the OpenURI portal, which is
+                        // right under a sandbox and the only thing that works
+                        // there — but it needs a portal backend answering, and
+                        // plenty of desktops have none. Fall back to the
+                        // handler every desktop does have.
+                        tracing::warn!(%e, "portal could not open the browser; trying xdg-open");
+                        match std::process::Command::new("xdg-open").arg(&url).spawn() {
+                            Ok(_) => return,
+                            Err(e) => {
+                                tracing::warn!(%e, "xdg-open failed too");
+                            }
+                        }
+
+                        // Nothing could open it, so hand over the link rather
+                        // than doing nothing visible at all.
                         if let Some(display) = gtk::gdk::Display::default() {
                             display.clipboard().set_text(&url);
                         }
