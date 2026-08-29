@@ -717,7 +717,15 @@ impl App {
             crate::settings::Denomination::Sats => "Satoshis",
             crate::settings::Denomination::Btc => "Decimal BTC",
         });
-        let unit = gtk::Label::new(Some(self.settings.denomination.label()));
+        // Preferences has no summary to hand, so the unit is shown for the
+        // network the open wallet is on.
+        let network = self
+            .active
+            .as_ref()
+            .and_then(wallet::Meta::load)
+            .map(|m| m.network)
+            .unwrap_or_else(|| "bitcoin".into());
+        let unit = gtk::Label::new(Some(self.settings.denomination.label(&network)));
         unit.add_css_class("dim-label");
         amounts.add_suffix(&unit);
         {

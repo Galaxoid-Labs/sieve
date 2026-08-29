@@ -23,10 +23,23 @@ impl Denomination {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    /// The unit as written, for the network it belongs to.
+    ///
+    /// Test coins get their own ticker — sBTC on signet, tBTC on testnet —
+    /// because "0.005 BTC" reads as real money whatever the header says, and
+    /// these are worth nothing. The satoshi has no such convention and
+    /// inventing one would be worse than leaning on the network shown beside
+    /// it.
+    pub fn label(self, network: &str) -> &'static str {
         match self {
-            Denomination::Btc => "BTC",
             Denomination::Sats => "sats",
+            Denomination::Btc => match network {
+                "bitcoin" => "BTC",
+                "signet" => "sBTC",
+                "testnet" | "testnet4" => "tBTC",
+                "regtest" => "rBTC",
+                _ => "BTC",
+            },
         }
     }
 
@@ -34,13 +47,14 @@ impl Denomination {
     ///
     /// Formatted by integer arithmetic rather than floating point: a balance
     /// must never be off by a satoshi because of a rounding artefact.
-    pub fn format(self, sats: u64) -> String {
+    pub fn format(self, sats: u64, network: &str) -> String {
+        let unit = self.label(network);
         match self {
-            Denomination::Sats => format!("{} sats", group(sats)),
+            Denomination::Sats => format!("{} {unit}", group(sats)),
             Denomination::Btc => {
                 let whole = sats / 100_000_000;
                 let fraction = sats % 100_000_000;
-                format!("{}.{fraction:08} BTC", group(whole))
+                format!("{}.{fraction:08} {unit}", group(whole))
             }
         }
     }
@@ -124,14 +138,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_coins_carry_their_own_ticker() {
+        // "0.005 BTC" on signet reads as real money. It is worth nothing.
+        assert_eq!(Denomination::Btc.label("bitcoin"), "BTC");
+        assert_eq!(Denomination::Btc.label("signet"), "sBTC");
+        assert_eq!(Denomination::Btc.label("testnet"), "tBTC");
+        assert_eq!(Denomination::Btc.label("testnet4"), "tBTC");
+        assert_eq!(Denomination::Btc.label("regtest"), "rBTC");
+
+        // Satoshis have no such convention, and inventing one is worse.
+        assert_eq!(Denomination::Sats.label("signet"), "sats");
+
+        assert_eq!(Denomination::Btc.format(100_000_000, "signet"), "1.00000000 sBTC");
+    }
+
+    #[test]
     fn amounts_are_exact() {
         // Integer arithmetic, so no rounding artefact can move a satoshi.
-        assert_eq!(Denomination::Sats.format(53_713), "53,713 sats");
-        assert_eq!(Denomination::Btc.format(53_713), "0.00053713 BTC");
-        assert_eq!(Denomination::Btc.format(100_000_000), "1.00000000 BTC");
-        assert_eq!(Denomination::Btc.format(2_100_000_000_000_000), "21,000,000.00000000 BTC");
-        assert_eq!(Denomination::Btc.format(1), "0.00000001 BTC");
-        assert_eq!(Denomination::Sats.format(0), "0 sats");
+        assert_eq!(Denomination::Sats.format(53_713, "bitcoin"), "53,713 sats");
+        assert_eq!(Denomination::Btc.format(53_713, "bitcoin"), "0.00053713 BTC");
+        assert_eq!(Denomination::Btc.format(100_000_000, "bitcoin"), "1.00000000 BTC");
+        assert_eq!(Denomination::Btc.format(2_100_000_000_000_000, "bitcoin"), "21,000,000.00000000 BTC");
+        assert_eq!(Denomination::Btc.format(1, "bitcoin"), "0.00000001 BTC");
+        assert_eq!(Denomination::Sats.format(0, "bitcoin"), "0 sats");
     }
 
     #[test]

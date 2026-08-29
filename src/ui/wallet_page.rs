@@ -92,7 +92,7 @@ pub enum TxRowOutput {
 
 #[relm4::factory(pub)]
 impl FactoryComponent for TxRow {
-    type Init = (crate::wallet::TxSummary, Denomination, u32, Option<crate::price::Price>);
+    type Init = (crate::wallet::TxSummary, Denomination, u32, Option<crate::price::Price>, String);
     type Input = ();
     type Output = TxRowOutput;
     type CommandOutput = ();
@@ -154,7 +154,7 @@ impl FactoryComponent for TxRow {
     }
 
     fn init_model(
-        (tx, denomination, tip, price): Self::Init,
+        (tx, denomination, tip, price, network): Self::Init,
         _index: &DynamicIndex,
         _sender: FactorySender<Self>,
     ) -> Self {
@@ -178,7 +178,7 @@ impl FactoryComponent for TxRow {
             amount: format!(
                 "{}{}",
                 if incoming { "+" } else { "−" },
-                denomination.format(magnitude)
+                denomination.format(magnitude, &network)
             ),
             incoming,
             fiat: price.map(|p| format!("≈ ${:.2}", p.value_of(magnitude))),
@@ -317,7 +317,7 @@ pub enum WalletPageMsg {
 impl WalletPage {
     fn balance(&self) -> String {
         match &self.summary {
-            Some(s) => self.settings.denomination.format(s.balance_sats),
+            Some(s) => self.settings.denomination.format(s.balance_sats, &s.network),
             None => "—".into(),
         }
     }
@@ -536,7 +536,9 @@ impl WalletPage {
 
     fn pending(&self) -> String {
         match &self.summary {
-            Some(s) if s.pending_sats > 0 => self.settings.denomination.format(s.pending_sats),
+            Some(s) if s.pending_sats > 0 => {
+                self.settings.denomination.format(s.pending_sats, &s.network)
+            }
             _ => "None".into(),
         }
     }
@@ -696,7 +698,9 @@ impl Component for WalletPage {
                                     set_halign: gtk::Align::Center,
                                     set_tooltip_text: Some("Switch between BTC and satoshis"),
                                     #[watch]
-                                    set_label: model.settings.denomination.label(),
+                                    set_label: model.settings.denomination.label(
+                        model.summary.as_ref().map_or("bitcoin", |s| s.network.as_str())
+                    ),
                                     connect_clicked => WalletPageMsg::ShowPreferences,
                                 },
 
@@ -1312,7 +1316,13 @@ impl WalletPage {
         let mut guard = self.transactions.guard();
         guard.clear();
         for tx in &summary.transactions {
-            guard.push_back((tx.clone(), self.settings.denomination, summary.tip, self.price));
+            guard.push_back((
+                    tx.clone(),
+                    self.settings.denomination,
+                    summary.tip,
+                    self.price,
+                    summary.network.clone(),
+                ));
         }
     }
 
@@ -1351,7 +1361,7 @@ impl WalletPage {
         let amount = gtk::Label::new(Some(&format!(
             "{}{}",
             if incoming { "+" } else { "−" },
-            self.settings.denomination.format(magnitude)
+            self.settings.denomination.format(magnitude, &summary.network)
         )));
         amount.add_css_class("title-1");
         amount.add_css_class("numeric");
@@ -1405,7 +1415,10 @@ impl WalletPage {
         let detail = adw::PreferencesGroup::new();
         detail.set_title("Detail");
         match tx.fee_sats {
-            Some(fee) => detail.add(&detail_row("Fee", &self.settings.denomination.format(fee))),
+            Some(fee) => detail.add(&detail_row(
+                "Fee",
+                &self.settings.denomination.format(fee, &summary.network),
+            )),
             // Only knowable when every input is ours, which an incoming payment
             // built by someone else will not be.
             None => detail.add(&detail_row("Fee", "Not known — inputs are not all yours")),
