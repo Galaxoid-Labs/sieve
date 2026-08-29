@@ -444,9 +444,12 @@ impl WalletPage {
             .iter()
             .filter(|p| p.serves_filters == Some(true))
             .count();
+        // The count lives in the Sync group; this says the thing the list is
+        // actually for.
         match serving {
-            0 => format!("{} connected", chain.peers.len()),
-            n => format!("{} connected · {n} serving filters", chain.peers.len()),
+            0 => "None have reported serving compact filters".into(),
+            1 => "1 serving compact filters".into(),
+            n => format!("{n} serving compact filters"),
         }
     }
 
@@ -474,6 +477,16 @@ impl WalletPage {
     }
 
     fn peers(&self) -> String {
+        // One source of truth. The node's NeedConnections warning stops firing
+        // once the requirement is met, so a count taken from it freezes at the
+        // last value below the target and disagrees with the list below.
+        if let Some(chain) = &self.chain {
+            return format!(
+                "{} of {} connected",
+                chain.peers.len(),
+                crate::wallet::node::REQUIRED_PEERS
+            );
+        }
         match self.peers {
             Some((connected, required)) => format!("{connected} of {required} connected"),
             None => "Connecting…".into(),

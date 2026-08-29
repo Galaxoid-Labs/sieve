@@ -39,7 +39,7 @@ use super::{Meta, Paths, Summary};
 /// pattern; holding few connections concentrates it.
 ///
 /// The cost is bandwidth and memory, which is why this is not simply 15.
-const REQUIRED_PEERS: u8 = 8;
+pub const REQUIRED_PEERS: u8 = 8;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// If the node says nothing for this long, tell the user so rather than
 /// leaving a spinner turning against a frozen label.
