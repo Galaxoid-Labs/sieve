@@ -484,7 +484,12 @@ impl Component for App {
             }
 
             AppMsg::ShowRecoveryPhrase => {
-                let Some(paths) = self.active.clone() else { return };
+                // The row is already insensitive while locked; this is the
+                // same rule at the place that acts on it, so the screen stays
+                // unreachable however the message arrived.
+                let Some(paths) = self.active.clone().filter(|_| self.unlocked) else {
+                    return;
+                };
                 // Prepare first: it clears whatever the last visit decrypted,
                 // so the page never slides in already showing a phrase.
                 self.reveal.emit(RevealMsg::Prepare(Box::new(paths)));
