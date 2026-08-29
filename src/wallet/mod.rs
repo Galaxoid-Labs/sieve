@@ -32,23 +32,86 @@ pub mod node;
 
 use crate::vault;
 
-/// Not configurable, and deliberately not `Network::Bitcoin`. Mainnet is gated
-/// behind an external review of the vault format and the signing path.
-pub const NETWORK: Network = Network::Signet;
+/// Until network selection lands in the UI, everything defaults here. Mainnet
+/// stays unreachable from the interface until M8.
+pub const DEFAULT_NETWORK: Network = Network::Signet;
 
-/// A signet block that is guaranteed to predate any wallet this build creates.
+/// A block known to predate any wallet on a given network, used when the true
+/// birthday is unknown.
 ///
-/// A wallet created today cannot have received a payment before the app that
-/// created it existed, so a checkpoint fixed at build time is always safe: at
-/// worst it scans a little more than necessary. Without it, `ScanType::Sync`
-/// resumes from the wallet's own checkpoint — which for a new wallet is the
-/// genesis block — and the first sync walks the entire chain.
+/// Checkpoints are compiled in because a `HashCheckpoint` needs a block hash,
+/// and the hash for an arbitrary height cannot be derived offline. Heights are
+/// exact; scanning from one is always correct, only sometimes slower than
+/// necessary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub height: u32,
+    pub hash: &'static str,
+    /// Roughly when this block was mined, for showing a person.
+    pub when: &'static str,
+}
+
+/// Mainnet checkpoints, newest first.
+pub const MAINNET_CHECKPOINTS: &[Checkpoint] = &[
+    Checkpoint {
+        height: 950_000,
+        hash: "000000000000000000010b93c9ea1c29fea277383f0f7d1f26de8b5802e885ff",
+        when: "May 2026",
+    },
+    Checkpoint {
+        height: 900_000,
+        hash: "000000000000000000010538edbfd2d5b809a33dd83f284aeea41c6d0d96968a",
+        when: "June 2025",
+    },
+    Checkpoint {
+        height: 850_000,
+        hash: "00000000000000000002a0b5db2a7f8d9087464c2586b546be7bce8eb53b8187",
+        when: "June 2024",
+    },
+    Checkpoint {
+        height: 800_000,
+        hash: "00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054",
+        when: "July 2023",
+    },
+    Checkpoint {
+        height: 750_000,
+        hash: "0000000000000000000592a974b1b9f087cb77628bb4a097d5c2c11b3476a58e",
+        when: "August 2022",
+    },
+    // Taproot activation. A BIP86 wallet cannot hold coins earlier than this,
+    // so it is the correct floor for "birthday unknown" — not a guess.
+    Checkpoint {
+        height: 709_632,
+        hash: "0000000000000000000687bca986194dc2c1f949318629b44bb54ec0a94d8244",
+        when: "November 2021 — taproot activation",
+    },
+];
+
+/// Signet checkpoints, newest first.
+pub const SIGNET_CHECKPOINTS: &[Checkpoint] = &[Checkpoint {
+    height: 319_000,
+    hash: "000000021cefaf18c0d9f75944d79689bde29448c55ff00c65c0022814f40578",
+    when: "August 2026",
+}];
+
+pub fn checkpoints(network: Network) -> &'static [Checkpoint] {
+    match network {
+        Network::Bitcoin => MAINNET_CHECKPOINTS,
+        _ => SIGNET_CHECKPOINTS,
+    }
+}
+
+/// The newest checkpoint at or before `height`.
 ///
-/// Bump this on each release. Never move it forward past a shipped build, or
-/// wallets created by that build could miss early payments.
-pub const BIRTHDAY_HEIGHT: u32 = 319_000;
-pub const BIRTHDAY_HASH: &str =
-    "000000021cefaf18c0d9f75944d79689bde29448c55ff00c65c0022814f40578";
+/// Always rounds *earlier*. Starting too early costs time; starting too late
+/// loses coins.
+pub fn checkpoint_at_or_before(network: Network, height: u32) -> Checkpoint {
+    let all = checkpoints(network);
+    all.iter()
+        .find(|c| c.height <= height)
+        .copied()
+        .unwrap_or_else(|| *all.last().expect("every network has a floor checkpoint"))
+}
 
 /// Where the files live. The vault holds the seed; the database holds only
 /// public descriptors and chain data.
@@ -80,27 +143,40 @@ impl Paths {
     }
 }
 
-/// The earliest block this wallet could possibly have a transaction in.
+/// Public, password-free facts about a wallet.
+///
+/// Sync is watch-only, so none of this may live in the encrypted vault — the
+/// node has to know the network and where to start before anyone types a
+/// password.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Birthday {
-    pub height: u32,
-    pub hash: String,
+pub struct Meta {
+    /// Stored as a string so the file stays readable and the format does not
+    /// depend on how `bitcoin::Network` happens to serialise.
+    pub network: String,
+    /// The earliest block this wallet could hold a transaction in.
+    pub birthday_height: u32,
+    pub birthday_hash: String,
 }
 
-impl Birthday {
-    /// For a wallet created by this build.
-    pub fn current() -> Self {
-        Self { height: BIRTHDAY_HEIGHT, hash: BIRTHDAY_HASH.to_owned() }
+impl Meta {
+    pub fn new(network: Network, birthday: Checkpoint) -> Self {
+        Self {
+            network: network.to_string(),
+            birthday_height: birthday.height,
+            birthday_hash: birthday.hash.to_owned(),
+        }
+    }
+
+    pub fn network(&self) -> Network {
+        self.network.parse().unwrap_or(Network::Signet)
     }
 
     pub fn load(paths: &Paths) -> Option<Self> {
-        let bytes = std::fs::read(&paths.meta).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        serde_json::from_slice(&std::fs::read(&paths.meta).ok()?).ok()
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(self)?;
-        crate::vault::write_atomic(&paths.meta, &bytes)
+        crate::vault::write_atomic(&paths.meta, &serde_json::to_vec_pretty(self)?)
     }
 }
 
@@ -125,6 +201,7 @@ pub struct Summary {
     /// Height the wallet has verified up to.
     pub tip: u32,
     pub next_address: String,
+    pub network: String,
 }
 
 /// A fresh 12-word English mnemonic.
@@ -143,14 +220,14 @@ pub fn generate_mnemonic() -> Result<Zeroizing<String>> {
 /// The private key goes in, but `bdk_wallet::ChangeSet` persists only
 /// `Descriptor<DescriptorPublicKey>` — so the database this writes contains no
 /// key material.
-fn build(mnemonic: &str, db: &Path) -> Result<PersistedWallet<Connection>> {
+fn build(mnemonic: &str, db: &Path, network: Network) -> Result<PersistedWallet<Connection>> {
     let parsed = Mnemonic::parse_in(Language::English, mnemonic)
         .map_err(|e| anyhow!("that is not a valid recovery phrase: {e}"))?;
     let xkey: ExtendedKey<Tap> = parsed
         .into_extended_key()
         .map_err(|e| anyhow!("could not derive a key from the phrase: {e}"))?;
     let xprv = xkey
-        .into_xprv(NETWORK.into())
+        .into_xprv(network.into())
         .context("could not derive an extended private key")?;
 
     if let Some(parent) = db.parent() {
@@ -162,7 +239,7 @@ fn build(mnemonic: &str, db: &Path) -> Result<PersistedWallet<Connection>> {
         Bip86(xprv, KeychainKind::External),
         Bip86(xprv, KeychainKind::Internal),
     )
-    .network(NETWORK)
+    .network(network)
     .create_wallet(&mut conn)
     .map_err(|e| anyhow!("could not create the wallet database: {e}"))
 }
@@ -176,17 +253,19 @@ pub fn create(
     password: &[u8],
     paths: &Paths,
     kdf: vault::KdfParams,
+    network: Network,
+    birthday: Checkpoint,
 ) -> Result<Summary> {
-    let mut wallet = build(mnemonic, &paths.db)?;
+    let mut wallet = build(mnemonic, &paths.db, network)?;
 
     // Recorded before the vault is written, so a wallet that exists at all has
-    // a birthday and never falls back to scanning from genesis.
-    Birthday::current().save(paths)?;
+    // a network and a birthday, and never falls back to scanning from genesis.
+    Meta::new(network, birthday).save(paths)?;
 
     let sealed = vault::seal(
         mnemonic.as_bytes(),
         password,
-        &NETWORK.to_string(),
+        &network.to_string(),
         kdf,
     )?;
     vault::write_atomic(&paths.vault, &sealed)?;
@@ -205,10 +284,11 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
         .with_context(|| format!("cannot read {}", paths.vault.display()))?;
     let mnemonic = vault::open(&blob, password)?;
 
+    let network = Meta::load(paths).map(|m| m.network()).unwrap_or(Network::Signet);
     let mut conn = Connection::open(&paths.db)?;
     restrict(&paths.db)?;
     let mut wallet = match Wallet::load()
-        .check_network(NETWORK)
+        .check_network(network)
         .load_wallet(&mut conn)
         .map_err(|e| anyhow!("could not load the wallet database: {e}"))?
     {
@@ -218,7 +298,7 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
         None => {
             let phrase = std::str::from_utf8(&mnemonic)
                 .context("the vault does not contain a valid recovery phrase")?;
-            build(phrase, &paths.db)?
+            build(phrase, &paths.db, network)?
         }
     };
 
@@ -237,6 +317,7 @@ fn summarise(wallet: &mut PersistedWallet<Connection>, conn: &mut Connection) ->
         pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
         tip: wallet.latest_checkpoint().height(),
         next_address: address.address.to_string(),
+        network: wallet.network().to_string(),
     })
 }
 
@@ -280,7 +361,7 @@ mod tests {
         assert!(!paths.is_initialised());
 
         let phrase = generate_mnemonic().unwrap();
-        let created = create(&phrase, b"a good password", &paths, FAST).unwrap();
+        let created = create(&phrase, b"a good password", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
 
         assert!(paths.is_initialised());
         assert!(created.next_address.starts_with("tb1p"));
@@ -295,19 +376,46 @@ mod tests {
     }
 
     #[test]
+    fn checkpoints_always_round_earlier() {
+        // Rounding later would skip blocks the wallet may have coins in.
+        let c = checkpoint_at_or_before(Network::Bitcoin, 899_999);
+        assert_eq!(c.height, 850_000, "must not jump forward to 900,000");
+
+        let exact = checkpoint_at_or_before(Network::Bitcoin, 900_000);
+        assert_eq!(exact.height, 900_000);
+
+        // Below every checkpoint, fall back to the floor rather than panicking.
+        let floor = checkpoint_at_or_before(Network::Bitcoin, 1);
+        assert_eq!(floor.height, 709_632, "taproot activation is the BIP86 floor");
+    }
+
+    #[test]
+    fn every_checkpoint_hash_is_valid() {
+        for network in [Network::Bitcoin, Network::Signet] {
+            for c in checkpoints(network) {
+                c.hash
+                    .parse::<bdk_wallet::bitcoin::BlockHash>()
+                    .unwrap_or_else(|e| panic!("{} at {} is not a block hash: {e}", c.hash, c.height));
+            }
+        }
+        // Newest first, so `find` returns the tightest checkpoint.
+        for list in [MAINNET_CHECKPOINTS, SIGNET_CHECKPOINTS] {
+            assert!(list.windows(2).all(|w| w[0].height > w[1].height), "must be newest first");
+        }
+    }
+
+    #[test]
     fn creating_a_wallet_records_a_birthday() {
         // Without this file the first sync falls back to the genesis block and
         // walks the entire chain.
         let paths = scratch("birthday");
         let phrase = generate_mnemonic().unwrap();
-        create(&phrase, b"a good password", &paths, FAST).unwrap();
+        create(&phrase, b"a good password", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
 
-        let birthday = Birthday::load(&paths).expect("a created wallet must have a birthday");
-        assert_eq!(birthday.height, BIRTHDAY_HEIGHT);
-        assert!(
-            birthday.hash.parse::<bdk_wallet::bitcoin::BlockHash>().is_ok(),
-            "the compiled-in birthday hash must be a valid block hash",
-        );
+        let meta = Meta::load(&paths).expect("a created wallet must record its metadata");
+        assert_eq!(meta.network(), DEFAULT_NETWORK);
+        assert_eq!(meta.birthday_height, SIGNET_CHECKPOINTS[0].height);
+        assert!(meta.birthday_hash.parse::<bdk_wallet::bitcoin::BlockHash>().is_ok());
 
         std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
     }
@@ -316,7 +424,7 @@ mod tests {
     fn unlock_rejects_the_wrong_password() {
         let paths = scratch("wrongpass");
         let phrase = generate_mnemonic().unwrap();
-        create(&phrase, b"the right one", &paths, FAST).unwrap();
+        create(&phrase, b"the right one", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
 
         assert!(unlock(b"the wrong one", &paths).is_err());
 
@@ -327,7 +435,7 @@ mod tests {
     fn a_lost_database_is_rebuilt_from_the_vault() {
         let paths = scratch("rebuild");
         let phrase = generate_mnemonic().unwrap();
-        let created = create(&phrase, b"a good password", &paths, FAST).unwrap();
+        let created = create(&phrase, b"a good password", &paths, FAST, DEFAULT_NETWORK, SIGNET_CHECKPOINTS[0]).unwrap();
 
         // The database holds only public data, so losing it must be survivable.
         std::fs::remove_file(&paths.db).unwrap();
@@ -349,11 +457,11 @@ mod tests {
                       abandon abandon abandon abandon abandon about";
 
         let first = {
-            let mut w = build(phrase, &dir.join("a.sqlite")).unwrap();
+            let mut w = build(phrase, &dir.join("a.sqlite"), DEFAULT_NETWORK).unwrap();
             w.next_unused_address(KeychainKind::External).address.to_string()
         };
         let second = {
-            let mut w = build(phrase, &dir.join("b.sqlite")).unwrap();
+            let mut w = build(phrase, &dir.join("b.sqlite"), DEFAULT_NETWORK).unwrap();
             w.next_unused_address(KeychainKind::External).address.to_string()
         };
 

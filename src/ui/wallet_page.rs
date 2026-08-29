@@ -5,7 +5,7 @@ use relm4::prelude::*;
 use relm4::{adw, gtk};
 
 use crate::wallet::node::Progress;
-use crate::wallet::{NETWORK, Summary};
+use crate::wallet::Summary;
 
 pub struct WalletPage {
     summary: Option<Summary>,
@@ -79,7 +79,8 @@ impl SimpleComponent for WalletPage {
                 #[wrap(Some)]
                 set_title_widget = &adw::WindowTitle {
                     set_title: "Sieve",
-                    set_subtitle: &NETWORK.to_string(),
+                    #[watch]
+                    set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
                 },
             },
 

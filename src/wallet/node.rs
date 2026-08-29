@@ -23,7 +23,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use bdk_kyoto::bip157::HashCheckpoint;
 
-use super::{Birthday, NETWORK, Paths, Summary, restrict};
+use super::{Meta, Paths, Summary, restrict};
 
 /// How many peers to hold open.
 ///
@@ -129,10 +129,13 @@ impl Session {
     /// Must be called from inside the tokio runtime — the node is spawned onto
     /// it. Relm4's async commands satisfy that.
     pub async fn start(paths: &Paths) -> Result<Self> {
+        let meta = Meta::load(paths);
+        let network = meta.as_ref().map(|m| m.network()).unwrap_or(bdk_wallet::bitcoin::Network::Signet);
+
         let mut conn = Connection::open(&paths.db)?;
         restrict(&paths.db)?;
         let wallet: PersistedWallet<Connection> = Wallet::load()
-            .check_network(NETWORK)
+            .check_network(network)
             .load_wallet(&mut conn)
             .map_err(|e| anyhow!("could not load the wallet database: {e}"))?
             .context("the wallet database is empty — unlock first")?;
@@ -143,10 +146,14 @@ impl Session {
         // A wallet that has never synced sits at the genesis checkpoint, so
         // `ScanType::Sync` would walk the entire chain. If we recorded a
         // birthday when the wallet was created, start there instead.
-        let scan_type = match (wallet.latest_checkpoint().height(), Birthday::load(paths)) {
-            (0, Some(birthday)) => match birthday.hash.parse() {
+        let scan_type = match (wallet.latest_checkpoint().height(), meta.as_ref()) {
+            (0, Some(meta)) => match meta.birthday_hash.parse() {
                 Ok(hash) => {
-                    tracing::info!(height = birthday.height, "scanning from the wallet birthday");
+                    tracing::info!(
+                        height = meta.birthday_height,
+                        %network,
+                        "scanning from the wallet birthday"
+                    );
                     ScanType::Recovery {
                         // A floor, not just the current index: recovery peeks
                         // this many scripts when testing filters, and a fresh
@@ -155,7 +162,7 @@ impl Session {
                             .derivation_index(KeychainKind::External)
                             .unwrap_or(0)
                             .max(25),
-                        checkpoint: HashCheckpoint::new(birthday.height, hash),
+                        checkpoint: HashCheckpoint::new(meta.birthday_height, hash),
                     }
                 }
                 Err(e) => {
@@ -170,7 +177,7 @@ impl Session {
             _ => ScanType::Sync,
         };
 
-        let client: LightClient<_, Single> = Builder::new(NETWORK)
+        let client: LightClient<_, Single> = Builder::new(network)
             .required_peers(REQUIRED_PEERS)
             .data_dir(headers)
             .response_timeout(RESPONSE_TIMEOUT)
@@ -228,6 +235,7 @@ impl Session {
             pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
             tip: wallet.latest_checkpoint().height(),
             next_address: address.address.to_string(),
+            network: wallet.network().to_string(),
         })
     }
 

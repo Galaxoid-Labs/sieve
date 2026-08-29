@@ -433,6 +433,10 @@ impl Component for Onboarding {
 
                 self.step = Step::Working;
                 let paths = self.paths.clone();
+                // A wallet created here is new, so its birthday is simply the
+                // newest checkpoint this build knows about.
+                let network = wallet::DEFAULT_NETWORK;
+                let birthday = wallet::checkpoints(network)[0];
                 // Argon2 and the database write both block. Off the main thread.
                 sender.spawn_oneshot_command(move || {
                     OnboardingCmd::Created(
@@ -441,6 +445,8 @@ impl Component for Onboarding {
                             password.as_bytes(),
                             &paths,
                             crate::vault::KdfParams::default(),
+                            network,
+                            birthday,
                         )
                             .map_err(|e| e.to_string()),
                     )
