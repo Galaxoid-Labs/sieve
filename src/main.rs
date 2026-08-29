@@ -49,6 +49,18 @@ fn main() {
 
     let app = RelmApp::new(APP_ID);
 
+    // The one place Sieve hardcodes a colour, and it has to. A QR code needs
+    // dark modules on a light ground to scan; inverting it for dark mode looks
+    // tidier and fails on plenty of readers. So the code carries its own white
+    // ground rather than sitting on the theme's card, which is dark exactly
+    // when the code needs light.
+    //
+    // The radius has to be matched by clipping the picture to it, or the
+    // code's own white square fills the corners it cuts away.
+    app.set_global_css(
+        ".qr-ground { background-color: #ffffff; border-radius: 18px; padding: 6px; }",
+    );
+
     // Sieve's own icons, compiled into the binary. Adwaita has no plain
     // vertical arrow — its options are a bare chevron, an arrow welded to a
     // bar, or a diagonal — and "money in" and "money out" deserve the obvious

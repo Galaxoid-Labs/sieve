@@ -788,6 +788,10 @@ impl Component for WalletPage {
                                 gtk::Picture {
                                     set_hexpand: true,
                                     set_vexpand: true,
+                                    // Clipped to the rounded ground, or the
+                                    // code's white square fills the corners
+                                    // the radius is trying to cut away.
+                                    set_overflow: gtk::Overflow::Hidden,
                                     set_content_fit: gtk::ContentFit::Contain,
                                     #[watch]
                                     set_paintable: model.qr().as_ref(),
