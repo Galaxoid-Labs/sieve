@@ -361,8 +361,12 @@ impl Session {
             bdk_kyoto::Warning::TransactionRejected { payload } => {
                 Notice::Problem(format!("A transaction was rejected by the network: {payload:?}"))
             }
+            // Per-peer and self-healing: the node drops that peer and carries
+            // on. Surfacing it trains people to ignore the row that will one
+            // day carry something they can act on.
             bdk_kyoto::Warning::UnexpectedSyncError { warning } => {
-                Notice::Problem(format!("Sync error: {warning}"))
+                tracing::debug!(%warning, "peer-level sync error; dropping that peer");
+                Notice::Ignorable
             }
             other => Notice::Problem(format!("{other}")),
         })
