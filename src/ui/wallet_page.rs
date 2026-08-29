@@ -273,6 +273,9 @@ pub struct WalletPage {
     /// Which path the receive view is showing. By type, not by position: the
     /// account list is rebuilt on every sync and an index would drift.
     receive_path: Option<crate::wallet::accounts::ScriptType>,
+    /// The view stack, so locking can put it back on the one view that has
+    /// something to say while locked.
+    stack: Option<adw::ViewStack>,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -617,6 +620,13 @@ impl Component for WalletPage {
                     set_policy: adw::ViewSwitcherPolicy::Wide,
                     set_halign: gtk::Align::Center,
                     set_hexpand: true,
+                    // Nothing behind these until the password is in, and a
+                    // button that opens an empty page reads as a broken app.
+                    // Insensitive rather than hidden: the breakpoint owns
+                    // this row's visibility, and two things setting one
+                    // property fight.
+                    #[watch]
+                    set_sensitive: !model.locked,
                 },
             },
 
@@ -1127,7 +1137,10 @@ impl Component for WalletPage {
                 // Revealed by the breakpoint below, when the header has no
                 // room for the switcher.
                 #[name(switcher_bar)]
-                add_bottom_bar = &adw::ViewSwitcherBar {},
+                add_bottom_bar = &adw::ViewSwitcherBar {
+                    #[watch]
+                    set_sensitive: !model.locked,
+                },
                     },
                 },
                 },
@@ -1148,8 +1161,9 @@ impl Component for WalletPage {
                 TxRowOutput::Selected(txid) => WalletPageMsg::ShowTransaction(txid),
             },
         );
-        let model = WalletPage {
+        let mut model = WalletPage {
             settings: Settings::load(),
+            stack: None,
             locked: true,
             price: None,
             toaster: Toaster::default(),
@@ -1180,6 +1194,7 @@ impl Component for WalletPage {
 
         // Both switchers are declared above the stack they drive, so the links
         // are made once the whole tree exists.
+        model.stack = Some(widgets.view_stack.clone());
         widgets.view_switcher.set_stack(Some(&widgets.view_stack));
         widgets.switcher_bar.set_stack(Some(&widgets.view_stack));
 
@@ -1252,7 +1267,15 @@ impl Component for WalletPage {
             WalletPageMsg::ShowPreferences => {
                 let _ = sender.output(WalletPageOutput::ShowPreferences);
             }
-            WalletPageMsg::SetLocked(locked) => self.locked = locked,
+            WalletPageMsg::SetLocked(locked) => {
+                self.locked = locked;
+                // Whatever was on screen when the wallet locked — a receive
+                // address, the chain view — belongs to a wallet nobody has
+                // proved they may look at. Back to the view that says so.
+                if locked && let Some(stack) = &self.stack {
+                    stack.set_visible_child_name("activity");
+                }
+            }
             WalletPageMsg::SetName(name) => self.name = name,
             WalletPageMsg::RequestUnlock => {
                 let _ = sender.output(WalletPageOutput::Unlock);
