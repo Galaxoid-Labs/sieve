@@ -1,6 +1,7 @@
 //! The unlocked wallet: balance, receive address, and sync status.
 
 use adw::prelude::*;
+use relm4::abstractions::Toaster;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
 
@@ -196,6 +197,8 @@ pub struct WalletPage {
     error: Option<String>,
     settings: Settings,
     price: Option<crate::price::Price>,
+    /// Somewhere to say things worth saying once and not keeping.
+    toaster: Toaster,
     /// The wallet is the root screen now, so it exists before anyone has
     /// proved they may look at it.
     locked: bool,
@@ -232,6 +235,7 @@ pub enum WalletPageMsg {
     SetDenomination(crate::settings::Denomination),
     /// `None` clears it — the setting was turned off, or the fetch failed.
     SetPrice(Option<crate::price::Price>),
+    Toast(String),
     /// Choose which derivation path to receive on.
     SelectReceivePath(u32),
     /// Ask for an address that has not been handed to anyone yet.
@@ -417,8 +421,13 @@ impl Component for WalletPage {
             },
 
             #[wrap(Some)]
-            #[name(view_stack)]
-            set_content = &adw::ViewStack {
+            #[local_ref]
+            set_content = toast_overlay -> adw::ToastOverlay {
+                set_vexpand: true,
+
+                #[wrap(Some)]
+                #[name(view_stack)]
+                set_child = &adw::ViewStack {
 
                 add_titled_with_icon[Some("activity"), "Activity", "document-open-recent-symbolic"] =
                 &gtk::ScrolledWindow {
@@ -673,6 +682,7 @@ impl Component for WalletPage {
                 },
 
             },
+            },
 
                 // Revealed by the breakpoint below, when the header has no
                 // room for the switcher.
@@ -700,6 +710,7 @@ impl Component for WalletPage {
             settings: Settings::load(),
             locked: true,
             price: None,
+            toaster: Toaster::default(),
             name: "Sieve".into(),
             transactions,
             path_model: gtk::StringList::new(&[]),
@@ -713,6 +724,7 @@ impl Component for WalletPage {
             error: None,
         };
         let tx_list = model.transactions.widget();
+        let toast_overlay = model.toaster.overlay_widget();
         let path_model = model.path_model.clone();
         let widgets = view_output!();
 
@@ -752,6 +764,7 @@ impl Component for WalletPage {
                 }
             }
             WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
+            WalletPageMsg::Toast(message) => self.toaster.add_toast(adw::Toast::new(&message)),
             WalletPageMsg::SetPrice(price) => {
                 self.price = price;
                 if let Some(summary) = self.summary.clone() {
@@ -805,10 +818,13 @@ impl Component for WalletPage {
             WalletPageMsg::Note(note) => self.note = Some(note),
             WalletPageMsg::Failed(message) => self.error = Some(message),
             WalletPageMsg::CopyAddress => {
-                if let Some(summary) = &self.summary
-                    && let Some(display) = gtk::gdk::Display::default()
-                {
-                    display.clipboard().set_text(&summary.next_address);
+                // self.address(), not the summary's: the picker and the
+                // refresh button both change which address is on screen, and
+                // copying a different one than is displayed is its own kind of
+                // wrong even when both belong to this wallet.
+                if let Some(display) = gtk::gdk::Display::default() {
+                    display.clipboard().set_text(&self.address());
+                    sender.input(WalletPageMsg::Toast("Address copied".into()));
                 }
             }
         }
