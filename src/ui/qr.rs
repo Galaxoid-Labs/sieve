@@ -39,6 +39,8 @@ pub fn texture(data: &str) -> Option<gdk::Texture> {
     let total = width + QUIET * 2;
     let scale = (CANVAS / total).max(1);
     let drawn = total * scale;
+    // Whatever does not divide evenly is centred, so the code sits square in
+    // the canvas rather than up against one edge.
     let margin = (CANVAS - drawn) / 2;
 
     // Three bytes per pixel, RGB.

@@ -53,7 +53,10 @@ fn main() {
     // ground in both themes rather than sitting on the theme's card, which is
     // dark exactly when the code needs light.
     app.set_global_css(
-        ".qr-ground { background-color: #ffffff; border-radius: 12px; padding: 12px; }",
+        // No padding: the code carries a four-module quiet zone of its own,
+        // which is the specification's requirement, and stacking padding on top
+        // of it just shrinks the code.
+        ".qr-ground { background-color: #ffffff; border-radius: 12px; padding: 4px; }",
     );
 
     app.run::<app::App>(());
