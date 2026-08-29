@@ -662,6 +662,9 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used by the tests only; cargo fix removed it from the module imports
+    // when the last non-test use went away.
+    use bdk_wallet::KeychainKind;
 
     #[test]
     fn generated_phrase_is_twelve_valid_words() {
