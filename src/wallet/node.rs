@@ -447,6 +447,11 @@ pub struct ChainInfo {
     /// Where the current period's pace puts the next adjustment, as a
     /// multiplier: 1.05 is five percent harder.
     pub retarget_estimate: Option<f64>,
+    /// How many connections the node holds. Kyoto reports one entry per
+    /// connection and several can share an address, so this is not the length
+    /// of `peers`.
+    pub connections: usize,
+    /// Distinct addresses among those connections.
     pub peers: Vec<PeerInfo>,
     /// Lowest fee rate the connected peers will relay, in sat/vB.
     pub min_relay_fee: Option<f64>,
@@ -523,7 +528,10 @@ impl Session {
 
         if let Ok(peers) = self.requester.peer_info().await {
             // One entry per connection, and several connections can share an
-            // address, so the raw list shows the same peer repeatedly.
+            // address. Both numbers are real and they are not the same
+            // question: how many connections are open, and how many distinct
+            // machines they reach.
+            info.connections = peers.len();
             let mut seen = std::collections::HashSet::new();
             let peers: Vec<_> = peers
                 .into_iter()

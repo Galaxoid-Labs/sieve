@@ -446,10 +446,13 @@ impl WalletPage {
             .count();
         // The count lives in the Sync group; this says the thing the list is
         // actually for.
-        match serving {
-            0 => "None have reported serving compact filters".into(),
-            1 => "1 serving compact filters".into(),
-            n => format!("{n} serving compact filters"),
+        // Distinct machines, which is the number that says how spread out this
+        // wallet's requests are — several connections to one node is not the
+        // same as several nodes.
+        let distinct = chain.peers.len();
+        match (distinct, serving) {
+            (d, 0) => format!("{d} distinct addresses"),
+            (d, n) => format!("{d} distinct addresses · {n} serving compact filters"),
         }
     }
 
@@ -481,9 +484,11 @@ impl WalletPage {
         // once the requirement is met, so a count taken from it freezes at the
         // last value below the target and disagrees with the list below.
         if let Some(chain) = &self.chain {
+            // Connections against the target, which is what the node is
+            // working toward. The distinct-address count belongs to the list.
             return format!(
                 "{} of {} connected",
-                chain.peers.len(),
+                chain.connections,
                 crate::wallet::node::REQUIRED_PEERS
             );
         }
