@@ -30,6 +30,11 @@ pub struct App {
     /// The page currently inside the dialog, so reopening replaces it rather
     /// than stacking another copy.
     prefs_page: Option<adw::PreferencesPage>,
+    /// Which dialogs are actually on screen. Closing one that was never
+    /// presented is a critical, and both get closed on paths that do not know
+    /// whether they were opened — unlocking from a fresh import, for one.
+    prefs_open: bool,
+    unlock_open: bool,
     /// Owned here because preferences is where it is changed.
     settings: crate::settings::Settings,
     /// Unlocking is a dialog over the wallet, not a page you walk through.
@@ -54,6 +59,9 @@ pub enum AppMsg {
     ShowOnboarding,
     ShowRestore,
     ShowPreferences,
+    /// A dialog was dismissed, by us or by the person using it.
+    PrefsClosed,
+    UnlockClosed,
     ToggleDenomination,
     /// Slide the wallet list in over preferences.
     ShowWallets,
@@ -205,11 +213,26 @@ impl Component for App {
         let settings = crate::settings::Settings::load();
         wallet.emit(WalletPageMsg::SetDenomination(settings.denomination));
 
+        unlock_dialog.connect_closed({
+            let sender = sender.clone();
+            move |_| sender.input(AppMsg::UnlockClosed)
+        });
+
         let model = App {
             nav: nav.clone(),
-            prefs: adw::PreferencesDialog::new(),
+            prefs: {
+                let dialog = adw::PreferencesDialog::new();
+                // Sized rather than left to its content: a dialog that hugs two
+                // rows looks like a mistake, and it has to stay steady when the
+                // wallet list slides in over it.
+                dialog.set_content_width(480);
+                dialog.set_content_height(560);
+                dialog
+            },
             chooser_page,
             prefs_page: None,
+            prefs_open: false,
+            unlock_open: false,
             settings,
             unlock_dialog: unlock_dialog.clone(),
             active: None,
@@ -252,9 +275,19 @@ impl Component for App {
             AppMsg::ShowPreferences => {
                 self.rebuild_preferences(&sender);
                 if let Some(window) = self.nav.root() {
+                    if !self.prefs_open {
+                        self.prefs.connect_closed({
+                            let sender = sender.clone();
+                            move |_| sender.input(AppMsg::PrefsClosed)
+                        });
+                    }
                     self.prefs.present(Some(&window));
+                    self.prefs_open = true;
                 }
             }
+
+            AppMsg::PrefsClosed => self.prefs_open = false,
+            AppMsg::UnlockClosed => self.unlock_open = false,
 
             AppMsg::ToggleDenomination => {
                 self.settings.denomination = self.settings.denomination.toggled();
@@ -273,6 +306,7 @@ impl Component for App {
             AppMsg::PromptUnlock => {
                 if let Some(root) = self.nav.root().and_then(|r| r.root()) {
                     self.unlock_dialog.present(Some(&root));
+                    self.unlock_open = true;
                 }
             }
 
@@ -286,7 +320,7 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetName(name));
 
                 // Chosen from the list, so close preferences before asking.
-                self.prefs.close();
+                self.close_prefs();
                 sender.input(AppMsg::PromptUnlock);
             }
 
@@ -308,8 +342,8 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetLocked(false));
                 self.chooser.emit(ChooserMsg::Refresh);
 
-                self.unlock_dialog.close();
-                self.prefs.close();
+                self.close_unlock();
+                self.close_prefs();
                 // Whether this came from a password, a new wallet or an
                 // import, the wallet is where you end up — and it is the root,
                 // so nothing is left behind to walk back through.
@@ -409,6 +443,23 @@ impl Component for App {
 }
 
 impl App {
+    /// Close a dialog only if it is on screen. Closing one that was never
+    /// presented is an Adwaita critical, and several paths here run whether or
+    /// not the dialog was ever opened.
+    fn close_prefs(&mut self) {
+        if self.prefs_open {
+            self.prefs.close();
+            self.prefs_open = false;
+        }
+    }
+
+    fn close_unlock(&mut self) {
+        if self.unlock_open {
+            self.unlock_dialog.close();
+            self.unlock_open = false;
+        }
+    }
+
     /// Fill the preferences dialog with the current state.
     ///
     /// The dialog itself is long-lived — it owns the wallet-list subpage, and a
@@ -440,6 +491,28 @@ impl App {
 
         let this = adw::PreferencesGroup::new();
         this.set_title("This wallet");
+
+        if let Some(paths) = &self.active
+            && let Some(meta) = wallet::Meta::load(paths)
+        {
+            let chain = adw::ActionRow::new();
+            chain.set_title("Chain");
+            chain.set_subtitle(&meta.network);
+            this.add(&chain);
+
+            let watched = adw::ActionRow::new();
+            watched.set_title("Derivation paths watched");
+            watched.set_subtitle(
+                &meta
+                    .script_types
+                    .iter()
+                    .map(|s| s.label())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            watched.set_subtitle_lines(2);
+            this.add(&watched);
+        }
 
         let switch = adw::ActionRow::new();
         switch.set_title("Switch wallet");

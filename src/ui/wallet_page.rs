@@ -223,19 +223,6 @@ impl WalletPage {
         )
     }
 
-    /// Every path this wallet watches, named rather than counted.
-    fn paths_watched(&self) -> String {
-        match &self.summary {
-            Some(s) if !s.accounts.is_empty() => s
-                .accounts
-                .iter()
-                .map(|a| a.script_type.label())
-                .collect::<Vec<_>>()
-                .join(", "),
-            _ => "—".into(),
-        }
-    }
-
     fn peers(&self) -> String {
         match self.peers {
             Some((connected, required)) => format!("{connected} of {required} connected"),
