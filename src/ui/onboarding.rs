@@ -36,7 +36,7 @@ impl Step {
     fn tag(self) -> &'static str {
         match self {
             Step::Welcome => "welcome",
-            Step::Password => "passphrase",
+            Step::Password => "password",
             Step::Phrase => "phrase",
             Step::Verify => "verify",
             Step::Working => "working",
@@ -547,5 +547,42 @@ impl Component for Onboarding {
                 self.error = Some(message);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_step_names_a_page_in_the_stack() {
+        // The stack switches by name, and a name it does not have is a silent
+        // no-op — it stays on whichever page it was showing. That is exactly
+        // how renaming the password step left creation stuck on the welcome
+        // screen: the page was renamed and the tag was not.
+        //
+        // These must match the add_named calls in the view.
+        let pages = ["welcome", "password", "phrase", "verify", "working"];
+        for step in [
+            Step::Welcome,
+            Step::Password,
+            Step::Phrase,
+            Step::Verify,
+            Step::Working,
+        ] {
+            assert!(
+                pages.contains(&step.tag()),
+                "{:?} has tag {:?}, which is not a page in the stack",
+                step,
+                step.tag()
+            );
+        }
+    }
+
+    #[test]
+    fn entering_by_choice_starts_past_the_welcome_step() {
+        // Choosing "create a new wallet" answers the question the welcome step
+        // asks, so it must not be asked again.
+        assert_eq!(Step::Password.previous(), Some(Step::Welcome));
     }
 }
