@@ -65,6 +65,7 @@ pub enum AppMsg {
     PrefsClosed,
     UnlockClosed,
     ToggleDenomination,
+    ForgetPeers,
     SetShowFiat(bool),
     /// Slide the wallet list in over preferences.
     ShowWallets,
@@ -326,6 +327,17 @@ impl Component for App {
                 } else {
                     self.wallet.emit(WalletPageMsg::SetPrice(None));
                 }
+            }
+
+            AppMsg::ForgetPeers => {
+                let network = self
+                    .active
+                    .as_ref()
+                    .and_then(wallet::Meta::load)
+                    .map(|m| m.network())
+                    .unwrap_or(wallet::DEFAULT_NETWORK);
+                crate::peers::clear(network);
+                self.rebuild_preferences(&sender);
             }
 
             AppMsg::ShowWallets => {
@@ -604,6 +616,36 @@ impl App {
             );
             watched.set_subtitle_lines(2);
             this.add(&watched);
+        }
+
+        // Remembering peers is what makes a restart quick; forgetting them is
+        // how you start over if the set has gone stale or you would rather not
+        // reconnect to the same machines.
+        if let Some(paths) = &self.active
+            && let Some(meta) = wallet::Meta::load(paths)
+        {
+            let network = meta.network();
+            let known = crate::peers::count(network);
+
+            let peers = adw::ActionRow::new();
+            peers.set_title("Remembered peers");
+            peers.set_subtitle(&match known {
+                0 => "None yet — the next sync will remember some".to_string(),
+                1 => "1 peer, tried first on the next start".to_string(),
+                n => format!("{n} peers, tried first on the next start"),
+            });
+            peers.set_subtitle_lines(2);
+
+            let forget = gtk::Button::with_label("Forget");
+            forget.set_valign(gtk::Align::Center);
+            forget.add_css_class("flat");
+            forget.set_sensitive(known > 0);
+            {
+                let sender = sender.clone();
+                forget.connect_clicked(move |_| sender.input(AppMsg::ForgetPeers));
+            }
+            peers.add_suffix(&forget);
+            this.add(&peers);
         }
 
         let switch = adw::ActionRow::new();

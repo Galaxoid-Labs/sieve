@@ -126,6 +126,8 @@ pub struct Session {
     /// Set once the node reports real scan progress, after which connection
     /// events stop driving the status line.
     scanning: Arc<AtomicBool>,
+    /// Which chain this session is on, so remembered peers never cross over.
+    network: bdk_wallet::bitcoin::Network,
 }
 
 impl Session {
@@ -186,7 +188,17 @@ impl Session {
             wallets.push((&account.wallet, scan_type));
         }
 
-        let client: LightClient<_, Multiple> = Builder::new(network)
+        // Peers that were part of a working sync last time. Kyoto rediscovers
+        // the network from DNS on every start, which is most of the wait
+        // before anything happens; these turn that into direct connections.
+        let remembered = crate::peers::remembered(network);
+        tracing::info!(count = remembered.len(), %network, "seeding with remembered peers");
+        let mut builder = Builder::new(network);
+        for ip in remembered {
+            builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
+        }
+
+        let client: LightClient<_, Multiple> = builder
             .required_peers(REQUIRED_PEERS)
             .data_dir(headers)
             .response_timeout(RESPONSE_TIMEOUT)
@@ -207,6 +219,7 @@ impl Session {
             requester: client.requester(),
             synced: Arc::new(AtomicBool::new(false)),
             scanning: Arc::new(AtomicBool::new(false)),
+            network,
         })
     }
 
@@ -522,6 +535,12 @@ impl Session {
                         }),
                 })
                 .collect();
+        }
+
+        if !info.peers.is_empty() {
+            let addresses: Vec<String> =
+                info.peers.iter().map(|p| p.address.clone()).collect();
+            crate::peers::remember(self.network, &addresses);
         }
 
         if let Ok(rate) = self.requester.broadcast_min_feerate().await {
