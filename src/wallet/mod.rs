@@ -26,6 +26,7 @@ use bdk_wallet::miniscript::Tap;
 use zeroize::Zeroizing;
 
 pub mod accounts;
+pub mod send;
 pub mod node;
 
 use crate::vault;
