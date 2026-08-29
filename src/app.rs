@@ -22,6 +22,10 @@ pub struct App {
     /// The navigation history. Held here so every screen's back button routes
     /// through one place instead of each inventing its own.
     nav: adw::NavigationView,
+    /// Unlocking is a dialog over the wallet, not a page you walk through.
+    /// Landing straight on the wallet is the whole point: the thing you opened
+    /// the app for is on screen from the first frame, just not filled in yet.
+    unlock_dialog: adw::Dialog,
     /// The wallet currently open, if any.
     active: Option<Paths>,
     session: Option<Arc<Session>>,
@@ -39,6 +43,10 @@ pub enum AppMsg {
     Back,
     ShowOnboarding,
     ShowRestore,
+    /// Open the wallet list — a detour, not part of the main path.
+    ShowWallets,
+    /// Re-present the password dialog for the wallet already on screen.
+    PromptUnlock,
     /// Open a specific wallet from the list.
     OpenWallet(String),
     /// A wallet now exists on disk, or an existing one was unlocked. Both
@@ -98,6 +106,10 @@ impl Component for App {
         tracing::debug!(wallets = wallets.len(), "starting");
 
         let nav = adw::NavigationView::new();
+        let unlock_dialog = adw::Dialog::new();
+        unlock_dialog.set_title("Unlock");
+        unlock_dialog.set_content_width(420);
+        unlock_dialog.set_content_height(460);
 
         let chooser = Chooser::builder().launch(()).forward(
             sender.input_sender(),
@@ -132,7 +144,8 @@ impl Component for App {
         let wallet = WalletPage::builder().launch(()).forward(
             sender.input_sender(),
             |out| match out {
-                crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::Back,
+                crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowWallets,
+                crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
                 crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                     AppMsg::RevealAddress(script_type)
                 }
@@ -152,10 +165,11 @@ impl Component for App {
         // Pages are registered up front and navigated by tag. The view owns
         // the history, which is what lets back work everywhere without each
         // screen inventing its own.
+        unlock_dialog.set_child(Some(unlock.widget()));
+
         for (tag, title, child, can_pop) in [
-            ("chooser", "Wallets", chooser.widget().clone().upcast::<gtk::Widget>(), true),
-            ("unlock", "Unlock", unlock.widget().clone().upcast(), true),
-            ("wallet", "Wallet", wallet.widget().clone().upcast(), true),
+            ("wallet", "Wallet", wallet.widget().clone().upcast::<gtk::Widget>(), true),
+            ("chooser", "Wallets", chooser.widget().clone().upcast(), true),
             // Setup and import drive their own back button: theirs steps
             // backwards through a flow before leaving it, and two back buttons
             // in one header is worse than one that does both jobs.
@@ -170,6 +184,7 @@ impl Component for App {
 
         let model = App {
             nav: nav.clone(),
+            unlock_dialog: unlock_dialog.clone(),
             active: None,
             session: None,
             chooser,
@@ -180,19 +195,14 @@ impl Component for App {
         };
         let widgets = view_output!();
 
-        match wallets.len() {
-            // Nothing to choose between, so setup is the whole app.
-            0 => model.nav.replace_with_tags(&["onboarding"]),
-            // The list stays the root even for a single wallet: it is where
-            // "make another" lives, and it gives every other page a home to
-            // go back to.
-            _ => {
-                model.nav.replace_with_tags(&["chooser"]);
-                if wallets.len() == 1 {
-                    // One wallet needs no picking, so go straight to unlocking
-                    // it — with the list still underneath.
-                    sender.input(AppMsg::OpenWallet(wallets[0].id.clone()));
-                }
+        match wallets.first() {
+            // Nothing to open, so setup is the whole app.
+            None => model.nav.replace_with_tags(&["onboarding"]),
+            // The wallet is the root. Opening the app puts you on it
+            // immediately, locked, with the password asked for on top.
+            Some(entry) => {
+                model.nav.replace_with_tags(&["wallet"]);
+                sender.input(AppMsg::OpenWallet(entry.id.clone()));
             }
         }
 
@@ -212,13 +222,29 @@ impl Component for App {
             AppMsg::ShowOnboarding => self.nav.push_by_tag("onboarding"),
             AppMsg::ShowRestore => self.nav.push_by_tag("restore"),
 
+            AppMsg::ShowWallets => {
+                self.chooser.emit(ChooserMsg::Refresh);
+                self.nav.push_by_tag("chooser");
+            }
+
+            AppMsg::PromptUnlock => {
+                if let Some(root) = self.nav.root().and_then(|r| r.root()) {
+                    self.unlock_dialog.present(Some(&root));
+                }
+            }
+
             AppMsg::OpenWallet(id) => {
                 let paths = Paths::for_wallet(&id);
                 let name = wallet::Meta::load(&paths)
                     .map(|m| m.display_name(&id))
                     .unwrap_or_else(|| id.clone());
-                self.unlock.emit(UnlockMsg::Open { paths, name });
-                self.nav.push_by_tag("unlock");
+                self.unlock.emit(UnlockMsg::Open { paths, name: name.clone() });
+                self.wallet.emit(WalletPageMsg::SetLocked(true));
+                self.wallet.emit(WalletPageMsg::SetName(name));
+
+                // Chosen from the list, so leave the detour before asking.
+                self.nav.pop_to_tag("wallet");
+                sender.input(AppMsg::PromptUnlock);
             }
 
             AppMsg::Ready { paths, summary } => {
@@ -236,11 +262,14 @@ impl Component for App {
 
                 self.active = Some(paths.clone());
                 self.wallet.emit(WalletPageMsg::Show(summary));
+                self.wallet.emit(WalletPageMsg::SetLocked(false));
                 self.chooser.emit(ChooserMsg::Refresh);
 
-                // The list stays underneath, so leaving a wallet lands on the
-                // list rather than back on the password screen just satisfied.
-                self.nav.replace_with_tags(&["chooser", "wallet"]);
+                self.unlock_dialog.close();
+                // Whether this came from a password, a new wallet or an
+                // import, the wallet is where you end up — and it is the root,
+                // so nothing is left behind to walk back through.
+                self.nav.replace_with_tags(&["wallet"]);
 
                 if self.session.is_none() {
                     sender.oneshot_command(async move {

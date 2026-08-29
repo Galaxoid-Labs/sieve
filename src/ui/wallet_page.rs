@@ -11,6 +11,8 @@ use crate::wallet::Summary;
 #[derive(Debug)]
 pub enum WalletPageOutput {
     SwitchWallet,
+    /// Ask for the password again — the wallet is on screen but locked.
+    Unlock,
     /// Reveal a new address on this path.
     NewAddress(crate::wallet::accounts::ScriptType),
 }
@@ -125,6 +127,10 @@ pub struct WalletPage {
     note: Option<String>,
     error: Option<String>,
     settings: Settings,
+    /// The wallet is the root screen now, so it exists before anyone has
+    /// proved they may look at it.
+    locked: bool,
+    name: String,
     transactions: FactoryVecDeque<TxRow>,
     /// Backing model for the address-type picker.
     ///
@@ -164,6 +170,9 @@ pub enum WalletPageMsg {
     ShowFreshAddress(String),
     /// Clear everything that belonged to a different wallet.
     Reset,
+    SetLocked(bool),
+    SetName(String),
+    RequestUnlock,
 }
 
 impl WalletPage {
@@ -270,7 +279,8 @@ impl Component for WalletPage {
                 // wallet you are looking at.
                 #[wrap(Some)]
                 set_title_widget = &adw::WindowTitle {
-                    set_title: "Sieve",
+                    #[watch]
+                    set_title: &model.name,
                     #[watch]
                     set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
                 },
@@ -294,7 +304,7 @@ impl Component for WalletPage {
             // qualifies whatever number you happen to be looking at.
             add_top_bar = &adw::Banner {
                 #[watch]
-                set_revealed: model.syncing(),
+                set_revealed: model.syncing() && !model.locked,
                 #[watch]
                 set_title: &model.progress.label(),
             },
@@ -322,9 +332,30 @@ impl Component for WalletPage {
                             set_margin_all: 18,
                             set_valign: gtk::Align::Start,
 
+                            adw::StatusPage {
+                                set_icon_name: Some("channel-secure-symbolic"),
+                                set_title: "Wallet locked",
+                                set_description: Some(
+                                    "Unlock to see balances and addresses."
+                                ),
+                                #[watch]
+                                set_visible: model.locked,
+
+                                #[wrap(Some)]
+                                set_child = &gtk::Button {
+                                    add_css_class: "suggested-action",
+                                    add_css_class: "pill",
+                                    set_halign: gtk::Align::Center,
+                                    set_label: "Unlock",
+                                    connect_clicked => WalletPageMsg::RequestUnlock,
+                                },
+                            },
+
                             // The balance is what people open a wallet to see,
                             // so it leads rather than sitting in a list row.
                             gtk::Label {
+                                #[watch]
+                                set_visible: !model.locked,
                                 add_css_class: "title-1",
                                 add_css_class: "numeric",
                                 set_wrap: true,
@@ -337,6 +368,8 @@ impl Component for WalletPage {
                             gtk::Button {
                                 add_css_class: "flat",
                                 set_halign: gtk::Align::Center,
+                                #[watch]
+                                set_visible: !model.locked,
                                 set_tooltip_text: Some("Switch between BTC and satoshis"),
                                 #[watch]
                                 set_label: model.settings.denomination.label(),
@@ -359,7 +392,7 @@ impl Component for WalletPage {
                                 set_selection_mode: gtk::SelectionMode::None,
                                 set_margin_top: 12,
                                 #[watch]
-                                set_visible: model.has_transactions(),
+                                set_visible: model.has_transactions() && !model.locked,
                             },
 
                             adw::StatusPage {
@@ -371,7 +404,7 @@ impl Component for WalletPage {
                                      until it confirms."
                                 ),
                                 #[watch]
-                                set_visible: !model.has_transactions(),
+                                set_visible: !model.has_transactions() && !model.locked,
                             },
                         },
                     },
@@ -582,6 +615,8 @@ impl Component for WalletPage {
         );
         let model = WalletPage {
             settings: Settings::load(),
+            locked: true,
+            name: "Sieve".into(),
             transactions,
             path_model: gtk::StringList::new(&[]),
             path_labels: Vec::new(),
@@ -640,6 +675,11 @@ impl Component for WalletPage {
                 if let Some(summary) = self.summary.clone() {
                         self.rebuild_transactions(&summary);
                 }
+            }
+            WalletPageMsg::SetLocked(locked) => self.locked = locked,
+            WalletPageMsg::SetName(name) => self.name = name,
+            WalletPageMsg::RequestUnlock => {
+                let _ = sender.output(WalletPageOutput::Unlock);
             }
             WalletPageMsg::Reset => {
                 self.summary = None;
