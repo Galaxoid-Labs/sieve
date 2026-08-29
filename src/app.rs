@@ -613,6 +613,20 @@ impl App {
             });
         }
         display.add(&fiat);
+
+        // Sieve never sets the colour scheme — it follows the desktop. This
+        // row says what it is currently reading, which is the only way to tell
+        // "the app ignores my theme" apart from "the desktop is not telling
+        // it", and those have very different fixes.
+        let manager = adw::StyleManager::default();
+        let appearance = adw::ActionRow::new();
+        appearance.set_title("Appearance");
+        appearance.set_subtitle("Follows your desktop setting");
+        let detected = gtk::Label::new(Some(if manager.is_dark() { "Dark" } else { "Light" }));
+        detected.add_css_class("dim-label");
+        appearance.add_suffix(&detected);
+        display.add(&appearance);
+
         page.add(&display);
 
         let this = adw::PreferencesGroup::new();
