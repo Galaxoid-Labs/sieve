@@ -217,171 +217,224 @@ impl SimpleComponent for WalletPage {
                 },
             },
 
+            // Sync state sits above every view rather than inside one: it
+            // qualifies whatever number you happen to be looking at.
+            add_top_bar = &adw::Banner {
+                #[watch]
+                set_revealed: model.syncing(),
+                #[watch]
+                set_title: &model.progress.label(),
+            },
+
             #[wrap(Some)]
-            set_content = &adw::PreferencesPage {
-                adw::PreferencesGroup {
-                    set_title: "Balance",
+            #[name(view_stack)]
+            set_content = &adw::ViewStack {
 
-                    adw::ActionRow {
-                        set_title: "Confirmed",
-                        #[watch]
-                        set_subtitle: &model.balance(),
-                        set_activatable: true,
-                        set_tooltip_text: Some("Switch between BTC and satoshis"),
-                        connect_activated => WalletPageMsg::ToggleDenomination,
+                add_titled_with_icon[Some("activity"), "Activity", "document-open-recent-symbolic"] =
+                &gtk::ScrolledWindow {
+                    set_vexpand: true,
 
-                        add_suffix = &gtk::Label {
-                            add_css_class: "dim-label",
-                            #[watch]
-                            set_label: model.settings.denomination.label(),
-                        },
-                    },
+                    adw::Clamp {
+                        set_maximum_size: 500,
 
-                    adw::ActionRow {
-                        set_title: "Pending",
-                        // Compact block filters describe transactions in blocks,
-                        // so an unconfirmed payment is invisible until it is
-                        // mined. Saying so beats a balance that looks wrong.
-                        set_subtitle: "Unconfirmed payments appear once mined",
-                        #[watch]
-                        set_visible: model.summary.as_ref().is_some_and(|s| s.pending_sats > 0),
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 12,
+                            set_margin_all: 18,
+                            set_valign: gtk::Align::Start,
 
-                        add_suffix = &gtk::Label {
-                            add_css_class: "numeric",
-                            #[watch]
-                            set_label: &model.pending(),
+                            // The balance is what people open a wallet to see,
+                            // so it leads rather than sitting in a list row.
+                            gtk::Label {
+                                add_css_class: "title-1",
+                                add_css_class: "numeric",
+                                set_wrap: true,
+                                set_margin_top: 12,
+                                set_justify: gtk::Justification::Center,
+                                #[watch]
+                                set_label: &model.balance(),
+                            },
+
+                            gtk::Button {
+                                add_css_class: "flat",
+                                set_halign: gtk::Align::Center,
+                                set_tooltip_text: Some("Switch between BTC and satoshis"),
+                                #[watch]
+                                set_label: model.settings.denomination.label(),
+                                connect_clicked => WalletPageMsg::ToggleDenomination,
+                            },
+
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Center,
+                                #[watch]
+                                set_visible: model.summary.as_ref()
+                                    .is_some_and(|s| s.pending_sats > 0),
+                                #[watch]
+                                set_label: &format!("{} pending", model.pending()),
+                            },
+
+                            adw::StatusPage {
+                                set_icon_name: Some("document-open-recent-symbolic"),
+                                set_title: "No transactions yet",
+                                set_description: Some(
+                                    "Payments appear here once they are mined. Sieve reads them \
+                                     from block filters, so an unconfirmed payment stays invisible \
+                                     until it confirms."
+                                ),
+                            },
                         },
                     },
                 },
 
-                adw::PreferencesGroup {
-                    set_title: "Derivation paths",
+                add_titled_with_icon[Some("receive"), "Receive", "go-down-symbolic"] =
+                &adw::PreferencesPage {
+
+                    adw::PreferencesGroup {
+                        set_title: "Receive",
+                        #[watch]
+                        set_description: Some(&model.address_hint()),
+
+                        #[name(path_picker)]
+                        adw::ComboRow {
+                            set_title: "Address type",
+                            // Model set once and mutated in place; see path_model.
+                            set_model: Some(&path_model),
+                            #[watch]
+                            set_visible: model.has_path_choice(),
+                            connect_selected_notify[sender] => move |row| {
+                                sender.input(WalletPageMsg::SelectReceivePath(row.selected()));
+                            },
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Next address",
+                            #[watch]
+                            set_subtitle: &model.address(),
+                            set_subtitle_lines: 2,
+
+                            add_suffix = &gtk::Button {
+                                set_icon_name: "view-refresh-symbolic",
+                                set_tooltip_text: Some("New address — use a different one for each payer"),
+                                set_valign: gtk::Align::Center,
+                                add_css_class: "flat",
+                                connect_clicked => WalletPageMsg::NewAddress,
+                            },
+
+                            add_suffix = &gtk::Button {
+                                set_icon_name: "edit-copy-symbolic",
+                                set_tooltip_text: Some("Copy address"),
+                                set_valign: gtk::Align::Center,
+                                add_css_class: "flat",
+                                connect_clicked => WalletPageMsg::CopyAddress,
+                            },
+                        },
+                    },
+                },
+
+                add_titled_with_icon[Some("send"), "Send", "go-up-symbolic"] =
+                &adw::StatusPage {
+                    set_icon_name: Some("go-up-symbolic"),
+                    set_title: "Sending is not built yet",
                     set_description: Some(
-                        "An imported seed is searched on every standard path.                          Paths showing nothing were scanned and found empty."
+                        "Sieve can watch this wallet but cannot spend from it. Nothing here \
+                         can move your coins."
                     ),
-                    #[watch]
-                    set_visible: model.has_breakdown(),
-
-                    #[local_ref]
-                    paths_box -> gtk::ListBox {
-                        add_css_class: "boxed-list",
-                        set_selection_mode: gtk::SelectionMode::None,
-                    },
                 },
 
-                adw::PreferencesGroup {
-                    set_title: "Network",
-                    set_description: Some(
-                        "Sieve downloads compact block filters and matches them on this \
-                         machine. No server learns which addresses are yours."
-                    ),
+                add_titled_with_icon[Some("settings"), "Settings", "preferences-system-symbolic"] =
+                &adw::PreferencesPage {
 
-                    adw::ActionRow {
-                        set_title: "Status",
-                        #[watch]
-                        set_subtitle: &model.progress.label(),
+                    adw::PreferencesGroup {
+                        set_title: "Network",
 
-                        // Spinner while the work is unbounded, bar once the
-                        // node reports a real fraction. Never both, and both
-                        // sit inside the row rather than under the card.
-                        add_suffix = &gtk::Spinner {
-                            set_valign: gtk::Align::Center,
+                        adw::ActionRow {
+                            set_title: "Status",
                             #[watch]
-                            set_visible: model.syncing() && model.progress.fraction().is_none(),
+                            set_subtitle: &model.progress.label(),
+
+                            add_suffix = &gtk::Spinner {
+                                set_valign: gtk::Align::Center,
+                                #[watch]
+                                set_visible: model.syncing()
+                                    && model.progress.fraction().is_none(),
+                                #[watch]
+                                set_spinning: model.syncing()
+                                    && model.progress.fraction().is_none(),
+                            },
+
+                            add_suffix = &gtk::ProgressBar {
+                                set_valign: gtk::Align::Center,
+                                set_width_request: 120,
+                                #[watch]
+                                set_visible: model.syncing()
+                                    && model.progress.fraction().is_some(),
+                                #[watch]
+                                set_fraction: model.progress.fraction().unwrap_or(0.0),
+                            },
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Peers",
                             #[watch]
-                            set_spinning: model.syncing() && model.progress.fraction().is_none(),
+                            set_subtitle: &model.peers(),
                         },
 
-                        add_suffix = &gtk::ProgressBar {
-                            set_valign: gtk::Align::Center,
-                            set_width_request: 120,
+                        adw::ActionRow {
+                            set_title: "Verified to",
                             #[watch]
-                            set_visible: model.syncing() && model.progress.fraction().is_some(),
+                            set_subtitle: &model.verified_to(),
+                        },
+
+                        adw::ActionRow {
+                            add_css_class: "warning",
+                            set_title: "Note",
                             #[watch]
-                            set_fraction: model.progress.fraction().unwrap_or(0.0),
+                            set_visible: model.note.is_some(),
+                            #[watch]
+                            set_subtitle: model.note.as_deref().unwrap_or_default(),
+                            set_subtitle_lines: 2,
                         },
                     },
 
-                    adw::ActionRow {
-                        set_title: "Peers",
+                    adw::PreferencesGroup {
+                        set_title: "Derivation paths",
                         #[watch]
-                        set_subtitle: &model.peers(),
-                    },
+                        set_description: Some(&model.searched_and_empty()),
+                        #[watch]
+                        set_visible: model.has_breakdown(),
 
-                    adw::ActionRow {
-                        set_title: "Verified to",
-                        #[watch]
-                        set_subtitle: &model.verified_to(),
-                    },
-
-                    adw::ActionRow {
-                        add_css_class: "warning",
-                        set_title: "Note",
-                        #[watch]
-                        set_visible: model.note.is_some(),
-                        #[watch]
-                        set_subtitle: model.note.as_deref().unwrap_or_default(),
-                        set_subtitle_lines: 2,
-                    },
-                },
-
-                adw::PreferencesGroup {
-                    set_title: "Receive",
-                    #[watch]
-                    set_description: Some(&model.address_hint()),
-
-                    #[name(path_picker)]
-                    adw::ComboRow {
-                        set_title: "Address type",
-                        // Model set once and mutated in place; see path_model.
-                        set_model: Some(&path_model),
-                        // Only worth showing when there is a real choice.
-                        #[watch]
-                        set_visible: model.has_path_choice(),
-                        connect_selected_notify[sender] => move |row| {
-                            sender.input(WalletPageMsg::SelectReceivePath(row.selected()));
+                        #[local_ref]
+                        paths_box -> gtk::ListBox {
+                            add_css_class: "boxed-list",
+                            set_selection_mode: gtk::SelectionMode::None,
                         },
                     },
 
-                    adw::ActionRow {
-                        set_title: "Next address",
+                    adw::PreferencesGroup {
                         #[watch]
-                        set_subtitle: &model.address(),
-                        set_subtitle_lines: 2,
+                        set_visible: model.error.is_some(),
 
-                        add_suffix = &gtk::Button {
-                            set_icon_name: "view-refresh-symbolic",
-                            set_tooltip_text: Some("New address — use a different one for each payer"),
-                            set_valign: gtk::Align::Center,
-                            add_css_class: "flat",
-                            connect_clicked => WalletPageMsg::NewAddress,
+                        adw::ActionRow {
+                            add_css_class: "error",
+                            set_title: "Sync problem",
+                            #[watch]
+                            set_subtitle: model.error.as_deref().unwrap_or_default(),
+                            set_subtitle_lines: 3,
                         },
-
-                        add_suffix = &gtk::Button {
-                            set_icon_name: "edit-copy-symbolic",
-                            set_tooltip_text: Some("Copy address"),
-                            set_valign: gtk::Align::Center,
-                            add_css_class: "flat",
-                            connect_clicked => WalletPageMsg::CopyAddress,
-                        },
-                    },
-                },
-
-                adw::PreferencesGroup {
-                    #[watch]
-                    set_visible: model.error.is_some(),
-
-                    adw::ActionRow {
-                        add_css_class: "error",
-                        set_title: "Sync problem",
-                        #[watch]
-                        set_subtitle: model.error.as_deref().unwrap_or_default(),
-                        set_subtitle_lines: 3,
                     },
                 },
             },
+
+            // A bottom switcher works at any width and keeps the header free
+            // for the wallet's identity.
+            add_bottom_bar = &adw::ViewSwitcherBar {
+                set_stack: Some(&view_stack),
+                set_reveal: true,
+            },
         }
     }
+
 
     fn init(
         _init: Self::Init,
