@@ -871,11 +871,11 @@ impl WalletPage {
         stack.append(&caption);
 
         if let Some(price) = self.price {
-            // Today's price against a past amount, so it is what the coins are
-            // worth now — not what they were worth when they moved. Saying
-            // "today" is the difference between a figure and a wrong figure.
+            // Current price against a past amount, so this is what the coins
+            // are worth now rather than when they moved. The approximation
+            // sign carries that; spelling it out read as clutter.
             let value = gtk::Label::new(Some(&format!(
-                "≈ ${:.2} today",
+                "≈ ${:.2}",
                 price.value_of(magnitude)
             )));
             value.add_css_class("dim-label");
