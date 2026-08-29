@@ -28,6 +28,8 @@ use bdk_wallet::template::Bip86;
 use bdk_wallet::{KeychainKind, PersistedWallet, Wallet};
 use zeroize::Zeroizing;
 
+pub mod node;
+
 use crate::vault;
 
 /// Not configurable, and deliberately not `Network::Bitcoin`. Mainnet is gated
@@ -62,7 +64,7 @@ impl Paths {
 /// the wallet will ever use. That is exactly the linkage this wallet exists to
 /// avoid leaking, so it is owner-only in its own right rather than relying on
 /// the directory mode.
-fn restrict(path: &Path) -> Result<()> {
+pub(crate) fn restrict(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("cannot restrict {}", path.display()))

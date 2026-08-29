@@ -4,6 +4,8 @@
 //! `adw::ToolbarView` and header bar, because onboarding needs a Back button
 //! that the other screens must not show.
 
+use std::sync::Arc;
+
 use adw::prelude::*;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
@@ -11,6 +13,7 @@ use relm4::{adw, gtk};
 use crate::ui::onboarding::{Onboarding, OnboardingOutput};
 use crate::ui::unlock::{Unlock, UnlockOutput};
 use crate::ui::wallet_page::{WalletPage, WalletPageMsg};
+use crate::wallet::node::{Progress, Session};
 use crate::wallet::{Paths, Summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +35,8 @@ impl Screen {
 
 pub struct App {
     screen: Screen,
+    paths: Paths,
+    session: Option<Arc<Session>>,
     onboarding: Controller<Onboarding>,
     unlock: Controller<Unlock>,
     wallet: Controller<WalletPage>,
@@ -51,11 +56,20 @@ pub enum AppMsg {
     ColorSchemeChanged(bool),
 }
 
+#[derive(Debug)]
+pub enum AppCmd {
+    Started(Result<Arc<Session>, String>),
+    Update(Result<Summary, String>),
+    /// `None` means the node stopped.
+    Progress(Option<Progress>),
+}
+
 #[relm4::component(pub)]
-impl SimpleComponent for App {
+impl Component for App {
     type Init = ();
     type Input = AppMsg;
     type Output = ();
+    type CommandOutput = AppCmd;
 
     view! {
         adw::ApplicationWindow {
@@ -99,7 +113,7 @@ impl SimpleComponent for App {
             },
         );
         let unlock = Unlock::builder()
-            .launch(paths)
+            .launch(paths.clone())
             .forward(sender.input_sender(), |out| match out {
                 UnlockOutput::Unlocked(summary) => AppMsg::Ready(summary),
             });
@@ -115,7 +129,7 @@ impl SimpleComponent for App {
             move |manager| sender.input(AppMsg::ColorSchemeChanged(manager.is_dark()))
         });
 
-        let model = App { screen, onboarding, unlock, wallet };
+        let model = App { screen, paths, session: None, onboarding, unlock, wallet };
         let widgets = view_output!();
 
         // The stack shows its first child until told otherwise, and that child
@@ -127,15 +141,84 @@ impl SimpleComponent for App {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
             AppMsg::Ready(summary) => {
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.screen = Screen::Unlocked;
+
+                // Start the light client once, on first entry to the wallet.
+                if self.session.is_none() {
+                    let paths = self.paths.clone();
+                    sender.oneshot_command(async move {
+                        AppCmd::Started(
+                            Session::start(&paths).await.map(Arc::new).map_err(|e| e.to_string()),
+                        )
+                    });
+                }
             }
             AppMsg::ColorSchemeChanged(dark) => {
                 tracing::debug!(dark, "system color scheme changed");
             }
         }
+    }
+
+    fn update_cmd(
+        &mut self,
+        msg: Self::CommandOutput,
+        sender: ComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
+        match msg {
+            AppCmd::Started(Ok(session)) => {
+                tracing::info!("light client started");
+                self.session = Some(session);
+                // Two independent loops: one awaits wallet updates, the other
+                // progress events. Each re-arms itself, which is how relm4
+                // models a stream.
+                self.await_update(&sender);
+                self.await_progress(&sender);
+            }
+            AppCmd::Started(Err(message)) => {
+                tracing::error!(%message, "could not start the light client");
+                self.wallet.emit(WalletPageMsg::Failed(message));
+            }
+            AppCmd::Update(Ok(summary)) => {
+                tracing::debug!(balance = summary.balance_sats, "wallet updated");
+                self.wallet.emit(WalletPageMsg::Show(summary));
+                self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
+                self.await_update(&sender);
+            }
+            AppCmd::Update(Err(message)) => {
+                // Do not re-arm: the loop would spin on a persistent failure.
+                tracing::error!(%message, "sync failed");
+                self.wallet.emit(WalletPageMsg::Failed(message));
+            }
+            AppCmd::Progress(Some(progress)) => {
+                self.wallet.emit(WalletPageMsg::SetProgress(progress));
+                self.await_progress(&sender);
+            }
+            AppCmd::Progress(None) => tracing::warn!("the node stopped emitting progress"),
+        }
+    }
+
+    fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
+        if let Some(session) = &self.session {
+            session.shutdown();
+        }
+    }
+}
+
+impl App {
+    fn await_update(&self, sender: &ComponentSender<Self>) {
+        let Some(session) = self.session.clone() else { return };
+        sender.oneshot_command(async move {
+            AppCmd::Update(session.next_update().await.map_err(|e| e.to_string()))
+        });
+    }
+
+    fn await_progress(&self, sender: &ComponentSender<Self>) {
+        let Some(session) = self.session.clone() else { return };
+        sender.oneshot_command(async move { AppCmd::Progress(session.next_progress().await) });
     }
 }

@@ -1,21 +1,23 @@
-//! The unlocked wallet.
-//!
-//! Balance and addresses only, for now — sync, sending and history arrive with
-//! M2 onward. Rows are stock `adw::ActionRow`s inside a `PreferencesGroup`.
+//! The unlocked wallet: balance, receive address, and sync status.
 
 use adw::prelude::*;
 use relm4::prelude::*;
 use relm4::{adw, gtk};
 
+use crate::wallet::node::Progress;
 use crate::wallet::{NETWORK, Summary};
 
 pub struct WalletPage {
     summary: Option<Summary>,
+    progress: Progress,
+    error: Option<String>,
 }
 
 #[derive(Debug)]
 pub enum WalletPageMsg {
     Show(Summary),
+    SetProgress(Progress),
+    Failed(String),
     CopyAddress,
 }
 
@@ -32,6 +34,10 @@ impl WalletPage {
             Some(s) => s.next_address.clone(),
             None => "—".into(),
         }
+    }
+
+    fn syncing(&self) -> bool {
+        !matches!(self.progress, Progress::Synced)
     }
 }
 
@@ -64,8 +70,42 @@ impl SimpleComponent for WalletPage {
                 },
 
                 adw::PreferencesGroup {
+                    set_title: "Network",
+                    set_description: Some(
+                        "Sieve downloads compact block filters and matches them on this \
+                         machine. No server learns which addresses are yours."
+                    ),
+
+                    adw::ActionRow {
+                        set_title: "Status",
+                        #[watch]
+                        set_subtitle: &model.progress.label(),
+
+                        add_suffix = &gtk::Spinner {
+                            set_valign: gtk::Align::Center,
+                            #[watch]
+                            set_visible: model.syncing(),
+                            #[watch]
+                            set_spinning: model.syncing(),
+                        },
+                    },
+
+                    // Only meaningful once the node reports a real fraction;
+                    // before that the work is unbounded and a bar would lie.
+                    gtk::ProgressBar {
+                        set_margin_top: 6,
+                        set_margin_start: 12,
+                        set_margin_end: 12,
+                        set_margin_bottom: 6,
+                        #[watch]
+                        set_visible: model.progress.fraction().is_some() && model.syncing(),
+                        #[watch]
+                        set_fraction: model.progress.fraction().unwrap_or(0.0),
+                    },
+                },
+
+                adw::PreferencesGroup {
                     set_title: "Receive",
-                    set_description: Some("Chain sync is not implemented yet, so this balance will not change."),
 
                     adw::ActionRow {
                         set_title: "Next address",
@@ -82,6 +122,19 @@ impl SimpleComponent for WalletPage {
                         },
                     },
                 },
+
+                adw::PreferencesGroup {
+                    #[watch]
+                    set_visible: model.error.is_some(),
+
+                    adw::ActionRow {
+                        add_css_class: "error",
+                        set_title: "Sync problem",
+                        #[watch]
+                        set_subtitle: model.error.as_deref().unwrap_or_default(),
+                        set_subtitle_lines: 3,
+                    },
+                },
             },
         }
     }
@@ -91,7 +144,11 @@ impl SimpleComponent for WalletPage {
         root: Self::Root,
         _sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let model = WalletPage { summary: None };
+        let model = WalletPage {
+            summary: None,
+            progress: Progress::Connecting,
+            error: None,
+        };
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
@@ -99,10 +156,16 @@ impl SimpleComponent for WalletPage {
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
             WalletPageMsg::Show(summary) => self.summary = Some(summary),
+            WalletPageMsg::SetProgress(progress) => {
+                self.progress = progress;
+                self.error = None;
+            }
+            WalletPageMsg::Failed(message) => self.error = Some(message),
             WalletPageMsg::CopyAddress => {
-                if let Some(summary) = &self.summary {
-                    gtk::gdk::Display::default()
-                        .map(|display| display.clipboard().set_text(&summary.next_address));
+                if let Some(summary) = &self.summary
+                    && let Some(display) = gtk::gdk::Display::default()
+                {
+                    display.clipboard().set_text(&summary.next_address);
                 }
             }
         }
