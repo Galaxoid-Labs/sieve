@@ -59,6 +59,8 @@ pub enum AppMsg {
     ShowOnboarding,
     ShowRestore,
     ShowPreferences,
+    /// Re-read what the header chain can tell us.
+    RefreshChain,
     /// A dialog was dismissed, by us or by the person using it.
     PrefsClosed,
     UnlockClosed,
@@ -94,6 +96,7 @@ pub enum AppCmd {
     Progress(Option<Progress>),
     Warning(Option<Notice>),
     Revealed(Result<(String, Summary), String>),
+    Chain(Result<crate::wallet::node::ChainInfo, String>),
     Priced(Result<crate::price::Price, String>),
 }
 
@@ -171,6 +174,7 @@ impl Component for App {
                 crate::ui::wallet_page::WalletPageOutput::ShowPreferences => {
                     AppMsg::ShowPreferences
                 }
+                crate::ui::wallet_page::WalletPageOutput::RefreshChain => AppMsg::RefreshChain,
                 crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
                 crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                     AppMsg::RevealAddress(script_type)
@@ -281,6 +285,13 @@ impl Component for App {
             AppMsg::ShowRestore => {
                 self.close_prefs();
                 self.nav.push_by_tag("restore");
+            }
+
+            AppMsg::RefreshChain => {
+                let Some(session) = self.session.clone() else { return };
+                sender.oneshot_command(async move {
+                    AppCmd::Chain(session.chain_info().await.map_err(|e| e.to_string()))
+                });
             }
 
             AppMsg::ShowPreferences => {
@@ -415,15 +426,21 @@ impl Component for App {
                 self.await_update(&sender);
                 self.await_progress(&sender);
                 self.await_warning(&sender);
+                sender.input(AppMsg::RefreshChain);
             }
             AppCmd::Started(Err(message)) => {
                 tracing::error!(%message, "could not start the light client");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
+            AppCmd::Chain(Ok(info)) => self.wallet.emit(WalletPageMsg::SetChain(Some(info))),
+            AppCmd::Chain(Err(message)) => {
+                tracing::warn!(%message, "could not read the chain");
+            }
             AppCmd::Update(Ok(summary)) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
+                sender.input(AppMsg::RefreshChain);
                 self.await_update(&sender);
             }
             AppCmd::Update(Err(message)) => {

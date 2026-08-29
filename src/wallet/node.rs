@@ -404,3 +404,102 @@ mod tests {
         assert_eq!(Progress::Synced.fraction(), Some(1.0));
     }
 }
+
+/// What the chain looks like from here, derived from headers this node already
+/// holds.
+///
+/// Everything below comes out of the header chain and the peers already
+/// connected. Nothing here asks anyone a new question, so none of it costs a
+/// disclosure.
+#[derive(Debug, Clone, Default)]
+pub struct ChainInfo {
+    pub tip_height: u32,
+    pub tip_hash: String,
+    /// Timestamp in the tip's header.
+    pub tip_time: Option<u64>,
+    pub difficulty: f64,
+    /// Hashes per second implied by the difficulty and the target interval.
+    pub hashrate: f64,
+    /// Mean seconds between blocks over the recent window.
+    pub mean_interval: Option<f64>,
+    /// Blocks remaining before the next difficulty adjustment.
+    pub blocks_to_retarget: u32,
+    /// Where the current period's pace puts the next adjustment, as a
+    /// multiplier: 1.05 is five percent harder.
+    pub retarget_estimate: Option<f64>,
+    pub peers: Vec<PeerInfo>,
+    /// Lowest fee rate the connected peers will relay, in sat/vB.
+    pub min_relay_fee: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub address: String,
+    /// Whether this peer serves the filters the wallet actually needs.
+    pub serves_filters: bool,
+}
+
+/// Blocks between difficulty adjustments.
+const RETARGET_INTERVAL: u32 = 2016;
+/// The interval the protocol aims for, in seconds.
+const TARGET_SPACING: f64 = 600.0;
+/// How far back to look when measuring the recent pace. A day of blocks is
+/// enough to be meaningful without being dominated by luck.
+const PACE_WINDOW: u32 = 144;
+
+impl Session {
+    /// Gather what can be told from the headers already held.
+    pub async fn chain_info(&self) -> Result<ChainInfo> {
+        let tip = self
+            .requester
+            .chain_tip()
+            .await
+            .map_err(|e| anyhow!("could not read the chain tip: {e}"))?;
+
+        let mut info = ChainInfo {
+            tip_height: tip.height,
+            tip_hash: tip.hash.to_string(),
+            blocks_to_retarget: RETARGET_INTERVAL - (tip.height % RETARGET_INTERVAL),
+            ..Default::default()
+        };
+
+        if let Ok(Some(header)) = self.requester.get_header(tip.height).await {
+            info.tip_time = Some(header.header.time as u64);
+            info.difficulty = header.header.difficulty_float();
+            // Work per block is difficulty * 2^32 hashes; at one block per
+            // target spacing that is the network's implied rate.
+            info.hashrate = info.difficulty * 4_294_967_296.0 / TARGET_SPACING;
+
+            // Pace over the recent window, which is what tells you whether the
+            // next adjustment goes up or down.
+            if tip.height > PACE_WINDOW
+                && let Ok(Some(earlier)) = self.requester.get_header(tip.height - PACE_WINDOW).await
+            {
+                let elapsed = header.header.time as f64 - earlier.header.time as f64;
+                if elapsed > 0.0 {
+                    let mean = elapsed / PACE_WINDOW as f64;
+                    info.mean_interval = Some(mean);
+                    // Faster blocks mean the next period gets harder.
+                    info.retarget_estimate = Some((TARGET_SPACING / mean).clamp(0.25, 4.0));
+                }
+            }
+        }
+
+        if let Ok(peers) = self.requester.peer_info().await {
+            info.peers = peers
+                .into_iter()
+                .map(|(address, services)| PeerInfo {
+                    address: format!("{address:?}"),
+                    serves_filters: services
+                        .has(bdk_wallet::bitcoin::p2p::ServiceFlags::COMPACT_FILTERS),
+                })
+                .collect();
+        }
+
+        if let Ok(rate) = self.requester.broadcast_min_feerate().await {
+            info.min_relay_fee = Some(rate.to_sat_per_kwu() as f64 / 250.0);
+        }
+
+        Ok(info)
+    }
+}

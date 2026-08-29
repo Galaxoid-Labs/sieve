@@ -12,11 +12,59 @@ use crate::wallet::Summary;
 #[derive(Debug)]
 pub enum WalletPageOutput {
     SwitchWallet,
+    RefreshChain,
     ShowPreferences,
     /// Ask for the password again — the wallet is on screen but locked.
     Unlock,
     /// Reveal a new address on this path.
     NewAddress(crate::wallet::accounts::ScriptType),
+}
+
+/// One connected peer.
+#[derive(Debug)]
+pub struct PeerRow {
+    address: String,
+    serves_filters: bool,
+}
+
+#[relm4::factory(pub)]
+impl FactoryComponent for PeerRow {
+    type Init = crate::wallet::node::PeerInfo;
+    type Input = ();
+    type Output = ();
+    type CommandOutput = ();
+    type ParentWidget = gtk::ListBox;
+
+    view! {
+        adw::ActionRow {
+            set_title: &self.address,
+            set_title_lines: 1,
+            // The distinction that matters: most of the network does not serve
+            // filters, and a peer that does not cannot help this wallet sync.
+            set_subtitle: if self.serves_filters {
+                "Serves compact filters"
+            } else {
+                "No compact filters"
+            },
+
+            add_prefix = &gtk::Image {
+                set_icon_name: Some(if self.serves_filters {
+                    "network-wireless-symbolic"
+                } else {
+                    "network-offline-symbolic"
+                }),
+                set_css_classes: if self.serves_filters { &["success"] } else { &["dim-label"] },
+            },
+        }
+    }
+
+    fn init_model(
+        peer: Self::Init,
+        _index: &DynamicIndex,
+        _sender: FactorySender<Self>,
+    ) -> Self {
+        PeerRow { address: peer.address, serves_filters: peer.serves_filters }
+    }
 }
 
 /// One transaction in the activity list.
@@ -199,6 +247,8 @@ pub struct WalletPage {
     price: Option<crate::price::Price>,
     /// Somewhere to say things worth saying once and not keeping.
     toaster: Toaster,
+    chain: Option<crate::wallet::node::ChainInfo>,
+    peers_list: FactoryVecDeque<PeerRow>,
     /// The wallet is the root screen now, so it exists before anyone has
     /// proved they may look at it.
     locked: bool,
@@ -236,6 +286,8 @@ pub enum WalletPageMsg {
     /// `None` clears it — the setting was turned off, or the fetch failed.
     SetPrice(Option<crate::price::Price>),
     Toast(String),
+    SetChain(Option<crate::wallet::node::ChainInfo>),
+    RefreshChain,
     /// Choose which derivation path to receive on.
     SelectReceivePath(u32),
     /// Ask for an address that has not been handed to anyone yet.
@@ -302,6 +354,88 @@ impl WalletPage {
             n => format!("{n} transactions"),
         });
         parts.join(" · ")
+    }
+
+    fn chain_tip(&self) -> String {
+        match &self.chain {
+            Some(c) => thousands(c.tip_height),
+            None => "—".into(),
+        }
+    }
+
+    /// How far the wallet has verified behind what the peers report. Zero is
+    /// the answer people want; anything else says the sync is not finished.
+    fn behind(&self) -> String {
+        let (Some(chain), Some(summary)) = (&self.chain, &self.summary) else {
+            return "—".into();
+        };
+        match chain.tip_height.saturating_sub(summary.tip) {
+            0 => "Up to date with the network".into(),
+            1 => "1 block behind".into(),
+            n => format!("{} blocks behind", thousands(n)),
+        }
+    }
+
+    fn last_block(&self) -> String {
+        match self.chain.as_ref().and_then(|c| c.tip_time) {
+            Some(_) => format_relative(self.chain.as_ref().and_then(|c| c.tip_time)),
+            None => "—".into(),
+        }
+    }
+
+    fn difficulty(&self) -> String {
+        match &self.chain {
+            Some(c) if c.difficulty > 0.0 => format!("{:.3} T", c.difficulty / 1e12),
+            _ => "—".into(),
+        }
+    }
+
+    /// Hashrate in the unit that keeps the number readable.
+    fn hashrate(&self) -> String {
+        let Some(chain) = &self.chain else { return "—".into() };
+        if chain.hashrate <= 0.0 {
+            return "—".into();
+        }
+        for (limit, unit) in [(1e21, "ZH/s"), (1e18, "EH/s"), (1e15, "PH/s"), (1e12, "TH/s")] {
+            if chain.hashrate >= limit {
+                return format!("{:.2} {unit}", chain.hashrate / limit);
+            }
+        }
+        format!("{:.0} H/s", chain.hashrate)
+    }
+
+    fn block_pace(&self) -> String {
+        match self.chain.as_ref().and_then(|c| c.mean_interval) {
+            Some(seconds) => format!("{:.1} minutes between blocks", seconds / 60.0),
+            None => "—".into(),
+        }
+    }
+
+    /// Blocks left in this difficulty period, and where the pace points.
+    fn retarget(&self) -> String {
+        let Some(chain) = &self.chain else { return "—".into() };
+        let blocks = format!("{} blocks away", thousands(chain.blocks_to_retarget));
+        match chain.retarget_estimate {
+            // A multiplier above one means the next period gets harder.
+            Some(estimate) => {
+                let change = (estimate - 1.0) * 100.0;
+                format!("{blocks} · estimated {change:+.1}%")
+            }
+            None => blocks,
+        }
+    }
+
+    fn min_relay_fee(&self) -> String {
+        match self.chain.as_ref().and_then(|c| c.min_relay_fee) {
+            Some(rate) => format!("{rate:.2} sat/vB"),
+            None => "—".into(),
+        }
+    }
+
+    fn peer_count(&self) -> String {
+        let Some(chain) = &self.chain else { return "Connecting…".into() };
+        let serving = chain.peers.iter().filter(|p| p.serves_filters).count();
+        format!("{} connected · {serving} serving filters", chain.peers.len())
     }
 
     fn has_transactions(&self) -> bool {
@@ -620,6 +754,15 @@ impl Component for WalletPage {
                              machine. No server is told which addresses are yours."
                         ),
 
+                        #[wrap(Some)]
+                        set_header_suffix = &gtk::Button {
+                            set_icon_name: "view-refresh-symbolic",
+                            set_tooltip_text: Some("Refresh"),
+                            add_css_class: "flat",
+                            set_valign: gtk::Align::Center,
+                            connect_clicked => WalletPageMsg::RefreshChain,
+                        },
+
                         adw::ActionRow {
                             set_title: "Status",
                             #[watch]
@@ -669,6 +812,97 @@ impl Component for WalletPage {
                         },
                     },
 
+                    // Everything below is read out of the header chain this
+                    // node already holds. None of it asks anyone a new
+                    // question, so none of it costs a disclosure.
+                    adw::PreferencesGroup {
+                        set_title: "Chain",
+
+                        adw::ActionRow {
+                            set_title: "Tip",
+                            #[watch]
+                            set_subtitle: &model.behind(),
+
+                            add_suffix = &gtk::Label {
+                                add_css_class: "numeric",
+                                add_css_class: "heading",
+                                #[watch]
+                                set_label: &model.chain_tip(),
+                            },
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Last block",
+                            #[watch]
+                            set_subtitle: &model.last_block(),
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Recent pace",
+                            #[watch]
+                            set_subtitle: &model.block_pace(),
+                        },
+                    },
+
+                    adw::PreferencesGroup {
+                        set_title: "Difficulty",
+
+                        adw::ActionRow {
+                            set_title: "Current",
+                            set_subtitle: "Work needed per block",
+
+                            add_suffix = &gtk::Label {
+                                add_css_class: "numeric",
+                                #[watch]
+                                set_label: &model.difficulty(),
+                            },
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Network hashrate",
+                            set_subtitle: "Implied by the difficulty",
+
+                            add_suffix = &gtk::Label {
+                                add_css_class: "numeric",
+                                #[watch]
+                                set_label: &model.hashrate(),
+                            },
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Next adjustment",
+                            #[watch]
+                            set_subtitle: &model.retarget(),
+                        },
+                    },
+
+                    adw::PreferencesGroup {
+                        set_title: "Fees",
+
+                        adw::ActionRow {
+                            set_title: "Minimum relay fee",
+                            set_subtitle: "The lowest your peers will forward",
+
+                            add_suffix = &gtk::Label {
+                                add_css_class: "numeric",
+                                #[watch]
+                                set_label: &model.min_relay_fee(),
+                            },
+                        },
+                    },
+
+                    adw::PreferencesGroup {
+                        set_title: "Peers",
+                        #[watch]
+                        set_description: Some(&model.peer_count()),
+
+                        #[local_ref]
+                        peers_box -> gtk::ListBox {
+                            add_css_class: "boxed-list",
+                            set_selection_mode: gtk::SelectionMode::None,
+                        },
+                    },
+
                     adw::PreferencesGroup {
                         #[watch]
                         set_visible: model.error.is_some(),
@@ -702,6 +936,7 @@ impl Component for WalletPage {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let peers_list = FactoryVecDeque::builder().launch_default().detach();
         let transactions = FactoryVecDeque::builder().launch_default().forward(
             sender.input_sender(),
             |out| match out {
@@ -713,6 +948,8 @@ impl Component for WalletPage {
             locked: true,
             price: None,
             toaster: Toaster::default(),
+            chain: None,
+            peers_list,
             name: "Sieve".into(),
             transactions,
             path_model: gtk::StringList::new(&[]),
@@ -727,6 +964,7 @@ impl Component for WalletPage {
         };
         let tx_list = model.transactions.widget();
         let toast_overlay = model.toaster.overlay_widget();
+        let peers_box = model.peers_list.widget();
         let path_model = model.path_model.clone();
         let widgets = view_output!();
 
@@ -769,6 +1007,20 @@ impl Component for WalletPage {
             }
             WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
             WalletPageMsg::Toast(message) => self.toaster.add_toast(adw::Toast::new(&message)),
+            WalletPageMsg::RefreshChain => {
+                let _ = sender.output(WalletPageOutput::RefreshChain);
+            }
+            WalletPageMsg::SetChain(chain) => {
+                let mut guard = self.peers_list.guard();
+                guard.clear();
+                if let Some(info) = &chain {
+                    for peer in &info.peers {
+                        guard.push_back(peer.clone());
+                    }
+                }
+                drop(guard);
+                self.chain = chain;
+            }
             WalletPageMsg::SetPrice(price) => {
                 self.price = price;
                 if let Some(summary) = self.summary.clone() {
