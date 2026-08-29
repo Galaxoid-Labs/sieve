@@ -88,10 +88,12 @@ impl FactoryComponent for TxRow {
                 // A filter wallet cannot see the mempool, so this is rare and
                 // worth naming rather than showing a blank.
                 (None, _) => "Unconfirmed".to_string(),
-                (Some(height), c) if c < 6 => {
-                    format!("{} · block {height}", plural_confirmations(c))
+                // While a payment is shallow the confirmation count is the
+                // thing being watched; after that, when it happened is.
+                (Some(_), c) if c < 6 => {
+                    format!("{} · {}", format_relative(tx.seen_at), plural_confirmations(c))
                 }
-                (Some(height), _) => format!("{} · block {height}", format_when(tx.seen_at)),
+                (Some(_), _) => format_relative(tx.seen_at),
             },
             amount: format!(
                 "{}{}",
@@ -109,6 +111,45 @@ fn plural_confirmations(n: u32) -> String {
         0 => "Awaiting confirmation".into(),
         1 => "1 confirmation".into(),
         n => format!("{n} confirmations"),
+    }
+}
+
+/// Group digits so six-figure block heights stay readable.
+fn thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How long ago, in the terms a person would use.
+///
+/// Recent payments are the ones being checked on, so they get relative time.
+/// Past a week that stops meaning anything and it falls back to a date.
+fn format_relative(seen_at: Option<u64>) -> String {
+    let Some(seconds) = seen_at else { return "Confirmed".into() };
+    let Ok(then) = gtk::glib::DateTime::from_unix_local(seconds as i64) else {
+        return "Confirmed".into();
+    };
+    let Ok(now) = gtk::glib::DateTime::now_local() else {
+        return format_when(seen_at);
+    };
+
+    let elapsed = now.difference(&then).as_seconds();
+    match elapsed {
+        e if e < 0 => "Just now".into(),
+        e if e < 60 => "Just now".into(),
+        e if e < 3_600 => format!("{} minutes ago", e / 60),
+        e if e < 7_200 => "An hour ago".into(),
+        e if e < 86_400 => format!("{} hours ago", e / 3_600),
+        e if e < 172_800 => "Yesterday".into(),
+        e if e < 604_800 => format!("{} days ago", e / 86_400),
+        _ => format_when(seen_at),
     }
 }
 
@@ -200,6 +241,25 @@ impl WalletPage {
             .unwrap_or_else(|| summary.next_address.clone())
     }
 
+    /// The line under the balance: what qualifies the number above it.
+    ///
+    /// Pending is the important half — a filter wallet cannot see the mempool,
+    /// so anything pending here is already mined but shallow.
+    fn balance_caption(&self) -> String {
+        let Some(summary) = &self.summary else { return "Not yet synced".into() };
+
+        let mut parts = Vec::new();
+        if summary.pending_sats > 0 {
+            parts.push(format!("{} pending", self.pending()));
+        }
+        parts.push(match summary.transactions.len() {
+            0 => "No transactions".into(),
+            1 => "1 transaction".into(),
+            n => format!("{n} transactions"),
+        });
+        parts.join(" · ")
+    }
+
     fn has_transactions(&self) -> bool {
         self.summary.as_ref().is_some_and(|s| !s.transactions.is_empty())
     }
@@ -261,7 +321,16 @@ impl Component for WalletPage {
             set_size_request: (360, 300),
 
             #[wrap(Some)]
-            set_child = &adw::ToolbarView {
+            #[name(inner_nav)]
+            set_child = &adw::NavigationView {
+
+                #[name(main_page)]
+                adw::NavigationPage {
+                    set_tag: Some("main"),
+                    set_title: "Wallet",
+
+                    #[wrap(Some)]
+                    set_child = &adw::ToolbarView {
                 #[name(header_bar)]
                 add_top_bar = &adw::HeaderBar {
                 // The window keeps its title. The switcher gets its own row
@@ -350,38 +419,54 @@ impl Component for WalletPage {
                             },
 
                             // The balance is what people open a wallet to see,
-                            // so it leads rather than sitting in a list row.
-                            gtk::Label {
-                                #[watch]
-                                set_visible: !model.locked,
-                                add_css_class: "title-1",
-                                add_css_class: "numeric",
-                                set_wrap: true,
+                            // so it leads, in a card of its own rather than as
+                            // the first item of an undifferentiated column.
+                            gtk::Box {
+                                add_css_class: "card",
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 2,
                                 set_margin_top: 12,
-                                set_justify: gtk::Justification::Center,
-                                #[watch]
-                                set_label: &model.balance(),
-                            },
-
-                            gtk::Button {
-                                add_css_class: "flat",
-                                set_halign: gtk::Align::Center,
                                 #[watch]
                                 set_visible: !model.locked,
-                                set_tooltip_text: Some("Switch between BTC and satoshis"),
-                                #[watch]
-                                set_label: model.settings.denomination.label(),
-                                connect_clicked => WalletPageMsg::ShowPreferences,
+
+                                gtk::Label {
+                                    add_css_class: "title-1",
+                                    add_css_class: "numeric",
+                                    set_wrap: true,
+                                    set_margin_top: 24,
+                                    set_justify: gtk::Justification::Center,
+                                    #[watch]
+                                    set_label: &model.balance(),
+                                },
+
+                                gtk::Button {
+                                    add_css_class: "flat",
+                                    add_css_class: "dim-label",
+                                    set_halign: gtk::Align::Center,
+                                    set_tooltip_text: Some("Switch between BTC and satoshis"),
+                                    #[watch]
+                                    set_label: model.settings.denomination.label(),
+                                    connect_clicked => WalletPageMsg::ShowPreferences,
+                                },
+
+                                gtk::Label {
+                                    add_css_class: "dim-label",
+                                    set_halign: gtk::Align::Center,
+                                    set_margin_bottom: 24,
+                                    set_wrap: true,
+                                    set_justify: gtk::Justification::Center,
+                                    #[watch]
+                                    set_label: &model.balance_caption(),
+                                },
                             },
 
                             gtk::Label {
-                                add_css_class: "dim-label",
-                                set_halign: gtk::Align::Center,
+                                add_css_class: "heading",
+                                set_halign: gtk::Align::Start,
+                                set_margin_top: 12,
+                                set_label: "Transactions",
                                 #[watch]
-                                set_visible: model.summary.as_ref()
-                                    .is_some_and(|s| s.pending_sats > 0),
-                                #[watch]
-                                set_label: &format!("{} pending", model.pending()),
+                                set_visible: model.has_transactions() && !model.locked,
                             },
 
                             #[local_ref]
@@ -542,6 +627,8 @@ impl Component for WalletPage {
                 // room for the switcher.
                 #[name(switcher_bar)]
                 add_bottom_bar = &adw::ViewSwitcherBar {},
+                    },
+                },
             },
         }
     }
@@ -681,29 +768,51 @@ impl WalletPage {
         }
     }
 
-    /// Present the detail sheet for one transaction.
+    /// Open one transaction as a page over the wallet.
+    ///
+    /// A transaction is a place you go and come back from, not a prompt you
+    /// answer, so it pushes onto the wallet's own navigation rather than
+    /// arriving as a dialog in front of it.
     fn show_transaction(&self, txid: &str, root: &adw::BreakpointBin) {
         let Some(summary) = &self.summary else { return };
         let Some(tx) = summary.transactions.iter().find(|t| t.txid == txid) else {
             return;
         };
+        let Some(nav) = root
+            .child()
+            .and_then(|child| child.downcast::<adw::NavigationView>().ok())
+        else {
+            return;
+        };
 
         let page = adw::PreferencesPage::new();
-
-        let amounts = adw::PreferencesGroup::new();
-        amounts.set_title("Amount");
+        let incoming = tx.is_incoming();
         let magnitude = tx.net_sats.unsigned_abs();
-        amounts.add(&detail_row(
-            if tx.is_incoming() { "Received" } else { "Sent" },
-            &self.settings.denomination.format(magnitude),
-        ));
-        match tx.fee_sats {
-            Some(fee) => amounts.add(&detail_row("Fee", &self.settings.denomination.format(fee))),
-            // Only knowable when every input is ours, which an incoming payment
-            // built by someone else will not be.
-            None => amounts.add(&detail_row("Fee", "Not known — inputs are not all yours")),
+
+        // The amount leads, the way the balance leads the wallet.
+        let headline = adw::PreferencesGroup::new();
+        let amount = gtk::Label::new(Some(&format!(
+            "{}{}",
+            if incoming { "+" } else { "−" },
+            self.settings.denomination.format(magnitude)
+        )));
+        amount.add_css_class("title-1");
+        amount.add_css_class("numeric");
+        if incoming {
+            amount.add_css_class("success");
         }
-        page.add(&amounts);
+        amount.set_wrap(true);
+        amount.set_justify(gtk::Justification::Center);
+
+        let caption = gtk::Label::new(Some(if incoming { "Received" } else { "Sent" }));
+        caption.add_css_class("dim-label");
+
+        let stack = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        stack.set_margin_bottom(12);
+        stack.append(&amount);
+        stack.append(&caption);
+        headline.add(&stack);
+        page.add(&headline);
 
         let status = adw::PreferencesGroup::new();
         status.set_title("Status");
@@ -713,7 +822,7 @@ impl WalletPage {
                     "Confirmations",
                     &plural_confirmations(tx.confirmations(summary.tip)),
                 ));
-                status.add(&detail_row("Block", &height.to_string()));
+                status.add(&detail_row("Block", &thousands(height)));
                 status.add(&detail_row("Date", &format_when(tx.seen_at)));
             }
             None => status.add(&detail_row(
@@ -721,14 +830,22 @@ impl WalletPage {
                 "Unconfirmed — not yet in a block",
             )),
         }
-        status.add(&detail_row("Derivation path", &tx.script_type.to_string()));
         page.add(&status);
 
-        let identity = adw::PreferencesGroup::new();
-        identity.set_title("Transaction ID");
+        let detail = adw::PreferencesGroup::new();
+        detail.set_title("Detail");
+        match tx.fee_sats {
+            Some(fee) => detail.add(&detail_row("Fee", &self.settings.denomination.format(fee))),
+            // Only knowable when every input is ours, which an incoming payment
+            // built by someone else will not be.
+            None => detail.add(&detail_row("Fee", "Not known — inputs are not all yours")),
+        }
+        detail.add(&detail_row("Derivation path", &tx.script_type.to_string()));
+
         let txid_row = adw::ActionRow::new();
-        txid_row.set_title(&tx.txid);
-        txid_row.set_title_lines(2);
+        txid_row.set_title("Transaction ID");
+        txid_row.set_subtitle(&tx.txid);
+        txid_row.set_subtitle_lines(2);
         txid_row.add_css_class("property");
         let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
         copy.set_tooltip_text(Some("Copy transaction ID"));
@@ -741,19 +858,15 @@ impl WalletPage {
             }
         });
         txid_row.add_suffix(&copy);
-        identity.add(&txid_row);
-        page.add(&identity);
+        detail.add(&txid_row);
+        page.add(&detail);
 
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&adw::HeaderBar::new());
         toolbar.set_content(Some(&page));
 
-        let dialog = adw::Dialog::new();
-        dialog.set_title("Transaction");
-        dialog.set_content_width(420);
-        dialog.set_content_height(560);
-        dialog.set_child(Some(&toolbar));
-        dialog.present(Some(root));
+        let nav_page = adw::NavigationPage::new(&toolbar, "Transaction");
+        nav.push(&nav_page);
     }
 
     /// Rewrite the picker only when the set of paths actually changes, so a
