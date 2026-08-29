@@ -141,6 +141,19 @@ impl WalletPage {
         )
     }
 
+    /// Every path this wallet watches, named rather than counted.
+    fn paths_watched(&self) -> String {
+        match &self.summary {
+            Some(s) if !s.accounts.is_empty() => s
+                .accounts
+                .iter()
+                .map(|a| a.script_type.label())
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => "—".into(),
+        }
+    }
+
     fn peers(&self) -> String {
         match self.peers {
             Some((connected, required)) => format!("{connected} of {required} connected"),
@@ -201,13 +214,20 @@ impl SimpleComponent for WalletPage {
     type Output = WalletPageOutput;
 
     view! {
-        adw::ToolbarView {
-            add_top_bar = &adw::HeaderBar {
+        adw::BreakpointBin {
+            set_size_request: (360, 300),
+
+            #[wrap(Some)]
+            set_child = &adw::ToolbarView {
+                #[name(header_bar)]
+                add_top_bar = &adw::HeaderBar {
+                // Wide windows carry the switcher in the header. The
+                // breakpoint below swaps in a plain title and reveals the
+                // bottom bar when the window is too narrow for it.
                 #[wrap(Some)]
-                set_title_widget = &adw::WindowTitle {
-                    set_title: "Sieve",
-                    #[watch]
-                    set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
+                #[name(view_switcher)]
+                set_title_widget = &adw::ViewSwitcher {
+                    set_policy: adw::ViewSwitcherPolicy::Wide,
                 },
 
                 pack_end = &gtk::Button {
@@ -342,11 +362,15 @@ impl SimpleComponent for WalletPage {
                     ),
                 },
 
-                add_titled_with_icon[Some("settings"), "Settings", "preferences-system-symbolic"] =
+                add_titled_with_icon[Some("network"), "Network", "network-wireless-symbolic"] =
                 &adw::PreferencesPage {
 
                     adw::PreferencesGroup {
-                        set_title: "Network",
+                        set_title: "Sync",
+                        set_description: Some(
+                            "Sieve downloads compact block filters and matches them on this \
+                             machine. No server is told which addresses are yours."
+                        ),
 
                         adw::ActionRow {
                             set_title: "Status",
@@ -424,13 +448,66 @@ impl SimpleComponent for WalletPage {
                         },
                     },
                 },
+
+                add_titled_with_icon[Some("settings"), "Settings", "preferences-system-symbolic"] =
+                &adw::PreferencesPage {
+
+                    adw::PreferencesGroup {
+                        set_title: "Display",
+
+                        adw::ActionRow {
+                            set_title: "Amounts",
+                            set_activatable: true,
+                            #[watch]
+                            set_subtitle: match model.settings.denomination {
+                                crate::settings::Denomination::Sats => "Satoshis",
+                                crate::settings::Denomination::Btc => "Decimal BTC",
+                            },
+                            connect_activated => WalletPageMsg::ToggleDenomination,
+
+                            add_suffix = &gtk::Label {
+                                add_css_class: "dim-label",
+                                #[watch]
+                                set_label: model.settings.denomination.label(),
+                            },
+                        },
+                    },
+
+                    adw::PreferencesGroup {
+                        set_title: "This wallet",
+
+                        adw::ActionRow {
+                            set_title: "Chain",
+                            #[watch]
+                            set_subtitle: model.summary.as_ref()
+                                .map_or("—", |s| s.network.as_str()),
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Derivation paths watched",
+                            #[watch]
+                            set_subtitle: &model.paths_watched(),
+                            set_subtitle_lines: 2,
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Switch wallet",
+                            set_subtitle: "Open a different wallet, or make another",
+                            set_activatable: true,
+                            connect_activated => WalletPageMsg::SwitchWallet,
+
+                            add_suffix = &gtk::Image {
+                                set_icon_name: Some("go-next-symbolic"),
+                            },
+                        },
+                    },
+                },
             },
 
-            // A bottom switcher works at any width and keeps the header free
-            // for the wallet's identity.
-            add_bottom_bar = &adw::ViewSwitcherBar {
-                set_stack: Some(&view_stack),
-                set_reveal: true,
+                // Revealed by the breakpoint below, when the header has no
+                // room for the switcher.
+                #[name(switcher_bar)]
+                add_bottom_bar = &adw::ViewSwitcherBar {},
             },
         }
     }
@@ -458,6 +535,30 @@ impl SimpleComponent for WalletPage {
         let paths_box = model.paths.widget();
         let path_model = model.path_model.clone();
         let widgets = view_output!();
+
+        // Both switchers are declared above the stack they drive, so the links
+        // are made once the whole tree exists.
+        widgets.view_switcher.set_stack(Some(&widgets.view_stack));
+        widgets.switcher_bar.set_stack(Some(&widgets.view_stack));
+
+        // The Adwaita pattern: switcher in the header while there is room,
+        // bottom bar once there is not. Below the threshold the header falls
+        // back to a plain title so the two never appear at once.
+        match adw::BreakpointCondition::parse("max-width: 550sp") {
+            Ok(condition) => {
+                let narrow_title = adw::WindowTitle::new("Sieve", "");
+                let breakpoint = adw::Breakpoint::new(condition);
+                breakpoint.add_setter(&widgets.switcher_bar, "reveal", Some(&true.to_value()));
+                breakpoint.add_setter(
+                    &widgets.header_bar,
+                    "title-widget",
+                    Some(&narrow_title.to_value()),
+                );
+                root.add_breakpoint(breakpoint);
+            }
+            Err(e) => tracing::warn!(%e, "could not parse the layout breakpoint"),
+        }
+
         ComponentParts { model, widgets }
     }
 
