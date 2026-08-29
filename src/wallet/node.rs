@@ -297,6 +297,114 @@ impl Session {
         Ok((address, summary))
     }
 
+    /// Build a transaction from one account, without signing it.
+    ///
+    /// Watch-only is enough for this: BDK needs public descriptors and UTXOs to
+    /// choose coins and lay out outputs, and nothing else until the moment of
+    /// signing. So the numbers can be shown, checked and abandoned without the
+    /// password ever being asked for.
+    pub async fn plan(&self, draft: &super::send::Draft) -> Result<super::send::Plan> {
+        use super::send::Sending;
+
+        let mut portfolio = self.portfolio.lock().await;
+        let account = portfolio
+            .accounts
+            .iter_mut()
+            .find(|a| a.script_type == draft.from)
+            .context("that derivation path is not part of this wallet")?;
+
+        let script = draft.to.script_pubkey();
+        let psbt = {
+            let mut builder = account.wallet.build_tx();
+            builder.fee_rate(draft.fee_rate);
+            match draft.amount {
+                Sending::Exact(amount) => {
+                    builder.add_recipient(script.clone(), amount);
+                }
+                // No change output, and the fee comes out of what is sent
+                // rather than being added to it.
+                Sending::Everything => {
+                    builder.drain_wallet();
+                    builder.drain_to(script.clone());
+                }
+            }
+            builder.finish().map_err(|e| anyhow!("{e}"))?
+        };
+
+        // Laying out change revealed an address on the internal keychain.
+        // Persist it: an unwatched change address is money the wallet cannot
+        // see afterwards.
+        account.persist()?;
+
+        let fee = psbt.fee().map_err(|e| anyhow!("could not work out the fee: {e}"))?;
+        let (spend, change) = super::send::split_outputs(&psbt, &script);
+
+        Ok(super::send::Plan {
+            psbt,
+            from: draft.from,
+            to: draft.to.to_string(),
+            spend,
+            fee,
+            change,
+        })
+    }
+
+    /// Sign a plan with the key from the vault and hand it to the network.
+    ///
+    /// The secret arrives already decrypted and leaves nothing behind: the
+    /// signing wallet exists for the length of this call.
+    ///
+    /// Broadcast first, then record locally. A transaction no peer accepted is
+    /// not a transaction, and showing it as pending would be a lie the wallet
+    /// then has to walk back.
+    pub async fn sign_and_send(
+        &self,
+        mut plan: super::send::Plan,
+        secret: &str,
+        bip39_passphrase: Option<&str>,
+    ) -> Result<(bdk_wallet::bitcoin::Txid, Summary)> {
+        let mut portfolio = self.portfolio.lock().await;
+        let account = portfolio
+            .accounts
+            .iter_mut()
+            .find(|a| a.script_type == plan.from)
+            .context("that derivation path is not part of this wallet")?;
+
+        let signing = super::send::signer(secret, plan.from, self.network, bip39_passphrase)?;
+        super::send::check_signer(&signing, account.descriptor_id())?;
+
+        if !super::send::sign(&signing, &mut plan.psbt)? {
+            anyhow::bail!(
+                "the transaction could not be completely signed with the key in this wallet"
+            );
+        }
+        drop(signing);
+
+        let tx = plan
+            .psbt
+            .extract_tx()
+            .map_err(|e| anyhow!("the signed transaction is not valid: {e}"))?;
+        let txid = tx.compute_txid();
+
+        // Broadcasting tells the peer it goes to that this transaction is
+        // probably ours — the one thing a filter-based wallet cannot hide by
+        // downloading more. It is inherent to sending, not to this design.
+        self.requester
+            .submit_package(tx.clone())
+            .await
+            .map_err(|e| anyhow!("no peer accepted the transaction: {e}"))?;
+
+        let seen = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        account.wallet.apply_unconfirmed_txs([(tx, seen)]);
+        account.persist()?;
+
+        let summary = Summary::from_portfolio(&mut portfolio)?;
+        Ok((txid, summary))
+    }
+
     /// Await the next progress event. `None` when the node has stopped.
     ///
     /// Silence is itself reportable: if nothing arrives for a while the caller

@@ -71,9 +71,19 @@ crosses a component boundary as a message.
 BIP-21 URIs, issued-address list with used/unused state.
 
 ### M4 — Send
-Address/amount validation, fee rate from `min_broadcast_feerate` and `average_fee_rate` (no fee
-API), watch-only PSBT construction, unlock only at signing, `adw::AlertDialog` confirmation,
-broadcast via `CbfClient::broadcast`, drain-wallet edge cases.
+- [x] Address and amount validation — wrong-network addresses get their own message, and
+      amounts are read with integer arithmetic in whichever unit is on display.
+- [x] Watch-only PSBT construction, so the form and the review cost nothing secret.
+- [x] Password only at signing, in an `adw::AlertDialog` that restates every number.
+- [x] Signing from the vault, checked against the account's descriptor first.
+- [x] Broadcast via `Requester::submit_package`, then recorded locally as unconfirmed.
+- [x] Drain the wallet ("Max"), where the fee comes out of the amount.
+- [ ] Fee suggestion from `average_fee_rate`. Costs a full block download, which is why it is
+      not simply on: the field is floored at what peers will relay and left to the person
+      sending. A light client has no mempool and there is no fee API to ask.
+- [ ] A BIP-39 passphrase at signing time, for wallets imported with one. Refused clearly for
+      now rather than silently failing to finalize.
+- [ ] Coin control and RBF.
 
 ### M5 — Transaction history
 `adw::ActionRow` list, detail page on an `adw::NavigationView`, confirmation depth, fee paid,

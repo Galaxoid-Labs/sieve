@@ -116,6 +116,32 @@ for most connections, so demanding the flag would remember almost nobody.
 So the list is "peers present through a working sync", not "peers known to serve filters".
 Do not describe it as the latter — the flags to prove that are usually absent.
 
+## Sending
+
+Building a transaction is watch-only work: BDK needs public descriptors and UTXOs to choose
+coins and lay out outputs. So the form, the fee and the review all happen without a password,
+and the password is asked for once — in the confirmation dialog — and buys exactly one
+signature. The signing wallet is derived from the vault in `wallet::send::signer`, used, and
+dropped; nothing holds a key between transactions.
+
+`check_signer` compares the derived external descriptor against the account's before signing.
+A BIP-39 passphrase used at import and not given at signing derives a valid, different, empty
+wallet rather than an error, and the symptom without that check is a transaction that
+silently fails to finalize. Passphrase entry at signing time is not built: such a wallet gets
+a clear refusal, not a broken send.
+
+One transaction spends from one derivation path, because each path is its own BDK wallet with
+its own UTXOs. When more than one path holds coins, the form asks which.
+
+Broadcast comes before recording locally — a transaction no peer accepted is not a
+transaction — and then the tx is applied to the wallet as unconfirmed so it appears in
+Activity immediately. Note that broadcasting tells the receiving peer this transaction is
+probably ours. That is inherent to sending, and the one thing filters cannot hide.
+
+There is no fee oracle: a filter client has no mempool. The fee field is sat/vB, floored at
+what the connected peers say they will relay (`broadcast_min_feerate`). kyoto also offers
+`average_fee_rate(block)`, which costs a full block download; not used yet.
+
 ## Receiving
 
 `next_unused_address` never returns a *used* address, but it returns the same unused one
@@ -185,9 +211,9 @@ factories, Adwaita patterns). Consult it rather than guessing at macro syntax.
 
 ## Not yet built
 
-The signer worker, the primary menu, and a BIP-39 passphrase option when creating a wallet
-(import has one; creation passes `None`).
-Nothing signs yet, and the balance never changes because there is no chain sync.
+The primary menu, and a BIP-39 passphrase option when creating a wallet (import has one;
+creation passes `None`) or when signing with a wallet that was imported with one.
+
 
 The full milestone plan (M0–M8, with the decisions that gate M1 and the mainnet gate at M8) is in
 `ROADMAP.md`.

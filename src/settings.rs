@@ -58,6 +58,69 @@ impl Denomination {
             }
         }
     }
+    /// Read an amount typed by a person, in whichever unit is on display.
+    ///
+    /// Integer arithmetic throughout. A float would be the obvious way to read
+    /// "0.1" and the wrong one: 0.1 is not representable in binary, and a
+    /// satoshi lost to rounding here is money.
+    ///
+    /// The error is the message shown, so it says what to do rather than what
+    /// went wrong internally.
+    pub fn parse(self, text: &str) -> Result<u64, String> {
+        // Typed amounts get read back from a display that groups digits, so
+        // separators are accepted rather than treated as an error.
+        let cleaned: String =
+            text.chars().filter(|c| !matches!(c, ',' | ' ' | '_' | '\'')).collect();
+        let cleaned = cleaned.trim();
+
+        if cleaned.is_empty() {
+            return Err("Enter an amount".into());
+        }
+        if cleaned.starts_with('-') {
+            return Err("An amount cannot be negative".into());
+        }
+
+        let sats = match self {
+            Denomination::Sats => {
+                if cleaned.contains('.') {
+                    return Err("Satoshis are whole numbers".into());
+                }
+                cleaned.parse::<u64>().map_err(|_| "That is not a number".to_string())?
+            }
+            Denomination::Btc => {
+                let (whole, fraction) = match cleaned.split_once('.') {
+                    Some((w, f)) => (w, f),
+                    None => (cleaned, ""),
+                };
+                if fraction.len() > 8 {
+                    return Err("A bitcoin divides into 100,000,000 satoshis, no further".into());
+                }
+                if !fraction.chars().all(|c| c.is_ascii_digit())
+                    || !(whole.is_empty() || whole.chars().all(|c| c.is_ascii_digit()))
+                {
+                    return Err("That is not a number".into());
+                }
+                let whole: u64 = if whole.is_empty() {
+                    0
+                } else {
+                    whole.parse().map_err(|_| "That is not a number".to_string())?
+                };
+                // Pad rather than scale: "0.1" is 10,000,000 satoshis, not 1.
+                let padded = format!("{fraction:0<8}");
+                let fraction: u64 =
+                    padded.parse().map_err(|_| "That is not a number".to_string())?;
+                whole
+                    .checked_mul(100_000_000)
+                    .and_then(|w| w.checked_add(fraction))
+                    .ok_or("That is more bitcoin than exists")?
+            }
+        };
+
+        if sats > 2_100_000_000_000_000 {
+            return Err("That is more bitcoin than exists".into());
+        }
+        Ok(sats)
+    }
 }
 
 /// Digit grouping, so six-figure amounts stay readable.
@@ -141,6 +204,44 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn btc_amounts_are_read_without_floating_point() {
+        for (text, sats) in [
+            ("0.1", 10_000_000u64),
+            ("1", 100_000_000),
+            (".00000001", 1),
+            ("0.00000001", 1),
+            ("1.23456789", 123_456_789),
+            ("21,000,000", 2_100_000_000_000_000),
+        ] {
+            assert_eq!(Denomination::Btc.parse(text), Ok(sats), "{text}");
+        }
+    }
+
+    #[test]
+    fn what_is_shown_can_be_read_back() {
+        for sats in [1u64, 999, 100_000_000, 123_456_789, 2_100_000_000_000_000] {
+            for unit in [Denomination::Btc, Denomination::Sats] {
+                let shown = unit.format(sats, "bitcoin");
+                let (amount, _) = shown.rsplit_once(' ').unwrap();
+                assert_eq!(unit.parse(amount), Ok(sats), "{shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn nonsense_amounts_are_refused() {
+        assert!(Denomination::Sats.parse("0.5").is_err());
+        assert!(Denomination::Btc.parse("0.000000001").is_err());
+        assert!(Denomination::Btc.parse("-1").is_err());
+        assert!(Denomination::Btc.parse("").is_err());
+        assert!(Denomination::Btc.parse("lots").is_err());
+        assert!(Denomination::Btc.parse("21000001").is_err());
+        assert!(Denomination::Sats.parse("2100000000000001").is_err());
+    }
+
     use super::*;
 
     #[test]

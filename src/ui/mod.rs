@@ -7,6 +7,7 @@ pub mod chooser;
 pub mod onboarding;
 pub mod qr;
 pub mod restore;
+pub mod send;
 pub mod reveal;
 pub mod unlock;
 pub mod wallet_page;

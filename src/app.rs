@@ -116,6 +116,14 @@ pub enum AppMsg {
     Ready { paths: Paths, summary: Summary },
     /// Reveal a fresh receive address on one derivation path.
     RevealAddress(crate::wallet::accounts::ScriptType),
+    /// Build a transaction and hand back what it would cost. Watch-only: no
+    /// password is involved until there is something to sign.
+    PlanSend(Box<crate::wallet::send::Draft>),
+    /// Sign the reviewed transaction and broadcast it.
+    SendNow {
+        plan: Box<crate::wallet::send::Plan>,
+        password: crate::ui::send::Password,
+    },
     /// The desktop switched between light and dark.
     ///
     /// Stock Adwaita widgets and style classes recolour themselves, so nothing
@@ -134,6 +142,8 @@ pub enum AppCmd {
     Warning(Option<Notice>),
     Revealed(Result<(String, Summary), String>),
     Chain(Result<crate::wallet::node::ChainInfo, String>),
+    Planned(Result<crate::wallet::send::Plan, String>),
+    Sent(Result<(String, Summary), String>),
     Tick,
     Priced(Result<crate::price::Price, String>),
 }
@@ -217,6 +227,12 @@ impl Component for App {
                 crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
                 crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                     AppMsg::RevealAddress(script_type)
+                }
+                crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
+                    AppMsg::PlanSend(draft)
+                }
+                crate::ui::wallet_page::WalletPageOutput::Send { plan, password } => {
+                    AppMsg::SendNow { plan, password }
                 }
             },
         );
@@ -572,6 +588,62 @@ impl Component for App {
                 });
             }
 
+            AppMsg::PlanSend(draft) => {
+                let Some(session) = self.session.clone() else {
+                    self.wallet.emit(WalletPageMsg::Planned(Box::new(Err(
+                        "Not connected to the network yet — wait for peers".into(),
+                    ))));
+                    return;
+                };
+                sender.oneshot_command(async move {
+                    AppCmd::Planned(session.plan(&draft).await.map_err(|e| e.to_string()))
+                });
+            }
+
+            AppMsg::SendNow { plan, password } => {
+                let (Some(session), Some(paths)) = (self.session.clone(), self.active.clone())
+                else {
+                    self.wallet.emit(WalletPageMsg::Sent(Box::new(Err(
+                        "Not connected to the network yet — wait for peers".into(),
+                    ))));
+                    return;
+                };
+
+                sender.oneshot_command(async move {
+                    // Argon2 would hold a runtime worker for the best part of a
+                    // second, so the unwrapping happens on the blocking pool.
+                    let opened = tokio::task::spawn_blocking(move || {
+                        let blob = std::fs::read(&paths.vault)
+                            .map_err(|e| format!("Cannot read the wallet file: {e}"))?;
+                        crate::vault::open(&blob, password.0.as_bytes())
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+
+                    let secret = match opened {
+                        Ok(Ok(secret)) => secret,
+                        Ok(Err(message)) => return AppCmd::Sent(Err(message)),
+                        Err(e) => return AppCmd::Sent(Err(format!("Signing failed: {e}"))),
+                    };
+                    let text = match std::str::from_utf8(&secret) {
+                        Ok(text) => text.to_string(),
+                        Err(_) => {
+                            return AppCmd::Sent(Err(
+                                "The wallet file is not readable text".into()
+                            ));
+                        }
+                    };
+
+                    AppCmd::Sent(
+                        session
+                            .sign_and_send(*plan, &text, None)
+                            .await
+                            .map(|(txid, summary)| (txid.to_string(), summary))
+                            .map_err(|e| e.to_string()),
+                    )
+                });
+            }
+
             AppMsg::ColorSchemeChanged(dark) => {
                 tracing::debug!(dark, "system color scheme changed");
             }
@@ -640,6 +712,19 @@ impl Component for App {
                 self.await_warning(&sender);
             }
             AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
+            AppCmd::Planned(result) => {
+                self.wallet.emit(WalletPageMsg::Planned(Box::new(result)));
+            }
+            AppCmd::Sent(Ok((txid, summary))) => {
+                // The wallet has already recorded it as pending, so the
+                // activity list shows the payment straight away rather than
+                // waiting for a block.
+                self.wallet.emit(WalletPageMsg::Show(summary));
+                self.wallet.emit(WalletPageMsg::Sent(Box::new(Ok(txid))));
+            }
+            AppCmd::Sent(Err(message)) => {
+                self.wallet.emit(WalletPageMsg::Sent(Box::new(Err(message))));
+            }
             AppCmd::Revealed(Ok((address, summary))) => {
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::ShowFreshAddress(address));

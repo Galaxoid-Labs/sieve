@@ -9,6 +9,8 @@ use crate::wallet::node::Progress;
 use crate::settings::{Denomination, Settings};
 use crate::wallet::accounts::ScriptType;
 use crate::wallet::Summary;
+use crate::ui::send::{Password, SendForm, SendMsg, SendOutput};
+use crate::wallet::send::{Draft, Plan};
 
 #[derive(Debug)]
 pub enum WalletPageOutput {
@@ -19,6 +21,10 @@ pub enum WalletPageOutput {
     Unlock,
     /// Reveal a new address on this path.
     NewAddress(crate::wallet::accounts::ScriptType),
+    /// Build a transaction, watch-only, and hand back what it would cost.
+    PlanSend(Box<Draft>),
+    /// Sign the reviewed transaction and broadcast it.
+    Send { plan: Box<Plan>, password: Password },
 }
 
 /// One connected peer.
@@ -276,6 +282,8 @@ pub struct WalletPage {
     /// The view stack, so locking can put it back on the one view that has
     /// something to say while locked.
     stack: Option<adw::ViewStack>,
+    /// The send form, which owns its own form/review/sent states.
+    send: Controller<SendForm>,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -300,6 +308,12 @@ pub enum WalletPageMsg {
     Toast(String),
     SetChain(Option<crate::wallet::node::ChainInfo>),
     RefreshChain,
+    /// From the send form, on its way to the app.
+    PlanSend(Box<Draft>),
+    SendNow { plan: Box<Plan>, password: Password },
+    /// From the app, on its way back to the send form.
+    Planned(Box<Result<Plan, String>>),
+    Sent(Box<Result<String, String>>),
     /// Choose which derivation path to receive on.
     SelectReceivePath(u32),
     SelectPath(crate::wallet::accounts::ScriptType),
@@ -949,14 +963,14 @@ impl Component for WalletPage {
                     },
                 },
 
+                // The send form is its own component: it has a state
+                // machine of its own — form, review, sent — and this file is
+                // long enough. Filled in below, so it keeps its place in the
+                // switcher between Receive and Network.
+                #[name(send_slot)]
                 add_titled_with_icon[Some("send"), "Send", "sieve-send-symbolic"] =
-                &adw::StatusPage {
-                    set_icon_name: Some("sieve-send-symbolic"),
-                    set_title: "Sending is not built yet",
-                    set_description: Some(
-                        "Sieve can watch this wallet but cannot spend from it. Nothing here \
-                         can move your coins."
-                    ),
+                &gtk::Box {
+                    set_orientation: gtk::Orientation::Vertical,
                 },
 
                 add_titled_with_icon[Some("network"), "Network", "network-wireless-symbolic"] =
@@ -1161,9 +1175,18 @@ impl Component for WalletPage {
                 TxRowOutput::Selected(txid) => WalletPageMsg::ShowTransaction(txid),
             },
         );
+        let send = SendForm::builder().launch(()).forward(
+            sender.input_sender(),
+            |out| match out {
+                SendOutput::Plan(draft) => WalletPageMsg::PlanSend(draft),
+                SendOutput::Send { plan, password } => WalletPageMsg::SendNow { plan, password },
+            },
+        );
+
         let mut model = WalletPage {
             settings: Settings::load(),
             stack: None,
+            send,
             locked: true,
             price: None,
             toaster: Toaster::default(),
@@ -1195,6 +1218,7 @@ impl Component for WalletPage {
         // Both switchers are declared above the stack they drive, so the links
         // are made once the whole tree exists.
         model.stack = Some(widgets.view_stack.clone());
+        widgets.send_slot.append(model.send.widget());
         widgets.view_switcher.set_stack(Some(&widgets.view_stack));
         widgets.switcher_bar.set_stack(Some(&widgets.view_stack));
 
@@ -1249,9 +1273,13 @@ impl Component for WalletPage {
                     }
                 }
                 drop(guard);
+                // What peers will relay is the floor under the fee field.
+                self.send
+                    .emit(SendMsg::SetMinFee(chain.as_ref().and_then(|c| c.min_relay_fee)));
                 self.chain = chain;
             }
             WalletPageMsg::SetPrice(price) => {
+                self.send.emit(SendMsg::SetPrice(price));
                 self.price = price;
                 if let Some(summary) = self.summary.clone() {
                     self.rebuild_transactions(&summary);
@@ -1259,6 +1287,7 @@ impl Component for WalletPage {
             }
             WalletPageMsg::SetDenomination(denomination) => {
                 self.settings.denomination = denomination;
+                self.send.emit(SendMsg::SetDenomination(denomination));
                 // The rows hold formatted text, so they are rebuilt.
                 if let Some(summary) = self.summary.clone() {
                         self.rebuild_transactions(&summary);
@@ -1281,6 +1310,8 @@ impl Component for WalletPage {
                 let _ = sender.output(WalletPageOutput::Unlock);
             }
             WalletPageMsg::Reset => {
+                // A half-filled payment belongs to the wallet being left.
+                self.send.emit(SendMsg::Reset);
                 self.summary = None;
                 self.progress = Progress::Connecting;
                 self.peers = None;
@@ -1307,7 +1338,24 @@ impl Component for WalletPage {
                 // when a sync lands.
                 self.sync_path_picker(&summary);
                 self.rebuild_transactions(&summary);
+                self.send.emit(SendMsg::Show(Box::new(summary.clone())));
                 self.summary = Some(summary);
+            }
+
+            WalletPageMsg::PlanSend(draft) => {
+                let _ = sender.output(WalletPageOutput::PlanSend(draft));
+            }
+            WalletPageMsg::SendNow { plan, password } => {
+                let _ = sender.output(WalletPageOutput::Send { plan, password });
+            }
+            WalletPageMsg::Planned(result) => self.send.emit(SendMsg::Planned(result)),
+            WalletPageMsg::Sent(result) => {
+                if let Ok(txid) = result.as_ref() {
+                    let short: String = txid.chars().take(12).collect();
+                    self.toaster
+                        .add_toast(adw::Toast::new(&format!("Payment sent — {short}…")));
+                }
+                self.send.emit(SendMsg::Sent(result));
             }
             WalletPageMsg::SetProgress(progress) => {
                 self.progress = progress;
