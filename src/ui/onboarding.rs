@@ -63,7 +63,7 @@ pub enum OnboardingMsg {
     /// Whether a wallet list sits behind this screen.
     CanCancel(bool),
     Back,
-    SetPassword(Secret, Secret),
+    SetPassword(Secret, Secret, String),
     PhraseWritten,
     Verify(Secret, Secret, Secret),
 }
@@ -94,6 +94,9 @@ pub struct Onboarding {
     /// Held only between generation and sealing.
     mnemonic: Option<Zeroizing<String>>,
     password: Option<Zeroizing<String>>,
+    /// What to call it. Optional — an unnamed wallet still gets a stable
+    /// fallback — but naming it here beats renaming it later.
+    name: Option<String>,
     /// 1-based word positions the user must type back.
     challenge: [usize; 3],
     error: Option<String>,
@@ -248,6 +251,11 @@ impl Component for Onboarding {
                             set_spacing: 12,
 
                             adw::PreferencesGroup {
+                                #[name(name_row)]
+                                adw::EntryRow {
+                                    set_title: "Wallet name (optional)",
+                                },
+
                                 #[name(pass_row)]
                                 adw::PasswordEntryRow {
                                     set_title: "Password",
@@ -263,10 +271,11 @@ impl Component for Onboarding {
                                 add_css_class: "pill",
                                 set_halign: gtk::Align::Center,
                                 set_label: "Continue",
-                                connect_clicked[sender, pass_row, confirm_row] => move |_| {
+                                connect_clicked[sender, pass_row, confirm_row, name_row] => move |_| {
                                     sender.input(OnboardingMsg::SetPassword(
                                         Secret(Zeroizing::new(pass_row.text().to_string())),
                                         Secret(Zeroizing::new(confirm_row.text().to_string())),
+                                        name_row.text().to_string(),
                                     ));
                                 },
                             },
@@ -399,6 +408,7 @@ impl Component for Onboarding {
             skip_welcome: false,
             mnemonic: None,
             password: None,
+            name: None,
             challenge: [1, 2, 3],
             error: None,
         };
@@ -429,7 +439,7 @@ impl Component for Onboarding {
                 }
             },
 
-            OnboardingMsg::SetPassword(pass, confirm) => {
+            OnboardingMsg::SetPassword(pass, confirm, name) => {
                 if pass.0.len() < 8 {
                     self.error = Some("Use at least 8 characters.".into());
                     return;
@@ -442,6 +452,8 @@ impl Component for Onboarding {
                     Ok(phrase) => {
                         self.mnemonic = Some(phrase);
                         self.password = Some(pass.0);
+                        let trimmed = name.trim();
+                        self.name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
                         self.challenge = pick_challenge();
                         self.step = Step::Phrase;
                     }
@@ -464,6 +476,7 @@ impl Component for Onboarding {
                     return;
                 }
 
+                let name = self.name.clone();
                 let (Some(mnemonic), Some(password)) =
                     (self.mnemonic.clone(), self.password.clone())
                 else {

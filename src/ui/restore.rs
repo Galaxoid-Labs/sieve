@@ -40,6 +40,7 @@ pub struct Submission {
     network_index: u32,
     birthday_index: u32,
     acknowledged: bool,
+    name: String,
 }
 
 #[derive(Debug)]
@@ -154,6 +155,16 @@ impl Component for Restore {
 
             #[wrap(Some)]
             set_content = &adw::PreferencesPage {
+
+                adw::PreferencesGroup {
+                    set_title: "Name",
+                    set_description: Some("Optional, and changeable later."),
+
+                    #[name(name_row)]
+                    adw::EntryRow {
+                        set_title: "Wallet name",
+                    },
+                },
 
                 adw::PreferencesGroup {
                     set_title: "What are you importing?",
@@ -294,7 +305,7 @@ impl Component for Restore {
                         connect_clicked[
                             sender, kind_row, credential_row, bip39_row, bip39_expander,
                             network_row, birthday_row, password_row, confirm_row,
-                            acknowledge_row
+                            acknowledge_row, name_row
                         ] => move |_| {
                             sender.input(RestoreMsg::Submit(Box::new(Submission {
                                 kind: KINDS[kind_row.selected() as usize],
@@ -315,6 +326,7 @@ impl Component for Restore {
                                 network_index: network_row.selected(),
                                 birthday_index: birthday_row.selected(),
                                 acknowledged: acknowledge_row.is_active(),
+                                name: name_row.text().to_string(),
                             })));
                         },
                     },
@@ -408,6 +420,8 @@ impl Component for Restore {
                 // A new wallet directory, so importing never disturbs an
                 // existing wallet.
                 let paths = Paths::for_wallet(&Paths::new_id());
+                let trimmed = submission.name.trim();
+                let name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
                 let created_paths = paths.clone();
                 let kind = submission.kind;
                 let credential = submission.credential.0.trim().to_owned();
@@ -428,7 +442,7 @@ impl Component for Restore {
                             &ScriptType::ALL,
                             ScriptType::NativeSegwit,
                             bip39.as_deref(),
-                            None,
+                            name.clone(),
                             // An imported wallet already has history, so the
                             // window has to be wide enough to find it.
                             crate::wallet::accounts::IMPORT_LOOKAHEAD,
@@ -442,7 +456,7 @@ impl Component for Restore {
                             birthday,
                             &ScriptType::ALL,
                             ScriptType::NativeSegwit,
-                            None,
+                            name.clone(),
                         ),
                         CredentialKind::Wif => wallet::import_wif(
                             &credential,
@@ -453,7 +467,7 @@ impl Component for Restore {
                             birthday,
                             &ScriptType::ALL,
                             ScriptType::NativeSegwit,
-                            None,
+                            name.clone(),
                         ),
                         CredentialKind::Descriptor => Err(anyhow::anyhow!(
                             "Descriptor import is not wired up yet."

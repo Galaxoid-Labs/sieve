@@ -365,12 +365,12 @@ impl Component for App {
             // visibly changes underneath a dialog that is still up.
             AppMsg::ShowOnboarding => {
                 self.close_prefs();
-                // Reached from the wallet list, where creating a wallet was
-                // already chosen — so start at the first question that has not
-                // been answered, and leave a way back out.
-                if self.active.is_some() {
-                    self.onboarding.emit(OnboardingMsg::EnteredByChoice);
-                }
+                // Always: this is only reachable from the wallet list, where
+                // creating a wallet was already chosen. Gating it on an active
+                // wallet was wrong — active is not set until a wallet unlocks,
+                // so opening preferences from a locked wallet fell back to the
+                // welcome screen.
+                self.onboarding.emit(OnboardingMsg::EnteredByChoice);
                 self.nav.push_by_tag("onboarding");
             }
             AppMsg::ShowRestore => {
