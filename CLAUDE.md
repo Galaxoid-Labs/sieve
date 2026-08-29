@@ -34,9 +34,21 @@ These are not preferences. Violating one is a bug, not a style difference.
    redacted `Debug` (see `ui::unlock::Passphrase`).
 3. **GTK objects are not `Send`.** Never move a widget into a command, worker, or thread. Commands
    return plain data; the component applies it on the main thread.
-4. **The wallet is watch-only by default.** `bdk_wallet::ChangeSet` persists only
-   `Descriptor<DescriptorPublicKey>`, so the SQLite store contains no private keys. Browsing
-   balances and building PSBTs must not require an unlock. Decrypt only to sign.
+4. **The wallet is watch-only by default, and the seed is decrypted only at the point of
+   use.** `bdk_wallet::ChangeSet` persists only `Descriptor<DescriptorPublicKey>`, so the
+   SQLite store contains no private keys. Browsing balances and building PSBTs must not
+   require an unlock.
+
+   Unlocking does *not* hold the seed open. `wallet::unlock` decrypts the vault only to prove
+   the password is right and to rebuild the descriptors if the databases are gone; the
+   plaintext is dropped inside that function, and `UnlockOutput::Unlocked` carries nothing but
+   `Paths` and a watch-only `Summary`. There is no field anywhere holding a decrypted seed for
+   the session, and adding one is a bug.
+
+   So every operation that genuinely needs key material asks for the password again and
+   decrypts for itself: revealing the phrase does, and signing will. The only exception is the
+   reveal screen holding the phrase in a `Zeroizing<String>` while it is on screen — which is
+   the operation — and it is cleared when preferences closes.
 5. **Light and dark follow the desktop, automatically.** `ColorScheme::Default` is supposed
    to follow the system on its own, but libadwaita's settings backend does not find the source
    in every session — on Hyprland the portal and gsettings both said `prefer-dark` and the app
@@ -173,9 +185,8 @@ factories, Adwaita patterns). Consult it rather than guessing at macro syntax.
 
 ## Not yet built
 
-The signer worker, the primary menu, a BIP-39 passphrase option when creating a wallet
-(import has one; creation passes `None`), and showing the recovery phrase again after
-creation for a later backup.
+The signer worker, the primary menu, and a BIP-39 passphrase option when creating a wallet
+(import has one; creation passes `None`).
 Nothing signs yet, and the balance never changes because there is no chain sync.
 
 The full milestone plan (M0–M8, with the decisions that gate M1 and the mainnet gate at M8) is in

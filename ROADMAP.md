@@ -45,14 +45,11 @@ as AAD), atomic writes, process hardening, six vault tests.
       wallet, and verification has to ask for the passphrase back as well — one written down
       wrong is indistinguishable from a correct one until the money is gone, since it derives
       a valid empty wallet rather than an error.
-- [ ] Show the recovery phrase again, for backing it up later. The phrase is displayed once
-      at creation and never again, which assumes the one moment someone is most likely to
-      put it off is the only moment they get. Needs: the wallet password before revealing
-      (the vault is the only place the phrase exists, and decrypting it is the point);
-      an explicit confirmation rather than a row that reveals on tap; the same word chips as
-      creation; and it must not be reachable while the wallet is locked. For a
-      descriptor-imported wallet there is no phrase to show, and it should say so rather
-      than appear broken.
+- [x] Show the recovery phrase again, for backing it up later — `ui/reveal.rs`, reached from
+      the Recovery phrase row in preferences. Asks for the password, because the vault is the
+      only place the phrase exists. The row is insensitive until the wallet is unlocked, and
+      the words are dropped when preferences closes. A wallet imported from a key shows that
+      key, with copy saying so, rather than appearing broken.
 - [ ] Descriptor / xpub watch-only import
 - [ ] Signer worker owning the decrypted descriptor, one message at a time
 
