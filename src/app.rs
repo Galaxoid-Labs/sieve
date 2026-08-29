@@ -13,7 +13,7 @@ use relm4::{adw, gtk};
 use crate::ui::onboarding::{Onboarding, OnboardingOutput};
 use crate::ui::unlock::{Unlock, UnlockOutput};
 use crate::ui::wallet_page::{WalletPage, WalletPageMsg};
-use crate::wallet::node::{Progress, Session};
+use crate::wallet::node::{Notice, Progress, Session};
 use crate::wallet::{Paths, Summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub enum AppCmd {
     Update(Result<Summary, String>),
     /// `None` means the node stopped.
     Progress(Option<Progress>),
-    Warning(Option<String>),
+    Warning(Option<Notice>),
 }
 
 #[relm4::component(pub)]
@@ -201,8 +201,14 @@ impl Component for App {
                 self.await_progress(&sender);
             }
             AppCmd::Progress(None) => tracing::warn!("the node stopped emitting progress"),
-            AppCmd::Warning(Some(note)) => {
-                self.wallet.emit(WalletPageMsg::Note(note));
+            AppCmd::Warning(Some(notice)) => {
+                match notice {
+                    Notice::Peers { connected, required } => {
+                        self.wallet.emit(WalletPageMsg::Peers { connected, required });
+                    }
+                    Notice::Problem(message) => self.wallet.emit(WalletPageMsg::Note(message)),
+                    Notice::Ignorable => {}
+                }
                 self.await_warning(&sender);
             }
             AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),

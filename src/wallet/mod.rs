@@ -118,7 +118,12 @@ pub(crate) fn restrict(path: &Path) -> Result<()> {
 /// What the UI needs to render an unlocked wallet.
 #[derive(Debug, Clone)]
 pub struct Summary {
+    /// Confirmed only. Compact block filters describe transactions in blocks,
+    /// so the mempool is invisible to this wallet by construction.
     pub balance_sats: u64,
+    pub pending_sats: u64,
+    /// Height the wallet has verified up to.
+    pub tip: u32,
     pub next_address: String,
 }
 
@@ -226,8 +231,11 @@ fn summarise(wallet: &mut PersistedWallet<Connection>, conn: &mut Connection) ->
         .persist(conn)
         .map_err(|e| anyhow!("could not persist the wallet: {e}"))?;
 
+    let balance = wallet.balance();
     Ok(Summary {
-        balance_sats: wallet.balance().total().to_sat(),
+        balance_sats: balance.confirmed.to_sat(),
+        pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
+        tip: wallet.latest_checkpoint().height(),
         next_address: address.address.to_string(),
     })
 }

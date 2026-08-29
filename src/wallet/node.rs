@@ -11,6 +11,7 @@
 //! `next_update` and `next_info` from relm4 commands.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -67,6 +68,18 @@ pub enum Progress {
     Waiting,
 }
 
+/// Something from the node worth putting in front of a person, as distinct
+/// from progress.
+#[derive(Debug, Clone)]
+pub enum Notice {
+    /// Routine connection bookkeeping — a count, not a problem.
+    Peers { connected: usize, required: usize },
+    /// Worth showing, and worth clearing once sync moves again.
+    Problem(String),
+    /// Chatter the user cannot act on.
+    Ignorable,
+}
+
 impl Progress {
     pub fn label(&self) -> String {
         match self {
@@ -100,6 +113,9 @@ pub struct Session {
     info: Arc<AsyncMutex<bdk_kyoto::Receiver<Info>>>,
     warnings: Arc<AsyncMutex<bdk_kyoto::UnboundedReceiver<bdk_kyoto::Warning>>>,
     requester: bdk_kyoto::Requester,
+    /// Once the first sync lands, silence from the node is normal rather than
+    /// a symptom, and must not be reported as waiting.
+    synced: Arc<AtomicBool>,
 }
 
 struct Inner {
@@ -132,9 +148,13 @@ impl Session {
                 Ok(hash) => {
                     tracing::info!(height = birthday.height, "scanning from the wallet birthday");
                     ScanType::Recovery {
+                        // A floor, not just the current index: recovery peeks
+                        // this many scripts when testing filters, and a fresh
+                        // wallet reporting 0 would check almost nothing.
                         used_script_index: wallet
                             .derivation_index(KeychainKind::External)
-                            .unwrap_or(0),
+                            .unwrap_or(0)
+                            .max(25),
                         checkpoint: HashCheckpoint::new(birthday.height, hash),
                     }
                 }
@@ -169,6 +189,7 @@ impl Session {
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
             warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
             requester: client.requester(),
+            synced: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -199,8 +220,13 @@ impl Session {
             .persist(conn)
             .map_err(|e| anyhow!("could not persist the wallet: {e}"))?;
 
+        self.synced.store(true, Ordering::Relaxed);
+
+        let balance = wallet.balance();
         Ok(Summary {
-            balance_sats: wallet.balance().total().to_sat(),
+            balance_sats: balance.confirmed.to_sat(),
+            pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
+            tip: wallet.latest_checkpoint().height(),
             next_address: address.address.to_string(),
         })
     }
@@ -215,7 +241,16 @@ impl Session {
         let event = match tokio::time::timeout(QUIET_BEFORE_WAITING, info.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => return None,
-            Err(_elapsed) => return Some(Progress::Waiting),
+            // Silence after the first sync is the normal resting state — the
+            // node is simply waiting for the next block. Reporting that as
+            // "waiting for peers" made a finished wallet look broken.
+            Err(_elapsed) => {
+                return Some(if self.synced.load(Ordering::Relaxed) {
+                    Progress::Synced
+                } else {
+                    Progress::Waiting
+                });
+            }
         };
         Some(match event {
             Info::SuccessfulHandshake => Progress::Connecting,
@@ -241,23 +276,36 @@ impl Session {
     ///
     /// Without this, a node that cannot find peers serving compact filters
     /// stalls in complete silence.
-    pub async fn next_warning(&self) -> Option<String> {
+    pub async fn next_warning(&self) -> Option<Notice> {
         let mut warnings = self.warnings.lock().await;
         let warning = warnings.recv().await?;
-        tracing::warn!(%warning, "node warning");
+        tracing::debug!(%warning, "node warning");
         Some(match warning {
-            bdk_kyoto::Warning::NeedConnections { .. } => {
-                "Looking for more peers…".into()
+            // A peer count is information, not an alarm. Dropping and
+            // re-establishing connections is ordinary behaviour on a network
+            // where most nodes do not serve filters.
+            bdk_kyoto::Warning::NeedConnections { connected, required } => {
+                Notice::Peers { connected, required }
             }
-            bdk_kyoto::Warning::CouldNotConnect => "A peer refused the connection".into(),
-            bdk_kyoto::Warning::PeerTimedOut => "A peer stopped responding".into(),
-            bdk_kyoto::Warning::NoCompactFilters => {
-                "Connected peers do not serve compact block filters. Looking for others…".into()
+            // Nothing a person can act on, and constant during normal peer
+            // churn. Showing these as a standing message trains people to
+            // ignore the row that will one day matter.
+            bdk_kyoto::Warning::CouldNotConnect
+            | bdk_kyoto::Warning::PeerTimedOut
+            | bdk_kyoto::Warning::NoCompactFilters
+            | bdk_kyoto::Warning::UnsolicitedMessage
+            | bdk_kyoto::Warning::EvaluatingFork => Notice::Ignorable,
+
+            bdk_kyoto::Warning::PotentialStaleTip => Notice::Problem(
+                "No new blocks for a while. The connection may be stale.".into(),
+            ),
+            bdk_kyoto::Warning::TransactionRejected { payload } => {
+                Notice::Problem(format!("A transaction was rejected by the network: {payload:?}"))
             }
-            bdk_kyoto::Warning::PotentialStaleTip => {
-                "No new blocks for a while — the connection may be stale".into()
+            bdk_kyoto::Warning::UnexpectedSyncError { warning } => {
+                Notice::Problem(format!("Sync error: {warning}"))
             }
-            other => format!("{other}"),
+            other => Notice::Problem(format!("{other}")),
         })
     }
 

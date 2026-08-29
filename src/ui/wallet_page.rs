@@ -10,6 +10,7 @@ use crate::wallet::{NETWORK, Summary};
 pub struct WalletPage {
     summary: Option<Summary>,
     progress: Progress,
+    peers: Option<(usize, usize)>,
     note: Option<String>,
     error: Option<String>,
 }
@@ -18,7 +19,8 @@ pub struct WalletPage {
 pub enum WalletPageMsg {
     Show(Summary),
     SetProgress(Progress),
-    /// A non-fatal report from the node — a slow peer, a peer without filters.
+    Peers { connected: usize, required: usize },
+    /// Something a person could actually act on. Routine peer churn is not this.
     Note(String),
     Failed(String),
     CopyAddress,
@@ -36,6 +38,27 @@ impl WalletPage {
         match &self.summary {
             Some(s) => s.next_address.clone(),
             None => "—".into(),
+        }
+    }
+
+    fn peers(&self) -> String {
+        match self.peers {
+            Some((connected, required)) => format!("{connected} of {required} connected"),
+            None => "Connecting…".into(),
+        }
+    }
+
+    fn pending(&self) -> String {
+        match &self.summary {
+            Some(s) if s.pending_sats > 0 => format!("{} sats", s.pending_sats),
+            _ => "None".into(),
+        }
+    }
+
+    fn verified_to(&self) -> String {
+        match &self.summary {
+            Some(s) if s.tip > 0 => format!("Block {}", s.tip),
+            _ => "—".into(),
         }
     }
 
@@ -69,6 +92,22 @@ impl SimpleComponent for WalletPage {
                         set_title: "Confirmed",
                         #[watch]
                         set_subtitle: &model.balance(),
+                    },
+
+                    adw::ActionRow {
+                        set_title: "Pending",
+                        // Compact block filters describe transactions in blocks,
+                        // so an unconfirmed payment is invisible until it is
+                        // mined. Saying so beats a balance that looks wrong.
+                        set_subtitle: "Unconfirmed payments appear once mined",
+                        #[watch]
+                        set_visible: model.summary.as_ref().is_some_and(|s| s.pending_sats > 0),
+
+                        add_suffix = &gtk::Label {
+                            add_css_class: "numeric",
+                            #[watch]
+                            set_label: &model.pending(),
+                        },
                     },
                 },
 
@@ -106,8 +145,20 @@ impl SimpleComponent for WalletPage {
                     },
 
                     adw::ActionRow {
-                        add_css_class: "dim-label",
-                        set_title: "Last report",
+                        set_title: "Peers",
+                        #[watch]
+                        set_subtitle: &model.peers(),
+                    },
+
+                    adw::ActionRow {
+                        set_title: "Verified to",
+                        #[watch]
+                        set_subtitle: &model.verified_to(),
+                    },
+
+                    adw::ActionRow {
+                        add_css_class: "warning",
+                        set_title: "Note",
                         #[watch]
                         set_visible: model.note.is_some(),
                         #[watch]
@@ -159,6 +210,7 @@ impl SimpleComponent for WalletPage {
         let model = WalletPage {
             summary: None,
             progress: Progress::Connecting,
+            peers: None,
             note: None,
             error: None,
         };
@@ -172,6 +224,9 @@ impl SimpleComponent for WalletPage {
             WalletPageMsg::SetProgress(progress) => {
                 self.progress = progress;
                 self.error = None;
+            }
+            WalletPageMsg::Peers { connected, required } => {
+                self.peers = Some((connected, required))
             }
             WalletPageMsg::Note(note) => self.note = Some(note),
             WalletPageMsg::Failed(message) => self.error = Some(message),
