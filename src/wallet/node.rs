@@ -537,9 +537,28 @@ impl Session {
                 .collect();
         }
 
-        if !info.peers.is_empty() {
-            let addresses: Vec<String> =
-                info.peers.iter().map(|p| p.address.clone()).collect();
+        // Only remember peers once a sync has actually landed. Before that the
+        // connected set includes peers the node is still evaluating and will
+        // drop for not serving filters, and seeding with those next time buys
+        // nothing.
+        //
+        // Prefer peers that positively advertise compact filters, but do not
+        // require it: kyoto reports no service flags for most connections, so
+        // demanding the flag would remember almost nobody. What is left is
+        // still peers that were present through a working sync.
+        if self.synced.load(Ordering::Relaxed) && !info.peers.is_empty() {
+            let confirmed: Vec<String> = info
+                .peers
+                .iter()
+                .filter(|p| p.serves_filters == Some(true))
+                .map(|p| p.address.clone())
+                .collect();
+
+            let addresses = if confirmed.is_empty() {
+                info.peers.iter().map(|p| p.address.clone()).collect()
+            } else {
+                confirmed
+            };
             crate::peers::remember(self.network, &addresses);
         }
 

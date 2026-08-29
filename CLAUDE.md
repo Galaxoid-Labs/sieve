@@ -85,6 +85,16 @@ What a restart actually costs is peer discovery: roughly a minute of DNS seeding
 and handshaking before anything syncs. If start-up feels slow, that is where the time is —
 not headers.
 
+## Remembered peers
+
+Recorded only once a sync has landed, because before that the connected set includes peers
+the node is still evaluating and will drop for not serving filters. Peers that positively
+advertise `COMPACT_FILTERS` are preferred, but not required: kyoto reports no service flags
+for most connections, so demanding the flag would remember almost nobody.
+
+So the list is "peers present through a working sync", not "peers known to serve filters".
+Do not describe it as the latter — the flags to prove that are usually absent.
+
 ## Receiving
 
 `next_unused_address` never returns a *used* address, but it returns the same unused one
