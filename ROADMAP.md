@@ -39,6 +39,20 @@ as AAD), atomic writes, process hardening, six vault tests.
 - [x] Optional BIP-39 passphrase on restore, kept distinct from the wallet password
 - [x] All four standard derivation paths searched on import, with a per-path breakdown
 - [x] Mainnet selectable on import behind an explicit unreviewed-software acknowledgement
+- [ ] Offer a BIP-39 passphrase when *creating* a wallet, not only when importing one.
+      Creation passes `None`, so a wallet made here can never have one. Two things must be
+      right first: the phrase step has to say the words alone will no longer restore the
+      wallet, and verification has to ask for the passphrase back as well — one written down
+      wrong is indistinguishable from a correct one until the money is gone, since it derives
+      a valid empty wallet rather than an error.
+- [ ] Show the recovery phrase again, for backing it up later. The phrase is displayed once
+      at creation and never again, which assumes the one moment someone is most likely to
+      put it off is the only moment they get. Needs: the wallet password before revealing
+      (the vault is the only place the phrase exists, and decrypting it is the point);
+      an explicit confirmation rather than a row that reveals on tap; the same word chips as
+      creation; and it must not be reachable while the wallet is locked. For a
+      descriptor-imported wallet there is no phrase to show, and it should say so rather
+      than appear broken.
 - [ ] Descriptor / xpub watch-only import
 - [ ] Signer worker owning the decrypted descriptor, one message at a time
 

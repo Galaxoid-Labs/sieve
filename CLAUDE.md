@@ -173,7 +173,9 @@ factories, Adwaita patterns). Consult it rather than guessing at macro syntax.
 
 ## Not yet built
 
-Restore-from-phrase, the signer worker, the `bdk_kyoto` node wiring, and the primary menu.
+The signer worker, the primary menu, a BIP-39 passphrase option when creating a wallet
+(import has one; creation passes `None`), and showing the recovery phrase again after
+creation for a later backup.
 Nothing signs yet, and the balance never changes because there is no chain sync.
 
 The full milestone plan (M0–M8, with the decisions that gate M1 and the mainnet gate at M8) is in
