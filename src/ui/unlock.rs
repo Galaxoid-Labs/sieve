@@ -72,19 +72,31 @@ impl Component for Unlock {
                 },
             },
 
+            // Not a StatusPage: its icon and padding are sized for a whole
+            // screen, and inside a dialog they push the button out of view.
             #[wrap(Some)]
-            set_content = &adw::StatusPage {
-            set_icon_name: Some("channel-secure-symbolic"),
-            set_title: "Sieve",
-            set_description: Some("Enter your password to unlock this wallet."),
-
-            #[wrap(Some)]
-            set_child = &adw::Clamp {
+            set_content = &adw::Clamp {
                 set_maximum_size: 360,
 
                 gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
                     set_spacing: 12,
+                    set_margin_all: 18,
+                    set_valign: gtk::Align::Center,
+
+                    gtk::Image {
+                        set_icon_name: Some("channel-secure-symbolic"),
+                        set_pixel_size: 48,
+                        set_margin_bottom: 6,
+                    },
+
+                    gtk::Label {
+                        add_css_class: "dim-label",
+                        set_wrap: true,
+                        set_justify: gtk::Justification::Center,
+                        set_margin_bottom: 6,
+                        set_label: "Enter your password to unlock this wallet.",
+                    },
 
                     adw::PreferencesGroup {
                         #[name(password_row)]
@@ -125,7 +137,6 @@ impl Component for Unlock {
                         set_label: model.error.as_deref().unwrap_or_default(),
                     },
                 },
-            },
             },
         }
     }

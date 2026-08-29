@@ -108,8 +108,9 @@ impl Component for App {
         let nav = adw::NavigationView::new();
         let unlock_dialog = adw::Dialog::new();
         unlock_dialog.set_title("Unlock");
-        unlock_dialog.set_content_width(420);
-        unlock_dialog.set_content_height(460);
+        unlock_dialog.set_content_width(400);
+        // No fixed height: the dialog sizes to its content, so the button can
+        // never end up below the fold.
 
         let chooser = Chooser::builder().launch(()).forward(
             sender.input_sender(),
