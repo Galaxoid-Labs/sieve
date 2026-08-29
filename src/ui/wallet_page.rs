@@ -221,19 +221,34 @@ impl SimpleComponent for WalletPage {
             set_child = &adw::ToolbarView {
                 #[name(header_bar)]
                 add_top_bar = &adw::HeaderBar {
-                // Wide windows carry the switcher in the header. The
-                // breakpoint below swaps in a plain title and reveals the
-                // bottom bar when the window is too narrow for it.
+                // The window keeps its title. The switcher gets its own row
+                // below, rather than displacing the thing that says which
+                // wallet you are looking at.
                 #[wrap(Some)]
-                #[name(view_switcher)]
-                set_title_widget = &adw::ViewSwitcher {
-                    set_policy: adw::ViewSwitcherPolicy::Wide,
+                set_title_widget = &adw::WindowTitle {
+                    set_title: "Sieve",
+                    #[watch]
+                    set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
                 },
 
                 pack_end = &gtk::Button {
                     set_icon_name: "view-list-symbolic",
                     set_tooltip_text: Some("Switch wallet"),
                     connect_clicked => WalletPageMsg::SwitchWallet,
+                },
+            },
+
+            // Centred in a toolbar row of its own, directly under the header.
+            // Hidden by the breakpoint when the bottom bar takes over.
+            #[name(switcher_row)]
+            add_top_bar = &gtk::Box {
+                add_css_class: "toolbar",
+
+                #[name(view_switcher)]
+                adw::ViewSwitcher {
+                    set_policy: adw::ViewSwitcherPolicy::Wide,
+                    set_halign: gtk::Align::Center,
+                    set_hexpand: true,
                 },
             },
 
@@ -541,19 +556,13 @@ impl SimpleComponent for WalletPage {
         widgets.view_switcher.set_stack(Some(&widgets.view_stack));
         widgets.switcher_bar.set_stack(Some(&widgets.view_stack));
 
-        // The Adwaita pattern: switcher in the header while there is room,
-        // bottom bar once there is not. Below the threshold the header falls
-        // back to a plain title so the two never appear at once.
+        // Switcher row under the header while there is room for it, bottom bar
+        // once there is not, never both. The title stays put either way.
         match adw::BreakpointCondition::parse("max-width: 550sp") {
             Ok(condition) => {
-                let narrow_title = adw::WindowTitle::new("Sieve", "");
                 let breakpoint = adw::Breakpoint::new(condition);
+                breakpoint.add_setter(&widgets.switcher_row, "visible", Some(&false.to_value()));
                 breakpoint.add_setter(&widgets.switcher_bar, "reveal", Some(&true.to_value()));
-                breakpoint.add_setter(
-                    &widgets.header_bar,
-                    "title-widget",
-                    Some(&narrow_title.to_value()),
-                );
                 root.add_breakpoint(breakpoint);
             }
             Err(e) => tracing::warn!(%e, "could not parse the layout breakpoint"),
