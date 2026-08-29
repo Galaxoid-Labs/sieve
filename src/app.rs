@@ -94,9 +94,9 @@ impl Component for App {
     view! {
         adw::ApplicationWindow {
             set_title: Some("Sieve"),
-            // Wide enough for the view switcher to sit in the header without
-            // crowding, and tall enough for a preferences page.
-            set_default_size: (640, 720),
+            // Wide enough to start on the header switcher and give the
+            // activity list room, tall enough for a preferences page.
+            set_default_size: (820, 760),
 
             #[wrap(Some)]
             #[name(stack)]

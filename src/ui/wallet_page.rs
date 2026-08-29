@@ -381,7 +381,13 @@ impl Component for WalletPage {
                     set_vexpand: true,
 
                     adw::Clamp {
-                        set_maximum_size: 500,
+                        // Wider than Adwaita's 600 default: a transaction row
+                        // is a wide thing — direction, description and amount
+                        // across one line — and the balance above it wants
+                        // room to breathe. Still clamped, so the list does not
+                        // stretch to absurd line lengths on a large monitor.
+                        set_maximum_size: 900,
+                        set_tightening_threshold: 600,
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
