@@ -265,6 +265,20 @@ impl Component for SendForm {
                                 set_title: &format!("Amount in {}", model.unit()),
                                 #[watch]
                                 set_sensitive: !model.busy,
+                                // Digits on a touch keyboard, rather than the
+                                // full alphabet for a field that only takes
+                                // numbers.
+                                set_input_purpose: gtk::InputPurpose::Number,
+
+                                // A field that only holds numbers should only
+                                // take numbers. Refused at the keystroke rather
+                                // than explained afterwards: an amount that
+                                // cannot be typed cannot be misread.
+                                connect_insert_text => move |row, text, _position| {
+                                    if !text.chars().all(is_amount_character) {
+                                        row.stop_signal_emission_by_name("insert-text");
+                                    }
+                                },
 
                                 // Typing an amount is a way of saying "not
                                 // everything", so the field stays editable and
@@ -589,6 +603,16 @@ impl SendForm {
     }
 }
 
+/// What may be typed into an amount.
+///
+/// Digits and a decimal point, plus the separators a grouped number is shown
+/// with — an amount is often read off the screen above and typed back in, and
+/// `Denomination::parse` accepts those. A stray decimal point in satoshis is
+/// left to the parser, which says why rather than swallowing the keystroke.
+fn is_amount_character(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, '.' | ',' | ' ' | '_' | '\'')
+}
+
 /// Errors read better as sentences when they start like one.
 fn capitalise(message: &str) -> String {
     let mut chars = message.chars();
@@ -601,6 +625,14 @@ fn capitalise(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::capitalise;
+
+    #[test]
+    fn amounts_take_digits_and_separators_only() {
+        assert!("1,234.5678".chars().all(super::is_amount_character));
+        for rejected in ['a', 'B', '-', '+', '/', 'e'] {
+            assert!(!super::is_amount_character(rejected), "{rejected}");
+        }
+    }
 
     #[test]
     fn messages_start_like_sentences() {
