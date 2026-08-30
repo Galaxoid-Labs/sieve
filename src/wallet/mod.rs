@@ -27,7 +27,6 @@ use zeroize::Zeroizing;
 
 pub mod accounts;
 pub mod send;
-pub mod headers;
 pub mod watch;
 pub mod node;
 
@@ -364,6 +363,15 @@ pub struct Meta {
     /// missing money.
     #[serde(default)]
     pub scanned_to: Option<u32>,
+    /// The hash of the block at `scanned_to`.
+    ///
+    /// A resume point is a height *and* a hash — the node will not take one
+    /// without the other. Stored here, beside the height it belongs to, rather
+    /// than looked up in a copy of the chain: one header is what this needs,
+    /// and keeping the other nine hundred thousand cost far more than it ever
+    /// returned.
+    #[serde(default)]
+    pub scanned_hash: Option<String>,
     /// No keys here: the descriptors are public and there is no vault.
     ///
     /// Such a wallet opens without a password — there is nothing to decrypt —
@@ -403,6 +411,7 @@ impl Meta {
             script_types,
             primary,
             scanned_to: None,
+            scanned_hash: None,
             watch_only: false,
         }
     }
@@ -411,12 +420,13 @@ impl Meta {
     ///
     /// Never backwards: a fresh scan of a wallet that has already been scanned
     /// starts where it left off, and a lower figure would throw that away.
-    pub fn record_scanned_to(paths: &Paths, height: u32) {
+    pub fn record_scanned_to(paths: &Paths, height: u32, hash: &str) {
         let Some(mut meta) = Self::load(paths) else { return };
         if meta.scanned_to.is_some_and(|already| already >= height) {
             return;
         }
         meta.scanned_to = Some(height);
+        meta.scanned_hash = Some(hash.to_owned());
         if let Err(e) = meta.save(paths) {
             tracing::debug!(%e, "could not record scan progress");
         }
@@ -462,6 +472,7 @@ impl Meta {
             script_types: default_script_types(),
             primary: default_primary(),
             scanned_to: None,
+            scanned_hash: None,
             // That format predates watch-only wallets, so it can only be one
             // with a vault.
             watch_only: false,

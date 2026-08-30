@@ -209,55 +209,35 @@ wallet was opened, so it is off by default, stated plainly in its preference row
 made on a test network. If any other outbound call is ever added, it gets the same treatment:
 opt-in, disclosed, and justified in the row that enables it.
 
-## Shared block headers, per network
+## Where a restart begins
 
-`wallet::headers` is the persistence kyoto does not do. Headers are public chain data and
-identical for every wallet on a network, so the file is per network — `chain/<network>/headers.dat`,
-eighty bytes each — and one download serves every wallet on that chain *and* every later start.
+| Wallet state | Node starts at |
+|---|---|
+| Scan completed | A few blocks below the tip — BDK's checkpoint is at the tip, so `ScanType::Sync` and `walk_back_max_reorg` |
+| Scan interrupted | `Meta::scanned_to`, the recorded resume point |
+| Never scanned | The birthday |
 
-**The node cannot be given these headers, and that is the library's decision, not an oversight.**
-`bdk_kyoto::build_with_wallets` sets `self.chain_state(ChainState::Checkpoint(cp_min))` one line
-before it builds, so any snapshot handed to the builder is discarded. Nine hundred thousand
-validated headers were loaded and thrown away on every start until that line was found. Do not
-re-add a `ChainState::Snapshot` call: it will look right, log nothing, and do nothing.
+The middle row is the one that needed building. `bdk_kyoto` matches each filter as it arrives but
+only produces a wallet update on `Event::FiltersSynced` — the end of the *whole* sync — so BDK's
+checkpoint never moves mid-scan and an hour of scanning used to leave no trace at all.
 
-**So the store earns its keep as a source of block hashes.** `cp_min` comes from the
-`ScanType::Recovery { checkpoint }` we pass, so moving that checkpoint forward is the one lever
-the API offers — and a checkpoint needs the block hash at its height, which only the stored chain
-has. Headers, resume points and interrupted scans are therefore one feature, not three.
+`Meta::scanned_to` and `scanned_hash` are that trace: a checkpoint is a height *and* a hash, and
+the node will not take one half. The height is derived from kyoto's progress fraction, which is a
+float rather than a height, and then pulled back by `SCAN_MARGIN` (2,016 blocks) — a resume point
+past where the scan truly reached would skip blocks, and skipped blocks are missing money.
+Rescanning a difficulty period costs seconds.
 
-**What it is trusted for, and how that trust is bounded.** The file becomes the node's idea of
-the chain, so it is anchored: the first header must hash to a checkpoint compiled into this
-binary, and every header after it must name its predecessor. A file failing either test is
-ignored rather than repaired or partly used. kyoto validates again on its own account
-(`BlockTree::accept_header`), but a wallet should not hand its node a chain it has not checked
-itself.
+**Do not try to hand the node a stored header chain.** `bdk_kyoto::build_with_wallets` sets
+`self.chain_state(ChainState::Checkpoint(cp_min))` one line before it builds, so any snapshot is
+discarded — silently, which is how a store that wrote, merged, validated and loaded 900,000
+headers came to do nothing at all for a whole evening. That store has been removed: it was
+consulted for exactly one block hash, which now lives in the wallet's metadata beside the height
+it pins. Moving the recovery checkpoint is the only lever this API offers.
 
-**And the range must cover what the wallet needs.** A snapshot starting *after* a wallet's
-birthday would have it scan from the wrong place and show a balance missing everything before —
-so `Session::start` uses stored headers only when they reach back to the birthday, and fetches
-from the network otherwise. That is the quiet failure this whole feature could have introduced.
-
-Written once per session, after a sync lands, by walking `get_header` from the birthday to the
-tip — a local read of the node's own memory, not the network, but a quarter of a million of them
-is still work, so never while a sync is in progress.
-
-## Interrupted scans resume
-
-`bdk_kyoto` matches each filter as it arrives but only produces a wallet update on
-`Event::FiltersSynced` — the end of the *whole* filter sync. So BDK's checkpoint never advances
-mid-scan, and a recovery scan killed after an hour leaves no trace: the next start begins at the
-birthday again. A completed scan is fine forever after (the checkpoint reaches the tip and later
-starts use `ScanType::Sync`); it is interruption that costs everything.
-
-`Meta::scanned_to` is the trace. It is derived from kyoto's progress fraction — which is a float,
-not a height — and then pulled back by `SCAN_MARGIN` (2,016 blocks), because a resume point past
-where the scan truly reached skips blocks, and skipped blocks are missing money. Rescanning a
-difficulty period costs seconds.
-
-Resuming also needs the *hash* at that height, and the only local source is the stored header
-chain, so no headers means no resume. That is the safe direction: starting again costs time,
-starting too late costs coins.
+Reusing headers across wallets on a network would mean building through `Builder::build()` and
+reimplementing the glue that turns filters into wallet updates — the part that decides which
+blocks get fetched. It would save the header walk, which is ~77 MB and thirteen minutes, against
+filters at 3–4 GB and hours. The expensive phase is the one resume already protects.
 
 ## Known upstream gap: kyoto ignores `data_dir`
 

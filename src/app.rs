@@ -56,13 +56,8 @@ pub struct App {
     /// round trips through circuits. Without this, a signet chain, a signet
     /// peer list, or worse a signet *balance* lands on a mainnet wallet.
     generation: u64,
-    /// Whether this session has already written its headers out. Once is
-    /// enough: it walks the whole chain the node holds.
-    headers_stored: bool,
     /// When scan progress was last written down.
     scan_recorded: Option<std::time::Instant>,
-    /// When headers were last banked during the walk.
-    headers_banked: Option<std::time::Instant>,
     /// The last locally computed fee estimate: height, sat/vB, and where it
     /// came from. Kept so switching to Send twice does not download the same
     /// block twice.
@@ -111,9 +106,6 @@ pub struct App {
 /// in the theme ships silently. Add to this list when adding an icon.
 /// How often the peer list may be re-read while connections are churning.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
-/// How often to bank headers while they are still coming in.
-const HEADER_BANK: std::time::Duration = std::time::Duration::from_secs(45);
-
 /// How far behind the estimated scan position to record a resume point.
 ///
 /// Two thousand blocks — a difficulty period. The position is derived from a
@@ -440,9 +432,7 @@ impl Component for App {
             active: None,
             balance_sats: None,
             generation: 0,
-            headers_stored: false,
             scan_recorded: None,
-            headers_banked: None,
             fee_estimate: None,
             chain_tip: None,
             peers_read: None,
@@ -1079,9 +1069,6 @@ impl Component for App {
             }
             AppCmd::Update { generation, result: Ok(summary) } if self.current(generation) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
-                // Also here, for a wallet that was already up to date and
-                // never passed through a scan.
-                self.store_headers(&sender);
                 self.balance_sats = Some(summary.balance_sats);
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
@@ -1110,14 +1097,7 @@ impl Component for App {
                 // whole-chain wallet, and a restart inside that window used to
                 // lose every one of them — which is the window anybody
                 // watching a slow wallet actually restarts in.
-                match progress {
-                    Progress::Headers(_) => self.store_headers_periodically(&sender),
-                    Progress::Scanning(_) | Progress::Synced => {
-                        self.store_headers(&sender);
-                        self.record_scan_progress(&progress);
-                    }
-                    _ => {}
-                }
+                self.record_scan_progress(&progress, &sender);
                 self.wallet.emit(WalletPageMsg::SetProgress(progress));
                 self.await_progress(&sender);
             }
@@ -1382,13 +1362,13 @@ impl App {
     /// and a resume point past where the scan actually reached would skip
     /// blocks — which is missing money, not lost time. So the figure is
     /// derived from the fraction and then pulled back by a wide margin.
-    fn record_scan_progress(&mut self, progress: &Progress) {
+    fn record_scan_progress(&mut self, progress: &Progress, sender: &ComponentSender<Self>) {
         // A finished scan is exact: everything up to the tip has been checked,
         // so there is no estimate to be careful about.
         if matches!(progress, Progress::Synced)
             && let (Some(paths), Some(tip)) = (self.active.clone(), self.chain_tip)
         {
-            wallet::Meta::record_scanned_to(&paths, tip);
+            self.pin_resume_point(paths, tip, sender);
             return;
         }
 
@@ -1424,54 +1404,25 @@ impl App {
             return;
         }
         self.scan_recorded = Some(std::time::Instant::now());
-        tracing::info!(height = safe, "recording how far the scan has checked");
-        wallet::Meta::record_scanned_to(&paths, safe);
+        self.pin_resume_point(paths, safe, sender);
     }
 
-    /// Bank the headers gathered so far, now and then, while they arrive.
+    /// Write down a resume point: a height, and the hash that pins it.
     ///
-    /// Each call takes only what is new, so this is cheap after the first.
-    fn store_headers_periodically(&mut self, sender: &ComponentSender<Self>) {
-        let due = self
-            .headers_banked
-            .map(|last| last.elapsed() >= HEADER_BANK)
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        self.headers_banked = Some(std::time::Instant::now());
-
-        let (Some(session), Some(from)) = (
-            self.session.clone(),
-            self.active.as_ref().and_then(wallet::Meta::load).map(|m| m.birthday_height),
-        ) else {
-            return;
-        };
+    /// The hash comes from the node's own memory. Without it the height is
+    /// useless — a checkpoint is both, and the node will not take one half.
+    fn pin_resume_point(
+        &self,
+        paths: Paths,
+        height: u32,
+        sender: &ComponentSender<Self>,
+    ) {
+        let Some(session) = self.session.clone() else { return };
         sender.oneshot_command(async move {
-            session.store_headers(from).await;
-            AppCmd::Tick
-        });
-    }
-
-    /// Write this network's block headers out, once per session.
-    ///
-    /// Headers are public chain data and the same for every wallet on a
-    /// network, so this is what stops the next wallet — and the next start —
-    /// walking the whole chain again.
-    fn store_headers(&mut self, sender: &ComponentSender<Self>) {
-        if self.headers_stored {
-            return;
-        }
-        let (Some(session), Some(from)) = (
-            self.session.clone(),
-            self.active.as_ref().and_then(wallet::Meta::load).map(|m| m.birthday_height),
-        ) else {
-            return;
-        };
-
-        self.headers_stored = true;
-        sender.oneshot_command(async move {
-            session.store_headers(from).await;
+            if let Some(hash) = session.header_hash(height).await {
+                tracing::info!(height, "recording how far the scan has checked");
+                wallet::Meta::record_scanned_to(&paths, height, &hash.to_string());
+            }
             AppCmd::Tick
         });
     }
@@ -1665,7 +1616,6 @@ impl App {
         // A new session, so anything still in flight for the last one is
         // from a wallet that is no longer on screen.
         self.generation += 1;
-        self.headers_stored = false;
         let generation = self.generation;
         let tor = self.tor_proxy();
         sender.oneshot_command(async move {
