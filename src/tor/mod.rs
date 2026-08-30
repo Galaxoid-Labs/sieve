@@ -226,13 +226,18 @@ pub fn seeds(network: &str) -> Vec<String> {
         _ => &[],
     };
 
-    // Every filter-serving request first, then the plain ones. Interleaving
-    // them meant a seeder that ignores the prefix supplied ordinary nodes
-    // before the next seeder had been asked for filter nodes at all — and a
-    // peer that cannot serve filters is no use to this wallet.
+    // Filter-serving nodes only. A peer that cannot serve compact filters is
+    // worse than no peer at all here: it takes a connection slot, and this
+    // wallet's entire sync is filters. Asking the plain hostnames as a
+    // fallback filled the slots with ordinary nodes and stalled the download
+    // at two thousand filters of two hundred thousand.
+    //
+    // `x49` is NODE_NETWORK | NODE_COMPACT_FILTERS; `x849` adds BIP324 v2
+    // transport, which kyoto disables over Tor but whose operators are the
+    // sort who run filter indexes.
     let mut names = Vec::with_capacity(hosts.len() * 2);
     names.extend(hosts.iter().map(|host| format!("x49.{host}")));
-    names.extend(hosts.iter().map(|host| (*host).to_string()));
+    names.extend(hosts.iter().map(|host| format!("x849.{host}")));
     names
 }
 
@@ -244,21 +249,31 @@ pub fn seeds(network: &str) -> Vec<String> {
 /// which is why it stops as soon as it has enough.
 pub fn resolve_seeds(proxy: Proxy, network: &str, wanted: usize) -> Vec<IpAddr> {
     let mut found = Vec::new();
-    for host in seeds(network) {
-        if found.len() >= wanted {
-            break;
-        }
-        match resolve(proxy, &host) {
-            Ok(ip) if !found.contains(&ip) => {
-                tracing::debug!(%host, %ip, "resolved a seed through Tor");
-                found.push(ip);
+    // Each hostname asked more than once: `RESOLVE` returns a single address
+    // where an ordinary DNS query returns a dozen, and a seeder answers
+    // differently each time. Two passes over eight seeders is sixteen chances
+    // at a filter-serving node, for sixteen quick round trips.
+    for _ in 0..ASKS_PER_SEED {
+        for host in seeds(network) {
+            if found.len() >= wanted {
+                return found;
             }
-            Ok(_) => {}
-            Err(e) => tracing::debug!(%host, %e, "a seed did not resolve through Tor"),
+            match resolve(proxy, &host) {
+                Ok(ip) if !found.contains(&ip) => {
+                    tracing::debug!(%host, %ip, "resolved a filter-serving seed through Tor");
+                    found.push(ip);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!(%host, %e, "a seed did not resolve through Tor"),
+            }
         }
     }
     found
 }
+
+/// How many times to ask each seeder. Tor answers one address per lookup, and
+/// a seeder picks a different node each time it is asked.
+const ASKS_PER_SEED: usize = 3;
 
 #[cfg(test)]
 mod tests {
@@ -297,8 +312,14 @@ mod tests {
     #[test]
     fn every_network_asks_its_own_seeds_and_prefers_filter_nodes() {
         let mainnet = seeds("bitcoin");
-        assert!(mainnet.iter().any(|h| h == "seed.bitcoin.sipa.be"));
         assert!(mainnet.iter().any(|h| h == "x49.seed.bitcoin.sipa.be"));
+        assert!(mainnet.iter().any(|h| h == "x849.seed.bitcoin.sipa.be"));
+        // Never the bare hostname: it answers with ordinary nodes, which take
+        // a connection slot and cannot serve a single filter.
+        assert!(
+            !mainnet.iter().any(|h| h == "seed.bitcoin.sipa.be"),
+            "plain seeds return peers that cannot serve filters"
+        );
         assert!(!seeds("signet").is_empty());
         assert!(seeds("regtest").is_empty(), "a local chain has no seeds");
         // Signet seeds on mainnet would be a slow way to find nothing.
