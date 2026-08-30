@@ -400,11 +400,43 @@ pub struct TxSummary {
     pub seen_at: Option<u64>,
     /// Which derivation path it belongs to.
     pub script_type: accounts::ScriptType,
+    /// Virtual size, which is what the fee is charged against.
+    pub vsize: u64,
+    pub inputs: usize,
+    pub outputs: usize,
+    /// Where the money went, for the outputs that are not this wallet's:
+    /// address (or a description, for an unusual script) and amount.
+    pub paid_to: Vec<(String, u64)>,
+    /// Outputs that came back to this wallet — change on a payment, the
+    /// payment itself on a receive.
+    pub paid_to_self: Vec<(String, u64)>,
+    /// Whether any input signals it may be replaced while unconfirmed.
+    pub replaceable: bool,
+    /// An address here has been paid more than once across this wallet's
+    /// history. Worth saying: reuse is what links payments together for
+    /// anybody watching the chain.
+    pub reused_address: bool,
+    /// The block it landed in, when it has landed.
+    pub block_hash: Option<String>,
 }
 
 impl TxSummary {
     pub fn is_incoming(&self) -> bool {
         self.net_sats >= 0
+    }
+
+    /// What the fee worked out at, per virtual byte.
+    pub fn fee_rate(&self) -> Option<f64> {
+        let fee = self.fee_sats? as f64;
+        (self.vsize > 0).then(|| fee / self.vsize as f64)
+    }
+
+    /// Change coming back, on a payment that had some.
+    pub fn change_sats(&self) -> u64 {
+        if self.is_incoming() {
+            return 0;
+        }
+        self.paid_to_self.iter().map(|(_, sats)| sats).sum()
     }
 
     /// How deep it is buried, given the tip the wallet has verified to.
@@ -438,6 +470,11 @@ impl Summary {
     pub(crate) fn from_portfolio(portfolio: &mut accounts::Portfolio) -> Result<Self> {
         let mut summary = Summary { ..Default::default() };
         let primary = portfolio.primary;
+        // How many times each address has been paid across the whole wallet.
+        // Counted here because it takes the walk we are already doing, and
+        // reuse is what ties one payment to another for anyone watching.
+        let mut paid: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for account in portfolio.accounts.iter_mut() {
             let address = account
@@ -464,13 +501,22 @@ impl Summary {
             for wallet_tx in account.wallet.transactions() {
                 let tx = wallet_tx.tx_node.tx.as_ref();
                 let (sent, received) = account.wallet.sent_and_received(tx);
-                let (height, seen_at) = match wallet_tx.chain_position {
+                // Every output, sorted into "somebody else's" and "ours".
+                // What a payment actually paid, and what came back as change,
+                // are the two things a person wants from this screen.
+                let split = split_outputs(tx, &account.wallet, account.wallet.network());
+                for (address, _) in split.ours.iter().chain(split.theirs.iter()) {
+                    *paid.entry(address.clone()).or_insert(0usize) += 1;
+                }
+
+                let (height, seen_at, block_hash) = match wallet_tx.chain_position {
                     bdk_wallet::chain::ChainPosition::Confirmed { anchor, .. } => (
                         Some(anchor.block_id.height),
                         Some(anchor.confirmation_time),
+                        Some(anchor.block_id.hash),
                     ),
                     bdk_wallet::chain::ChainPosition::Unconfirmed { first_seen, .. } => {
-                        (None, first_seen)
+                        (None, first_seen, None)
                     }
                 };
 
@@ -482,8 +528,28 @@ impl Summary {
                     height,
                     seen_at,
                     script_type: account.script_type,
+                    vsize: tx.vsize() as u64,
+                    inputs: tx.input.len(),
+                    outputs: tx.output.len(),
+                    paid_to: split.theirs,
+                    paid_to_self: split.ours,
+                    // BIP-125: any input below the final sequence number says
+                    // this may still be replaced.
+                    replaceable: tx.input.iter().any(|i| i.sequence.is_rbf()),
+                    reused_address: false,
+                    block_hash: block_hash.map(|hash| hash.to_string()),
                 });
             }
+        }
+
+        // Now that every transaction has been seen, say which of them touched
+        // an address that has been paid more than once.
+        for tx in &mut summary.transactions {
+            tx.reused_address = tx
+                .paid_to
+                .iter()
+                .chain(tx.paid_to_self.iter())
+                .any(|(address, _)| paid.get(address).is_some_and(|count| *count > 1));
         }
 
         // Newest first: unconfirmed at the top, then by height, then by time so
@@ -1008,4 +1074,47 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+/// A transaction's outputs, sorted by who they belong to.
+struct Outputs {
+    /// Ours: change on a payment, or the payment itself on a receive.
+    ours: Vec<(String, u64)>,
+    /// Somebody else's: where a payment actually went.
+    theirs: Vec<(String, u64)>,
+}
+
+/// Split a transaction's outputs into ours and theirs.
+///
+/// Addresses rather than scripts, because an address is the thing a person can
+/// compare against what they were given. A script that is not a standard
+/// address — a bare multisig, an `OP_RETURN` — gets said plainly rather than
+/// rendered as hex nobody can act on.
+fn split_outputs(
+    tx: &bdk_wallet::bitcoin::Transaction,
+    wallet: &bdk_wallet::PersistedWallet<bdk_wallet::rusqlite::Connection>,
+    network: Network,
+) -> Outputs {
+    let mut ours = Vec::new();
+    let mut theirs = Vec::new();
+
+    for out in &tx.output {
+        let address = bdk_wallet::bitcoin::Address::from_script(&out.script_pubkey, network)
+            .map(|address| address.to_string())
+            .unwrap_or_else(|_| {
+                if out.script_pubkey.is_op_return() {
+                    "Data, not an address (OP_RETURN)".into()
+                } else {
+                    "An unusual script, not an address".into()
+                }
+            });
+
+        if wallet.is_mine(out.script_pubkey.clone()) {
+            ours.push((address, out.value.to_sat()));
+        } else {
+            theirs.push((address, out.value.to_sat()));
+        }
+    }
+
+    Outputs { ours, theirs }
 }

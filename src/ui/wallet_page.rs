@@ -209,6 +209,35 @@ impl FactoryComponent for TxRow {
     }
 }
 
+/// "1 coin", "3 coins".
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
+}
+
+/// An address with an amount beside it, monospaced and wrapped without
+/// hyphens — the same treatment addresses get everywhere else, because a
+/// wrong character in an address is money.
+fn address_row(address: &str, amount: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(amount);
+    row.set_subtitle(address);
+    row.set_subtitle_lines(3);
+    row.add_css_class("property");
+
+    let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy.set_tooltip_text(Some("Copy address"));
+    copy.set_valign(gtk::Align::Center);
+    copy.add_css_class("flat");
+    let to_copy = address.to_string();
+    copy.connect_clicked(move |_| {
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&to_copy);
+        }
+    });
+    row.add_suffix(&copy);
+    row
+}
+
 fn plural_confirmations(n: u32) -> String {
     match n {
         0 => "Awaiting confirmation".into(),
@@ -1637,7 +1666,70 @@ impl WalletPage {
                 "Unconfirmed — not yet in a block",
             )),
         }
+        if tx.height.is_none() {
+            // Only worth saying while it can still happen.
+            status.add(&detail_row(
+                "Replaceable",
+                if tx.replaceable {
+                    "Yes — signals BIP-125, so it can be replaced by a higher fee"
+                } else {
+                    "No — it cannot be replaced, only waited for"
+                },
+            ));
+        }
+        if let Some(hash) = &tx.block_hash {
+            status.add(&detail_row("Block hash", hash));
+        }
         page.add(&status);
+
+        // Where the money actually went. The headline nets everything into one
+        // number; this is the part that says who was paid, which is the thing
+        // worth checking against what you meant to do.
+        if !tx.paid_to.is_empty() {
+            let sent_to = adw::PreferencesGroup::new();
+            sent_to.set_title(if incoming { "Also paid" } else { "Paid to" });
+            for (address, sats) in &tx.paid_to {
+                sent_to.add(&address_row(
+                    address,
+                    &self.settings.denomination.format(*sats, &summary.network),
+                ));
+            }
+            page.add(&sent_to);
+        }
+
+        if !tx.paid_to_self.is_empty() {
+            let mine = adw::PreferencesGroup::new();
+            mine.set_title(if incoming { "Received at" } else { "Change back to you" });
+            if !incoming {
+                mine.set_description(Some(
+                    "A payment rarely matches a coin exactly, so the remainder returns \
+                     to a fresh address of yours.",
+                ));
+            }
+            for (address, sats) in &tx.paid_to_self {
+                mine.add(&address_row(
+                    address,
+                    &self.settings.denomination.format(*sats, &summary.network),
+                ));
+            }
+            page.add(&mine);
+        }
+
+        // A privacy observation, not a warning: nothing is broken, but reuse
+        // is what ties one payment to another for anybody reading the chain.
+        if tx.reused_address {
+            let note = adw::PreferencesGroup::new();
+            let row = adw::ActionRow::new();
+            row.set_title("An address here has been used more than once");
+            row.set_subtitle(
+                "Reused addresses let anyone watching the chain tie these payments \
+                 together. Sieve hands out a fresh address each time you ask.",
+            );
+            row.set_subtitle_lines(3);
+            row.add_prefix(&gtk::Image::from_icon_name("channel-secure-symbolic"));
+            note.add(&row);
+            page.add(&note);
+        }
 
         let detail = adw::PreferencesGroup::new();
         detail.set_title("Detail");
@@ -1649,6 +1741,26 @@ impl WalletPage {
             // Only knowable when every input is ours, which an incoming payment
             // built by someone else will not be.
             None => detail.add(&detail_row("Fee", "Not known — inputs are not all yours")),
+        }
+        if let Some(rate) = tx.fee_rate() {
+            // What the fee worked out at, which is the number to compare
+            // against what was chosen when sending.
+            detail.add(&detail_row("Fee rate", &format!("{rate:.2} sat/vB")));
+        }
+        detail.add(&detail_row("Size", &format!("{} vB", thousands(tx.vsize as u32))));
+        detail.add(&detail_row(
+            "Inputs and outputs",
+            &format!(
+                "{} in, {} out",
+                plural(tx.inputs, "coin", "coins"),
+                plural(tx.outputs, "payment", "payments"),
+            ),
+        ));
+        if !incoming && tx.change_sats() > 0 {
+            detail.add(&detail_row(
+                "Change",
+                &self.settings.denomination.format(tx.change_sats(), &summary.network),
+            ));
         }
         detail.add(&detail_row("Derivation path", &tx.script_type.to_string()));
 

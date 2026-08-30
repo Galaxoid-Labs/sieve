@@ -32,6 +32,8 @@ const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The Tor we started, if we started one.
 static CHILD: Mutex<Option<Child>> = Mutex::new(None);
+/// The data directory a test drove, so `stop` tidies that one too.
+static TEST_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Where a `tor` binary might be, in the order worth trying.
 ///
@@ -140,7 +142,16 @@ fn clear_stale(dir: &std::path::Path) {
 /// Blocking, and slow on a first run: call it from a command, never on the
 /// main thread. `progress` is handed bootstrap lines as they arrive, so the
 /// interface can say something during the thirty seconds this can take.
-pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
+pub fn ensure(progress: impl FnMut(String)) -> Result<Proxy> {
+    ensure_in(crate::wallet::data_root().join("tor"), progress)
+}
+
+/// The same, with the data directory named.
+///
+/// Separate so the tests can drive a stand-in Tor without reaching into the
+/// real one — which they did, adopting the Tor the running app had started and
+/// then failing for reasons that had nothing to do with the code under test.
+pub(crate) fn ensure_in(dir: PathBuf, mut progress: impl FnMut(String)) -> Result<Proxy> {
     // Already running — the system service, or Tor Browser. Nothing to start,
     // and nothing of ours to clean up.
     if let Some(proxy) = super::detect() {
@@ -162,7 +173,6 @@ pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
     tracing::info!(binary = %binary.display(), "starting Tor");
     progress("Starting Tor".into());
 
-    let dir = crate::wallet::data_root().join("tor");
     std::fs::create_dir_all(&dir)?;
 
     // A Tor from a previous run may still be there: adopt it if it works, and
@@ -359,6 +369,9 @@ pub fn stop() {
         // Nothing to adopt any more.
         let dir = crate::wallet::data_root().join("tor");
         let _ = std::fs::remove_file(port_file(&dir));
+        if let Some(test_dir) = TEST_DIR.lock().unwrap().take() {
+            let _ = std::fs::remove_file(port_file(&test_dir));
+        }
     }
 }
 
@@ -445,7 +458,8 @@ mod tests {
 
         // SAFETY: single-threaded test.
         unsafe { std::env::set_var("SIEVE_TOR", &fake) };
-        ensure(|_| {}).unwrap();
+        *TEST_DIR.lock().unwrap() = Some(dir.clone());
+        ensure_in(dir.clone(), |_| {}).unwrap();
 
         // Still there a moment later, and still there after the watchdog has
         // had every chance to poll.
@@ -489,7 +503,8 @@ mod tests {
         assert_eq!(find_binary().as_deref(), Some(fake.as_path()));
 
         let mut seen = Vec::new();
-        let proxy = ensure(|message| seen.push(message)).unwrap();
+        *TEST_DIR.lock().unwrap() = Some(dir.clone());
+        let proxy = ensure_in(dir.clone(), |message| seen.push(message)).unwrap();
         assert_eq!(proxy, Proxy::local(19051));
         assert!(seen.iter().any(|m| m.contains("10%")), "{seen:?}");
         assert!(seen.iter().any(|m| m.contains("100%")), "{seen:?}");
