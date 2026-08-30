@@ -903,6 +903,16 @@ pub struct PeerInfo {
 fn distinct_peers(
     peers: Vec<(bdk_wallet::bitcoin::p2p::address::AddrV2, bdk_wallet::bitcoin::p2p::ServiceFlags)>,
 ) -> Vec<PeerInfo> {
+    // Every connection as the node describes it, before deduplication. When
+    // eight connections collapse into one row, this is the only way to tell
+    // whether that is eight connections to one machine or eight machines the
+    // node describes identically — and those want opposite fixes.
+    tracing::debug!(
+        connections = peers.len(),
+        raw = ?peers.iter().map(|(a, s)| (format_address(a), s.to_string())).collect::<Vec<_>>(),
+        "peer table as the node reports it"
+    );
+
     let mut seen = std::collections::HashSet::new();
     peers
         .into_iter()
