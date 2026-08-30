@@ -291,9 +291,13 @@ impl Session {
         // balance missing everything before it — so the range is checked, and
         // anything short is ignored rather than trimmed to fit.
         let stored = crate::wallet::headers::load(network).filter(|headers| {
-            let covers = headers
-                .first()
-                .is_some_and(|first| first.height <= meta.birthday_height);
+            // `max(1)`: a node has no header at genesis, so a chain stored from
+            // the very beginning starts at height one. Demanding it start at or
+            // before a birthday of zero is a test nothing can pass — which is
+            // how a validated file of nine hundred thousand headers came to be
+            // loaded and then thrown away.
+            let needed = meta.birthday_height.max(1);
+            let covers = headers.first().is_some_and(|first| first.height <= needed);
             if !covers {
                 tracing::info!(
                     "stored headers start after this wallet's birthday; fetching instead"
