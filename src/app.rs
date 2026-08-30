@@ -1062,20 +1062,9 @@ impl Component for App {
             }
             AppCmd::Update { generation, result: Ok(summary) } if self.current(generation) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
-                // A sync has landed, so the node's header chain is worth
-                // keeping — for the next wallet on this network and for the
-                // next start. Once per session: it walks every header.
-                if !self.headers_stored
-                    && let Some(session) = self.session.clone()
-                    && let Some(from) =
-                        self.active.as_ref().and_then(wallet::Meta::load).map(|m| m.birthday_height)
-                {
-                    self.headers_stored = true;
-                    sender.oneshot_command(async move {
-                        session.store_headers(from).await;
-                        AppCmd::Tick
-                    });
-                }
+                // Also here, for a wallet that was already up to date and
+                // never passed through a scan.
+                self.store_headers(&sender);
                 self.balance_sats = Some(summary.balance_sats);
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
@@ -1090,6 +1079,18 @@ impl Component for App {
             AppCmd::Progress { generation, progress: Some(progress) }
                 if self.current(generation) =>
             {
+                // The block headers are complete the moment filter work
+                // begins: kyoto walks the whole header chain before asking for
+                // a single filter header. That is when to write them out.
+                //
+                // Storing them when a wallet *update* landed instead — as this
+                // did — meant waiting for the entire scan to finish, so a
+                // recovery scan that ran for an hour and was then restarted
+                // saved nothing and fetched every header again. The headers
+                // were ready in the first two minutes.
+                if matches!(progress, Progress::Scanning(_) | Progress::Synced) {
+                    self.store_headers(&sender);
+                }
                 self.wallet.emit(WalletPageMsg::SetProgress(progress));
                 self.await_progress(&sender);
             }
@@ -1342,6 +1343,29 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Write this network's block headers out, once per session.
+    ///
+    /// Headers are public chain data and the same for every wallet on a
+    /// network, so this is what stops the next wallet — and the next start —
+    /// walking the whole chain again.
+    fn store_headers(&mut self, sender: &ComponentSender<Self>) {
+        if self.headers_stored {
+            return;
+        }
+        let (Some(session), Some(from)) = (
+            self.session.clone(),
+            self.active.as_ref().and_then(wallet::Meta::load).map(|m| m.birthday_height),
+        ) else {
+            return;
+        };
+
+        self.headers_stored = true;
+        sender.oneshot_command(async move {
+            session.store_headers(from).await;
+            AppCmd::Tick
+        });
     }
 
     /// Ask the node who is connected.
