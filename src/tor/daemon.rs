@@ -46,14 +46,17 @@ pub fn find_binary() -> Option<PathBuf> {
         }
     }
 
-    // Shipped beside the executable: a release tarball, or /app/bin in a
-    // Flatpak.
+    // Shipped beside the executable: /app/bin/tor in a Flatpak, or the
+    // directory `scripts/fetch-tor.sh` unpacks into a development build. The
+    // Expert Bundle keeps its libraries with the binary, so it arrives as a
+    // directory rather than a bare file — both layouts are looked for.
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let bundled = dir.join("tor");
-        if bundled.is_file() {
-            return Some(bundled);
+        for candidate in [dir.join("tor"), dir.join("tor").join("tor")] {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
 
@@ -106,7 +109,33 @@ pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let mut child = Command::new(&binary)
+    // The Expert Bundle ships the libevent and OpenSSL Tor was built against,
+    // and the system ones are not necessarily compatible — without this the
+    // binary dies on an unresolved symbol before it logs anything. Only set
+    // when those libraries are actually sitting beside the binary, so a system
+    // Tor is left to the loader.
+    let home = binary.parent().map(|dir| dir.to_path_buf());
+    let bundled_libraries = home
+        .as_ref()
+        .map(|dir| dir.join("libevent-2.1.so.7").exists())
+        .unwrap_or(false);
+
+    let mut command = Command::new(&binary);
+    if bundled_libraries && let Some(dir) = &home {
+        command.env("LD_LIBRARY_PATH", dir);
+    }
+    // Tor complains on every start without these and works anyway; they travel
+    // with the bundle, so hand them over when they are there.
+    if let Some(dir) = &home {
+        let geoip = dir.join("geoip");
+        let geoip6 = dir.join("geoip6");
+        if geoip.exists() && geoip6.exists() {
+            command.arg("--GeoIPFile").arg(&geoip);
+            command.arg("--GeoIPv6File").arg(&geoip6);
+        }
+    }
+
+    let mut child = command
         // Let Tor pick the port and tell us which: choosing one ourselves
         // means racing whatever else on the machine wants it.
         .args(["--SocksPort", "auto"])
@@ -297,5 +326,46 @@ mod tests {
         stop();
         unsafe { std::env::remove_var("SIEVE_TOR") };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod live {
+    //! Against a real Tor, when there is one to run.
+    //!
+    //! Ignored by default: it starts Tor, waits for a bootstrap, and needs
+    //! a working network. Run it with
+    //! `cargo test -- --ignored --nocapture tor_actually_starts`.
+
+    use super::*;
+
+    #[test]
+    #[ignore = "starts Tor and talks to the network"]
+    fn tor_actually_starts_and_answers_as_tor() {
+        // The test binary lives in target/debug/deps, so the bundle beside the
+        // *app* binary is named directly rather than discovered.
+        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/debug/tor/tor");
+        if bundled.is_file() {
+            // SAFETY: single-threaded test.
+            unsafe { std::env::set_var("SIEVE_TOR", &bundled) };
+        }
+
+        let binary = find_binary().expect("no Tor to start — run scripts/fetch-tor.sh");
+        println!("using {}", binary.display());
+
+        let proxy = ensure(|message| println!("{message}")).expect("Tor did not start");
+        println!("proxy at {proxy}");
+
+        // Not merely listening: answering RESOLVE, which only Tor does.
+        let address = crate::tor::check(proxy).expect("the proxy is not Tor");
+        println!("resolved example.com through Tor to {address}");
+
+        // And the thing the node depends on: seeds, found through Tor.
+        let seeds = crate::tor::resolve_seeds(proxy, "bitcoin", 2);
+        println!("seeds through Tor: {seeds:?}");
+        assert!(!seeds.is_empty(), "no Bitcoin seeds resolved through Tor");
+
+        stop();
     }
 }

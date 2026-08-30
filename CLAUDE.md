@@ -95,7 +95,11 @@ Sieve dies without stopping it. The binary is looked for at `$SIEVE_TOR`, then b
 executable — which is where `packaging/com.galaxoidlabs.Sieve.yml` puts it — then on `PATH`.
 
 That last part is why the Flatpak manifest exists: it builds Tor from source into
-`/app/bin/tor`, so someone who has never installed Tor gets it. Sparrow ships Tor binaries,
+`/app/bin/tor`, so someone who has never installed Tor gets it. A development build has no such
+neighbour until `scripts/fetch-tor.sh` puts the official Expert Bundle in `target/<profile>/tor/`
+— run it once, or the switch in preferences correctly refuses because there is nothing to
+start. A Tor that ships its own libevent and OpenSSL needs `LD_LIBRARY_PATH` pointed at them,
+which `daemon::ensure` does when it sees them beside the binary. Sparrow ships Tor binaries,
 Wasabi falls back to a bundled copy, Feather bundles it too; expecting the user to install a
 daemon is what Bitcoin Core and Electrum do, and a node is not a wallet. Embedding
 [arti](https://tpo.pages.torproject.net/core/doc/rust/arti_client/) instead is possible but

@@ -17,7 +17,33 @@ The lookup order at runtime, for reference:
 
 Only 3 needs packaging, and only 3 covers a person with nothing installed.
 
-## Building
+## Development builds
+
+A `cargo run` build has no Tor beside it, so the switch in preferences has
+nothing to start. One command fixes that:
+
+```sh
+scripts/fetch-tor.sh          # or: scripts/fetch-tor.sh release
+```
+
+It fetches the Tor Project's official Expert Bundle, checks it against a digest
+pinned in the script (and its signature, when gpg has the key), and unpacks it
+into `target/debug/tor/`, which is where the binary looks. The bundle carries
+the libevent and OpenSSL Tor was built against; Sieve sets `LD_LIBRARY_PATH`
+when it starts a Tor that has libraries beside it, because the system ones are
+not necessarily compatible — the binary dies on an unresolved symbol otherwise.
+
+Verify it end to end with:
+
+```sh
+cargo test -- --ignored --nocapture tor_actually_starts
+```
+
+which starts Tor, waits for the bootstrap, proves the proxy answers `RESOLVE`
+(so it is Tor and not merely something listening), and resolves Bitcoin DNS
+seeds through it.
+
+## Building the Flatpak
 
 ```sh
 flatpak install org.gnome.Sdk//48 org.gnome.Platform//48 \
