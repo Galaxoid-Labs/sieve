@@ -241,8 +241,13 @@ impl Session {
             // A path that has never synced starts at the recorded birthday; one
             // that has starts from its own checkpoint.
             let scan_type = if account.wallet.latest_checkpoint().height() == 0 {
-                match meta.birthday_hash.parse() {
-                    Ok(hash) => ScanType::Recovery {
+                match resume_point(&meta, network).or_else(|| {
+                    meta.birthday_hash
+                        .parse()
+                        .ok()
+                        .map(|hash| (meta.birthday_height, hash))
+                }) {
+                    Some((height, hash)) => ScanType::Recovery {
                         // A floor, not just the current index: recovery peeks
                         // this many scripts, and a fresh wallet reporting 0
                         // would check almost nothing against the filters.
@@ -251,10 +256,10 @@ impl Session {
                             .derivation_index(bdk_wallet::KeychainKind::External)
                             .unwrap_or(0)
                             .max(25),
-                        checkpoint: HashCheckpoint::new(meta.birthday_height, hash),
+                        checkpoint: HashCheckpoint::new(height, hash),
                     },
-                    Err(e) => {
-                        tracing::warn!(%e, "birthday hash unreadable; scanning from genesis");
+                    None => {
+                        tracing::warn!("birthday hash unreadable; scanning from genesis");
                         ScanType::Sync
                     }
                 }
@@ -987,6 +992,31 @@ pub struct PeerInfo {
 }
 
 /// A peer address as a person would write it, rather than as Rust prints it.
+/// Where a previous scan of this wallet got to, if it can be proved.
+///
+/// Resuming needs the hash of the block to resume at, and the only place that
+/// hash exists locally is the stored header chain. No headers, no resume —
+/// which is the safe direction: starting again costs time, while starting too
+/// late costs coins.
+fn resume_point(
+    meta: &Meta,
+    network: bdk_wallet::bitcoin::Network,
+) -> Option<(u32, bdk_wallet::bitcoin::BlockHash)> {
+    let scanned_to = meta.scanned_to?;
+    if scanned_to <= meta.birthday_height {
+        return None;
+    }
+
+    let headers = crate::wallet::headers::load(network)?;
+    let header = headers.iter().find(|h| h.height == scanned_to)?;
+    tracing::info!(
+        from = scanned_to,
+        birthday = meta.birthday_height,
+        "resuming a scan that was interrupted"
+    );
+    Some((scanned_to, header.header.block_hash()))
+}
+
 /// Ask the ordinary resolver for peers that serve compact filters.
 ///
 /// The same hostnames and service-bit prefixes the Tor path uses — `x49` is

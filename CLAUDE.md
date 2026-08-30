@@ -231,6 +231,23 @@ Written once per session, after a sync lands, by walking `get_header` from the b
 tip — a local read of the node's own memory, not the network, but a quarter of a million of them
 is still work, so never while a sync is in progress.
 
+## Interrupted scans resume
+
+`bdk_kyoto` matches each filter as it arrives but only produces a wallet update on
+`Event::FiltersSynced` — the end of the *whole* filter sync. So BDK's checkpoint never advances
+mid-scan, and a recovery scan killed after an hour leaves no trace: the next start begins at the
+birthday again. A completed scan is fine forever after (the checkpoint reaches the tip and later
+starts use `ScanType::Sync`); it is interruption that costs everything.
+
+`Meta::scanned_to` is the trace. It is derived from kyoto's progress fraction — which is a float,
+not a height — and then pulled back by `SCAN_MARGIN` (2,016 blocks), because a resume point past
+where the scan truly reached skips blocks, and skipped blocks are missing money. Rescanning a
+difficulty period costs seconds.
+
+Resuming also needs the *hash* at that height, and the only local source is the stored header
+chain, so no headers means no resume. That is the safe direction: starting again costs time,
+starting too late costs coins.
+
 ## Known upstream gap: kyoto ignores `data_dir`
 
 bip157 0.6.3 accepts a `data_dir` and ignores it — `Node::new` destructures the config as

@@ -353,6 +353,17 @@ pub struct Meta {
     /// What the person called it. Absent for wallets created before naming.
     #[serde(default)]
     pub name: Option<String>,
+    /// How far a scan has checked filters, so an interrupted one resumes
+    /// instead of starting again.
+    ///
+    /// BDK's own checkpoint cannot help here: bdk_kyoto only produces a wallet
+    /// update when the *entire* filter sync completes, so a scan killed after
+    /// an hour leaves no trace and begins again at the birthday. This is that
+    /// trace, and it is deliberately behind where the scan really got to — a
+    /// resume point that is too far along skips blocks, and skipped blocks are
+    /// missing money.
+    #[serde(default)]
+    pub scanned_to: Option<u32>,
     /// No keys here: the descriptors are public and there is no vault.
     ///
     /// Such a wallet opens without a password — there is nothing to decrypt —
@@ -391,7 +402,23 @@ impl Meta {
             birthday_hash: birthday.hash.to_owned(),
             script_types,
             primary,
+            scanned_to: None,
             watch_only: false,
+        }
+    }
+
+    /// Record how far a scan has verified, if it is further than before.
+    ///
+    /// Never backwards: a fresh scan of a wallet that has already been scanned
+    /// starts where it left off, and a lower figure would throw that away.
+    pub fn record_scanned_to(paths: &Paths, height: u32) {
+        let Some(mut meta) = Self::load(paths) else { return };
+        if meta.scanned_to.is_some_and(|already| already >= height) {
+            return;
+        }
+        meta.scanned_to = Some(height);
+        if let Err(e) = meta.save(paths) {
+            tracing::debug!(%e, "could not record scan progress");
         }
     }
 
@@ -434,6 +461,7 @@ impl Meta {
             birthday_hash: legacy.hash,
             script_types: default_script_types(),
             primary: default_primary(),
+            scanned_to: None,
             // That format predates watch-only wallets, so it can only be one
             // with a vault.
             watch_only: false,

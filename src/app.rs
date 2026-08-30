@@ -59,6 +59,8 @@ pub struct App {
     /// Whether this session has already written its headers out. Once is
     /// enough: it walks the whole chain the node holds.
     headers_stored: bool,
+    /// When scan progress was last written down.
+    scan_recorded: Option<std::time::Instant>,
     /// The last locally computed fee estimate: height, sat/vB, and where it
     /// came from. Kept so switching to Send twice does not download the same
     /// block twice.
@@ -107,6 +109,14 @@ pub struct App {
 /// in the theme ships silently. Add to this list when adding an icon.
 /// How often the peer list may be re-read while connections are churning.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+/// How far behind the estimated scan position to record a resume point.
+///
+/// Two thousand blocks — a difficulty period. The position is derived from a
+/// fraction reported as a float, and resuming past where the scan truly
+/// reached would skip blocks and lose transactions. Rescanning two thousand
+/// blocks costs seconds.
+const SCAN_MARGIN: u32 = 2_016;
+
 /// How often to ask again when the node has gone quiet. Twenty seconds was
 /// long enough that peers which had joined minutes ago were still missing from
 /// the list.
@@ -426,6 +436,7 @@ impl Component for App {
             balance_sats: None,
             generation: 0,
             headers_stored: false,
+            scan_recorded: None,
             fee_estimate: None,
             chain_tip: None,
             peers_read: None,
@@ -1090,6 +1101,7 @@ impl Component for App {
                 // were ready in the first two minutes.
                 if matches!(progress, Progress::Scanning(_) | Progress::Synced) {
                     self.store_headers(&sender);
+                    self.record_scan_progress(&progress);
                 }
                 self.wallet.emit(WalletPageMsg::SetProgress(progress));
                 self.await_progress(&sender);
@@ -1343,6 +1355,53 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Remember how far the scan has checked filters.
+    ///
+    /// bdk_kyoto only produces a wallet update when the whole filter sync
+    /// finishes, so an hour of scanning leaves no trace and the next start
+    /// begins at the birthday again. This is that trace.
+    ///
+    /// Deliberately behind the truth. kyoto reports a fraction, not a height,
+    /// and a resume point past where the scan actually reached would skip
+    /// blocks — which is missing money, not lost time. So the figure is
+    /// derived from the fraction and then pulled back by a wide margin.
+    fn record_scan_progress(&mut self, progress: &Progress) {
+        let Progress::Scanning(fraction) = progress else { return };
+        let (Some(paths), Some(tip)) = (self.active.clone(), self.chain_tip) else { return };
+        let Some(meta) = wallet::Meta::load(&paths) else { return };
+
+        // Filter headers are the first quarter of kyoto's figure; the filters
+        // themselves are the rest, and they are checked in order from the scan
+        // start.
+        let share = crate::wallet::node::FILTER_HEADER_SHARE;
+        if *fraction <= share {
+            return;
+        }
+        let done = (fraction - share) / (1.0 - share);
+        let from = meta.scanned_to.unwrap_or(meta.birthday_height);
+        if tip <= from {
+            return;
+        }
+
+        let reached = from + (done * f64::from(tip - from)) as u32;
+        let Some(safe) = reached.checked_sub(SCAN_MARGIN) else { return };
+        if safe <= from {
+            return;
+        }
+
+        // Written at most once a minute: this rewrites the metadata file.
+        let due = self
+            .scan_recorded
+            .map(|last| last.elapsed() >= std::time::Duration::from_secs(60))
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.scan_recorded = Some(std::time::Instant::now());
+        tracing::info!(height = safe, "recording how far the scan has checked");
+        wallet::Meta::record_scanned_to(&paths, safe);
     }
 
     /// Write this network's block headers out, once per session.
