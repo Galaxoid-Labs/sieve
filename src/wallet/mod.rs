@@ -1118,3 +1118,88 @@ fn split_outputs(
 
     Outputs { ours, theirs }
 }
+
+/// Delete a wallet from this computer.
+///
+/// What goes: the encrypted vault, the watch-only databases, the metadata —
+/// the whole directory. What does not: the coins. They are on the chain, and
+/// the recovery phrase is what reaches them. That distinction is the entire
+/// content of the warning this needs in front of it, because the file being
+/// deleted is, for a wallet nobody wrote down, the only way back.
+///
+/// Refuses anything that is not a wallet directory of ours. A bug that passed
+/// the wrong path would otherwise delete an arbitrary tree, and this is the
+/// last place to catch it — `remove_dir_all` asks no questions.
+pub fn remove(paths: &Paths) -> Result<()> {
+    let root = wallets_root();
+    let canonical_root = root.canonicalize().unwrap_or(root);
+    let dir = paths
+        .dir
+        .canonicalize()
+        .with_context(|| format!("{} is not there", paths.dir.display()))?;
+
+    if !dir.starts_with(&canonical_root) || dir == canonical_root {
+        anyhow::bail!("{} is not a wallet directory", dir.display());
+    }
+    // A wallet has a vault or metadata in it. A directory with neither is
+    // something else, and not ours to delete.
+    if !paths.vault.exists() && !paths.meta.exists() {
+        anyhow::bail!("{} does not look like a wallet", dir.display());
+    }
+
+    std::fs::remove_dir_all(&dir)
+        .with_context(|| format!("could not remove {}", dir.display()))?;
+    tracing::info!(wallet = %dir.display(), "removed a wallet");
+    Ok(())
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    /// The guard that stands between a wrong path and `remove_dir_all`.
+    #[test]
+    fn only_wallet_directories_can_be_removed() {
+        let outside = std::env::temp_dir().join(format!("sieve-not-a-wallet-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("something-precious"), b"keep me").unwrap();
+
+        let paths = Paths {
+            vault: outside.join("vault.sieve"),
+            db: outside.join("wallet.sqlite"),
+            meta: outside.join("wallet.meta.json"),
+            dir: outside.clone(),
+        };
+
+        // Outside the wallets directory: refused whatever it contains.
+        assert!(remove(&paths).is_err());
+        assert!(outside.join("something-precious").exists(), "it deleted it anyway");
+
+        // Inside, but with nothing that makes it a wallet: still refused.
+        let empty = wallets_root().join(format!("sieve-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let paths = Paths {
+            vault: empty.join("vault.sieve"),
+            db: empty.join("wallet.sqlite"),
+            meta: empty.join("wallet.meta.json"),
+            dir: empty.clone(),
+        };
+        assert!(remove(&paths).is_err());
+        assert!(empty.exists());
+
+        // And with a vault in it, it goes.
+        std::fs::write(&paths.vault, b"sealed").unwrap();
+        remove(&paths).unwrap();
+        assert!(!empty.exists());
+
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A wallet that has already gone is an error, not a panic and not a
+    /// silent success that leaves the interface claiming something happened.
+    #[test]
+    fn removing_what_is_not_there_is_an_error() {
+        let paths = Paths::for_wallet("no-such-wallet-at-all");
+        assert!(remove(&paths).is_err());
+    }
+}

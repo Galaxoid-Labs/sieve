@@ -46,6 +46,9 @@ pub struct App {
     unlock_dialog: adw::Dialog,
     /// The wallet currently open, if any.
     active: Option<Paths>,
+    /// What the open wallet holds, so the warning before deleting it can say
+    /// so. Cleared with everything else on a switch.
+    balance_sats: Option<u64>,
     /// Which session the results arriving now belong to.
     ///
     /// A command started against one wallet can land after another has been
@@ -156,6 +159,10 @@ pub enum AppMsg {
     ShowWallets,
     /// Slide the recovery-phrase screen in over preferences.
     ShowRecoveryPhrase,
+    /// Ask whether to delete the open wallet from this computer.
+    AskRemoveWallet,
+    /// Asked and answered.
+    RemoveWallet(Paths),
     /// Re-present the password dialog for the wallet already on screen.
     PromptUnlock,
     /// Open a specific wallet from the list.
@@ -406,6 +413,7 @@ impl Component for App {
             settings,
             unlock_dialog: unlock_dialog.clone(),
             active: None,
+            balance_sats: None,
             generation: 0,
             fee_estimate: None,
             chain_tip: None,
@@ -678,6 +686,123 @@ impl Component for App {
                 self.prefs.push_subpage(&self.chooser_page);
             }
 
+            AppMsg::AskRemoveWallet => {
+                let Some(paths) = self.active.clone() else { return };
+                let id = paths
+                    .dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let name = wallet::Meta::load(&paths)
+                    .map(|m| m.display_name(&id))
+                    .unwrap_or_else(|| id.clone());
+                let network = wallet::Meta::load(&paths)
+                    .map(|m| m.network)
+                    .unwrap_or_else(|| "bitcoin".into());
+
+                // The whole content of this warning is the difference between
+                // deleting a file and losing money: the coins stay on the
+                // chain, and the recovery phrase is what reaches them. For a
+                // wallet nobody wrote down, this file is the only way back.
+                let mut body = format!(
+                    "This deletes {name} from this computer: the encrypted key file, its \
+                     history, everything.\n\nYour coins stay on the Bitcoin network. Only \
+                     the recovery phrase can reach them again — if you have not written it \
+                     down, they are gone."
+                );
+                let holds = self.balance_sats.unwrap_or(0);
+                if holds > 0 {
+                    body.push_str(&format!(
+                        "\n\nThis wallet holds {}.",
+                        self.settings.denomination.format(holds, &network)
+                    ));
+                }
+
+                let dialog = adw::AlertDialog::new(Some(&format!("Remove {name}?")), Some(&body));
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("remove", "Remove");
+                dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+                // The safe answer is the one a stray Return key gives.
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                // A wallet with coins in it asks for its name to be typed. The
+                // ceremony is the point: it is the difference between a slip
+                // and a decision.
+                if holds > 0 {
+                    let group = adw::PreferencesGroup::new();
+                    let entry = adw::EntryRow::new();
+                    entry.set_title(&format!("Type “{name}” to confirm"));
+                    group.add(&entry);
+                    dialog.set_extra_child(Some(&group));
+                    dialog.set_response_enabled("remove", false);
+
+                    let confirm = dialog.clone();
+                    let wanted = name.clone();
+                    entry.connect_changed(move |row| {
+                        confirm.set_response_enabled("remove", row.text().trim() == wanted);
+                    });
+                }
+
+                {
+                    let sender = sender.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response == "remove" {
+                            sender.input(AppMsg::RemoveWallet(paths.clone()));
+                        }
+                    });
+                }
+
+                if let Some(window) = self.nav.root() {
+                    dialog.present(Some(&window));
+                }
+            }
+
+            AppMsg::RemoveWallet(paths) => {
+                let was_open = self.active.as_ref().map(|p| &p.dir) == Some(&paths.dir);
+                if was_open {
+                    // Nothing may still be reading the files about to go.
+                    if let Some(session) = self.session.take() {
+                        session.shutdown();
+                    }
+                    self.generation += 1;
+                }
+
+                if let Err(e) = wallet::remove(&paths) {
+                    tracing::error!(%e, "could not remove the wallet");
+                    self.prefs.add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                        &e.to_string(),
+                    )));
+                    return;
+                }
+
+                let id = paths.dir.file_name().map(|n| n.to_string_lossy().to_string());
+                if self.settings.last_wallet == id {
+                    self.settings.last_wallet = None;
+                    self.settings.save();
+                }
+
+                if was_open {
+                    self.active = None;
+                    self.balance_sats = None;
+                    self.unlocked = false;
+                    self.wallet.emit(WalletPageMsg::Reset);
+                    self.wallet.emit(WalletPageMsg::SetLocked(true));
+                }
+
+                self.chooser.emit(ChooserMsg::Refresh);
+                self.close_prefs();
+
+                // Somewhere to go afterwards: another wallet if there is one,
+                // and the way to make a first one if there is not.
+                if wallet::list_wallets().is_empty() {
+                    self.nav.push_by_tag("onboarding");
+                } else {
+                    sender.input(AppMsg::ShowPreferences);
+                    sender.input(AppMsg::ShowWallets);
+                }
+            }
+
             AppMsg::ShowRecoveryPhrase => {
                 // The row is already insensitive while locked; this is the
                 // same rule at the place that acts on it, so the screen stays
@@ -739,6 +864,7 @@ impl Component for App {
                 }
 
                 self.active = Some(paths.clone());
+                self.balance_sats = Some(summary.balance_sats);
                 self.unlocked = true;
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetLocked(false));
@@ -870,6 +996,7 @@ impl Component for App {
             }
             AppCmd::Update { generation, result: Ok(summary) } if self.current(generation) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
+                self.balance_sats = Some(summary.balance_sats);
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
                 sender.input(AppMsg::RefreshChain);
@@ -1653,6 +1780,29 @@ impl App {
             }
             peers.add_suffix(&forget);
             this.add(&peers);
+        }
+
+        // Last in the group, and the only destructive thing in preferences.
+        if self.active.is_some() {
+            let remove = adw::ActionRow::new();
+            remove.set_title("Remove this wallet");
+            remove.set_subtitle(
+                "Deletes it from this computer. Your coins stay on the network, and only \
+                 the recovery phrase can reach them again.",
+            );
+            remove.set_subtitle_lines(3);
+
+            let button = gtk::Button::with_label("Remove…");
+            button.set_valign(gtk::Align::Center);
+            // Adwaita's own destructive styling, so it reads the same as every
+            // other irreversible button in GNOME.
+            button.add_css_class("destructive-action");
+            {
+                let sender = sender.clone();
+                button.connect_clicked(move |_| sender.input(AppMsg::AskRemoveWallet));
+            }
+            remove.add_suffix(&button);
+            this.add(&remove);
         }
 
         page.add(&this);

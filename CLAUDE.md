@@ -249,6 +249,19 @@ Fees, in a client with no mempool, come from one of two places, and the field sa
 Either way the field is floored at `broadcast_min_feerate`, and a rate typed over the
 suggestion is never taken back by a later estimate.
 
+## Removing a wallet
+
+`wallet::remove` deletes the directory: vault, databases, metadata. It refuses anything that is
+not inside `wallets_root` and does not hold a vault or a metadata file — `remove_dir_all` asks
+no questions, and this is the last place a wrong path can be caught. Two tests hold that line.
+
+The dialog in front of it says the thing that actually matters: the coins stay on the chain,
+and the recovery phrase is what reaches them, so for a wallet nobody wrote down this file is
+the only way back. `adw::AlertDialog` with a destructive response, Cancel as the default so a
+stray Return key is safe, and — when the wallet holds coins — the name typed out before the
+button works. The session is stopped and the generation bumped before anything is deleted, so
+nothing is still reading the files as they go.
+
 ## Receiving
 
 `next_unused_address` never returns a *used* address, but it returns the same unused one
