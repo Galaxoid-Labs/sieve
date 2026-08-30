@@ -112,14 +112,29 @@ pub const MAINNET_CHECKPOINTS: &[Checkpoint] = &[
         hash: "000000000000000004ec466ce4732fe6f1ed1cddc2ed4b328fff5224276e3f6f",
         when: "February 2016",
     },
+    // The honest answer to "I do not know": everything. Slow — every filter
+    // since 2009 — but a wallet that finds nothing because the search began
+    // too late is worse than one that took an afternoon.
+    Checkpoint {
+        height: 0,
+        hash: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+        when: "I don't know — search the whole chain",
+    },
 ];
 
 /// Signet checkpoints, newest first.
-pub const SIGNET_CHECKPOINTS: &[Checkpoint] = &[Checkpoint {
-    height: 319_000,
-    hash: "000000021cefaf18c0d9f75944d79689bde29448c55ff00c65c0022814f40578",
-    when: "August 2026",
-}];
+pub const SIGNET_CHECKPOINTS: &[Checkpoint] = &[
+    Checkpoint {
+        height: 319_000,
+        hash: "000000021cefaf18c0d9f75944d79689bde29448c55ff00c65c0022814f40578",
+        when: "August 2026",
+    },
+    Checkpoint {
+        height: 0,
+        hash: "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
+        when: "I don't know — search the whole chain",
+    },
+];
 
 pub fn checkpoints(network: Network) -> &'static [Checkpoint] {
     match network {
@@ -898,7 +913,7 @@ mod tests {
         // later starting point can find, and taproot's floor belongs to the
         // taproot *account* rather than to the wallet.
         let floor = checkpoint_at_or_before(Network::Bitcoin, 1);
-        assert_eq!(floor.height, 400_000);
+        assert_eq!(floor.height, 0, "the last resort is the whole chain");
 
         // And the list stays in order, newest first, or the search above
         // returns the wrong one.
