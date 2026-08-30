@@ -185,6 +185,13 @@ away, kyoto retries as fast as the failures return, which costs a whole CPU; `Ap
 runs on the periodic tick, stops the light client, and brings Tor back rather than letting it
 spin.
 
+**Tor costs a weaker filter quorum, and that is stated where it is chosen.** `REQUIRED_PEERS`
+is not only how many connections to hold: kyoto passes it into `FilterHeaderAgreements`, so it
+is also how many peers must agree on the filter headers before a single filter is downloaded.
+Eight is reachable directly — measured — and never arrived through Tor exits, where filter
+nodes are scarce, so a scan sat at exactly twenty-five percent for ever: filter headers
+complete, quorum unreachable, no filters. Two over Tor, eight without it.
+
 **What Tor does not cover:** the mempool.space link opens the system browser, which is outside
 this process. And proxied connections lose BIP324 v2 encrypted transport, because kyoto
 disables it for them.

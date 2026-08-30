@@ -25,21 +25,34 @@ use bdk_kyoto::bip157::HashCheckpoint;
 use super::accounts::Portfolio;
 use super::{Meta, Paths, Summary};
 
-/// How many peers to hold open. Kyoto clamps this to 1–15 and defaults to 1.
+/// How many peers to hold open — and, in kyoto, how many must agree on the
+/// filter headers before a single filter is downloaded.
 ///
-/// Eight, matching Bitcoin Core's outbound default, for two reasons that point
-/// the same way. Filters are fetched in parallel, so this is the main lever on
-/// sync speed, and the peers serving `NODE_COMPACT_FILTERS` are a small
-/// minority — most nodes do not run `-blockfilterindex=1` — so a good share of
-/// connections are useless for our purposes.
+/// Those are not the same question, and conflating them cost a day. kyoto
+/// passes this straight into `FilterHeaderAgreements`, so eight — chosen by
+/// analogy with Bitcoin Core's outbound default — meant demanding that eight
+/// peers *serving compact filters* agree before the scan could start. Nodes
+/// that serve filters are a small minority: most nodes do not run
+/// `-blockfilterindex=1`. So filter headers would complete, quorum would never
+/// be reached, and the sync sat at exactly twenty-five percent for ever.
 ///
-/// It also helps privacy rather than hurting it. When a filter matches, the
-/// block is fetched from one peer, and that peer learns a block interested us.
-/// Spreading those requests over more peers means no single one sees the whole
-/// pattern; holding few connections concentrates it.
-///
-/// The cost is bandwidth and memory, which is why this is not simply 15.
+/// Eight is reachable on a direct connection — measured, not assumed: with
+/// Tor off the same wallet finds eight filter-serving peers and downloads at
+/// full speed. So the strong quorum stays where it works.
 pub const REQUIRED_PEERS: u8 = 8;
+
+/// The quorum over Tor, where filter-serving peers are much harder to reach:
+/// exits are a bottleneck, every connection is a circuit, and eight never
+/// arrived.
+///
+/// Two peers agreeing is a weaker check than eight, and it is the honest
+/// trade. A peer that lies about filter headers can hide a payment from this
+/// wallet — worth defending against — but the alternative here is not a
+/// stronger check, it is a wallet that never syncs at all, which protects
+/// nobody. Anyone who wants the stronger guarantee can turn Tor off, and the
+/// network view says which one is in force.
+pub const REQUIRED_PEERS_OVER_TOR: u8 = 2;
+
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The same two, over Tor.
 ///
@@ -297,7 +310,7 @@ impl Session {
         }
 
         let client: LightClient<_, Multiple> = builder
-            .required_peers(REQUIRED_PEERS)
+            .required_peers(if tor.is_some() { REQUIRED_PEERS_OVER_TOR } else { REQUIRED_PEERS })
             .data_dir(headers)
             .build_with_wallets(wallets)
             .map_err(|e| anyhow!("could not build the light client: {e}"))?;
