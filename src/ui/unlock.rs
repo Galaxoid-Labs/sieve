@@ -157,7 +157,13 @@ impl Component for Unlock {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
+    fn update_with_view(
+        &mut self,
+        widgets: &mut Self::Widgets,
+        msg: Self::Input,
+        sender: ComponentSender<Self>,
+        _root: &Self::Root,
+    ) {
         match msg {
             UnlockMsg::SwitchWallet => {
                 let _ = sender.output(UnlockOutput::SwitchWallet);
@@ -167,6 +173,11 @@ impl Component for Unlock {
                 self.paths = Some(paths);
                 self.name = name;
                 self.error = None;
+                // Emptied for the wallet being opened. A password left in the
+                // field belongs to a different wallet, and the one thing worse
+                // than typing it again is submitting it without looking —
+                // which is what a prefilled box invites.
+                widgets.password_row.set_text("");
             }
             UnlockMsg::Submit(passphrase) => {
                 let Some(paths) = self.paths.clone() else { return };
@@ -186,10 +197,13 @@ impl Component for Unlock {
                 });
             }
         }
+
+        self.update_view(widgets, sender);
     }
 
-    fn update_cmd(
+    fn update_cmd_with_view(
         &mut self,
+        widgets: &mut Self::Widgets,
         msg: Self::CommandOutput,
         sender: ComponentSender<Self>,
         _root: &Self::Root,
@@ -198,9 +212,13 @@ impl Component for Unlock {
         self.busy = false;
         match result {
             Ok((paths, summary)) => {
+                // Nothing keeps a password that has done its job.
+                widgets.password_row.set_text("");
                 let _ = sender.output(UnlockOutput::Unlocked { paths, summary });
             }
             Err(message) => self.error = Some(message),
         }
+
+        self.update_view(widgets, sender);
     }
 }

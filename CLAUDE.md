@@ -6,6 +6,13 @@ BDK with a BIP157/158 compact-block-filter light client on the back.
 The name is the architecture: compact block filters sieve blocks locally, so the wallet
 never tells a server which addresses it owns.
 
+## Passwords do not linger in fields
+
+The unlock dialog empties its password row when a wallet is opened and again once a password
+has done its job. It is one line, and it is not cosmetic: a password left in the box belongs to
+the wallet you just left, and a prefilled field invites submitting it without looking. The same
+applies to any field that ever holds a secret.
+
 ## Two secrets, two words
 
 Never use these interchangeably in code, comments, or UI copy. Blurring them is how people
