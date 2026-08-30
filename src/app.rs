@@ -53,6 +53,12 @@ pub struct App {
     /// The height the chain view last reported, which is what makes the
     /// estimate stale.
     chain_tip: Option<u32>,
+    /// When the peer list was last read, so a stream of connection warnings
+    /// cannot turn into a stream of widget rebuilds.
+    peers_read: Option<std::time::Instant>,
+    /// The Amounts row and its unit label, kept so toggling the unit does not
+    /// rebuild the page.
+    amounts_row: Option<(adw::ActionRow, gtk::Label)>,
     /// What the last proxy check found, shown under the Tor switch.
     tor_status: Option<String>,
     /// Whether that status is a failure, so it can be coloured like one.
@@ -86,6 +92,9 @@ pub struct App {
 /// Checked at startup because GTK draws a placeholder for a name it cannot
 /// resolve and says nothing about it, so a typo or an icon that is simply not
 /// in the theme ships silently. Add to this list when adding an icon.
+/// How often the peer list may be re-read while connections are churning.
+const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
 const ICONS: &[&str] = &[
     "channel-secure-symbolic",
     "document-open-recent-symbolic",
@@ -392,6 +401,8 @@ impl Component for App {
             active: None,
             fee_estimate: None,
             chain_tip: None,
+            peers_read: None,
+            amounts_row: None,
             tor_status: None,
             tor_failed: false,
             tor_asked_for: false,
@@ -499,7 +510,7 @@ impl Component for App {
                 self.settings.denomination = self.settings.denomination.toggled();
                 self.settings.save();
                 self.wallet.emit(WalletPageMsg::SetDenomination(self.settings.denomination));
-                self.rebuild_preferences(&sender);
+                self.refresh_amounts_row();
             }
 
             AppMsg::SetTor(on) => {
@@ -512,7 +523,12 @@ impl Component for App {
                     crate::tor::daemon::stop();
                     self.tor_active = None;
                     self.tor_status = None;
-                    self.rebuild_preferences(&sender);
+                    // Not just the preferences page: the network view carries
+                    // the same claim, and leaving it saying "through Tor" is
+                    // the most dangerous kind of stale — it describes the
+                    // protection you no longer have.
+                    self.refresh_tor_row();
+                    self.wallet.emit(WalletPageMsg::TorProblem(None));
                     self.restart_session(&sender);
                     return;
                 }
@@ -547,7 +563,6 @@ impl Component for App {
                 // other one.
                 self.fee_estimate = None;
                 sender.input(AppMsg::EstimateFee);
-                self.rebuild_preferences(&sender);
             }
 
             AppMsg::EstimateFee => {
@@ -858,7 +873,16 @@ impl Component for App {
                         // download is the slowest thing the node is doing. That
                         // is why the list used to stay empty until the sync had
                         // finished — precisely when it stopped being useful.
-                        if let Some(session) = self.session.clone() {
+                        // Throttled. This warning fires continuously while
+                        // the node is below its target, and rebuilding the
+                        // peer list on each one pegged the main thread with
+                        // widget churn.
+                        let due = self
+                            .peers_read
+                            .map(|last| last.elapsed() >= PEER_REFRESH)
+                            .unwrap_or(true);
+                        if due && let Some(session) = self.session.clone() {
+                            self.peers_read = Some(std::time::Instant::now());
                             sender.oneshot_command(async move {
                                 AppCmd::Peers(session.peers().await)
                             });
@@ -1099,6 +1123,25 @@ impl App {
         self.ensure_tor(sender);
     }
 
+    /// Write the unit into the Amounts row.
+    ///
+    /// In place, for the same reason as the Tor row: rebuilding the page under
+    /// somebody who has just tapped a row throws them back to the top of it.
+    fn refresh_amounts_row(&self) {
+        let Some((row, unit)) = &self.amounts_row else { return };
+        row.set_subtitle(match self.settings.denomination {
+            crate::settings::Denomination::Sats => "Satoshis",
+            crate::settings::Denomination::Btc => "Decimal BTC",
+        });
+        let network = self
+            .active
+            .as_ref()
+            .and_then(wallet::Meta::load)
+            .map(|m| m.network)
+            .unwrap_or_else(|| "bitcoin".into());
+        unit.set_label(self.settings.denomination.label(&network));
+    }
+
     /// Write the current Tor state into the rows that show it.
     ///
     /// In place, rather than rebuilding the preferences page: the page is
@@ -1305,6 +1348,7 @@ impl App {
         let unit = gtk::Label::new(Some(self.settings.denomination.label(&network)));
         unit.add_css_class("dim-label");
         amounts.add_suffix(&unit);
+        self.amounts_row = Some((amounts.clone(), unit.clone()));
         {
             let sender = sender.clone();
             amounts.connect_activated(move |_| sender.input(AppMsg::ToggleDenomination));

@@ -304,6 +304,9 @@ pub struct WalletPage {
     tor: Option<String>,
     /// Why nothing is connecting, when Tor is on and could not be started.
     tor_problem: Option<String>,
+    /// The addresses currently in the list, so it is only rebuilt when they
+    /// change.
+    peer_addresses: Vec<String>,
     /// Machines, as opposed to connections. kyoto opens more than one
     /// connection to some peers, so the two numbers differ and saying only the
     /// first invites the reader to count the list and find it wrong.
@@ -1287,6 +1290,7 @@ impl Component for WalletPage {
             send,
             tor: None,
             tor_problem: None,
+            peer_addresses: Vec::new(),
             distinct_peers: 0,
             locked: true,
             price: None,
@@ -1379,10 +1383,15 @@ impl Component for WalletPage {
             WalletPageMsg::SetChain(chain) => {
                 if let Some(info) = &chain {
                     self.distinct_peers = info.peers.len();
-                    let mut guard = self.peers_list.guard();
-                    guard.clear();
-                    for peer in &info.peers {
-                        guard.push_back(peer.clone());
+                    let addresses: Vec<String> =
+                        info.peers.iter().map(|peer| peer.address.clone()).collect();
+                    if addresses != self.peer_addresses {
+                        self.peer_addresses = addresses;
+                        let mut guard = self.peers_list.guard();
+                        guard.clear();
+                        for peer in &info.peers {
+                            guard.push_back(peer.clone());
+                        }
                     }
                 }
                 // What peers will relay is the floor under the fee field.
@@ -1399,6 +1408,17 @@ impl Component for WalletPage {
 
             WalletPageMsg::SetPeers(peers) => {
                 self.distinct_peers = peers.len();
+                // Only when the set has actually changed. Tearing down eight
+                // rows of widgets and building them again for an identical
+                // list is work the main thread cannot afford at the rate
+                // connection warnings arrive.
+                let addresses: Vec<String> =
+                    peers.iter().map(|peer| peer.address.clone()).collect();
+                if addresses == self.peer_addresses {
+                    return;
+                }
+                self.peer_addresses = addresses;
+
                 let mut guard = self.peers_list.guard();
                 guard.clear();
                 for peer in peers {
@@ -1444,6 +1464,7 @@ impl Component for WalletPage {
                 self.progress = Progress::Connecting;
                 self.peers = None;
                 self.distinct_peers = 0;
+                self.peer_addresses.clear();
                 self.note = None;
                 self.error = None;
                 self.receive_index = 0;
