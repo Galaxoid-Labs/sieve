@@ -869,13 +869,33 @@ impl Component for WalletPage {
                             // The balance is what people open a wallet to see,
                             // so it leads, in a card of its own rather than as
                             // the first item of an undifferentiated column.
-                            gtk::Box {
+                            gtk::Overlay {
                                 add_css_class: "card",
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_spacing: 2,
+                                add_css_class: "balance-card",
                                 set_margin_top: 12,
+                                // Clips to the card's rounded rectangle, which
+                                // is what cuts the mark off at the corner
+                                // instead of letting it hang outside.
+                                set_overflow: gtk::Overflow::Hidden,
                                 #[watch]
                                 set_visible: !model.locked,
+
+                                // Behind the numbers, tucked into the corner
+                                // and mostly outside it. Decoration, so it is
+                                // barely there and takes its colour from the
+                                // theme rather than being painted on.
+                                add_overlay = &gtk::Label {
+                                    add_css_class: "balance-mark",
+                                    set_label: "₿",
+                                    set_halign: gtk::Align::Start,
+                                    set_valign: gtk::Align::End,
+                                    set_can_target: false,
+                                },
+
+                                #[wrap(Some)]
+                                set_child = &gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 2,
 
                                 gtk::Label {
                                     add_css_class: "title-1",
@@ -918,6 +938,7 @@ impl Component for WalletPage {
                                     set_justify: gtk::Justification::Center,
                                     #[watch]
                                     set_label: &model.balance_caption(),
+                                },
                                 },
                             },
 

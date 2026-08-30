@@ -66,7 +66,15 @@ fn main() {
            border-radius: 9px; \
            padding: 10px 12px; \
          } \
-         .seed-index { opacity: 0.5; font-size: 0.8em; }",
+         .seed-index { opacity: 0.5; font-size: 0.8em; } \
+         .balance-mark { \
+           font-size: 190px; \
+           font-weight: 800; \
+           color: alpha(currentColor, 0.06); \
+           margin-left: -34px; \
+           margin-bottom: -76px; \
+           transform: rotate(-14deg); \
+         }",
     );
 
     // Sieve's own icons, compiled into the binary. Adwaita has no plain
