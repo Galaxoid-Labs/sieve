@@ -209,12 +209,35 @@ wallet was opened, so it is off by default, stated plainly in its preference row
 made on a test network. If any other outbound call is ever added, it gets the same treatment:
 opt-in, disclosed, and justified in the row that enables it.
 
-## Known upstream gap: no header persistence
+## Shared block headers, per network
+
+`wallet::headers` is the persistence kyoto does not do. Headers are public chain data and
+identical for every wallet on a network, so the file is per network — `chain/<network>/headers.dat`,
+eighty bytes each — and one download serves every wallet on that chain *and* every later start.
+
+**What it is trusted for, and how that trust is bounded.** The file becomes the node's idea of
+the chain, so it is anchored: the first header must hash to a checkpoint compiled into this
+binary, and every header after it must name its predecessor. A file failing either test is
+ignored rather than repaired or partly used. kyoto validates again on its own account
+(`BlockTree::accept_header`), but a wallet should not hand its node a chain it has not checked
+itself.
+
+**And the range must cover what the wallet needs.** A snapshot starting *after* a wallet's
+birthday would have it scan from the wrong place and show a balance missing everything before —
+so `Session::start` uses stored headers only when they reach back to the birthday, and fetches
+from the network otherwise. That is the quiet failure this whole feature could have introduced.
+
+Written once per session, after a sync lands, by walking `get_header` from the birthday to the
+tip — a local read of the node's own memory, not the network, but a quarter of a million of them
+is still work, so never while a sync is in progress.
+
+## Known upstream gap: kyoto ignores `data_dir`
 
 bip157 0.6.3 accepts a `data_dir` and ignores it — `Node::new` destructures the config as
-`data_path: _` and the field is read nowhere else. So block headers live in memory only and
-are re-fetched on every launch. `chain/<network>/` is created in anticipation of a version
-that uses it; do not assume anything is in there.
+`data_path: _` and the field is read nowhere else. So block headers live in memory only, and
+without help they are re-fetched on every launch and by every wallet. `wallet::headers` above
+is that help: `ChainState::Snapshot` is the supported way to hand a node a chain, so the
+persistence is ours while the gap lasts.
 
 The impact is smaller than it sounds. `ScanType::Sync` starts the node's chain at the
 *wallet's* checkpoint, which BDK does persist, walked back 7 blocks for reorg safety — so a

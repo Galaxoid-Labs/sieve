@@ -265,6 +265,26 @@ impl Session {
         let remembered = crate::peers::remembered(network);
         tracing::info!(count = remembered.len(), %network, "seeding with remembered peers");
         let mut builder = Builder::new(network);
+        // Headers this network has already given us, if they reach back far
+        // enough for what this wallet needs. Using a chain that starts *after*
+        // a wallet's birthday would scan from the wrong place and show a
+        // balance missing everything before it — so the range is checked, and
+        // anything short is ignored rather than trimmed to fit.
+        let stored = crate::wallet::headers::load(network).filter(|headers| {
+            let covers = headers
+                .first()
+                .is_some_and(|first| first.height <= meta.birthday_height);
+            if !covers {
+                tracing::info!(
+                    "stored headers start after this wallet's birthday; fetching instead"
+                );
+            }
+            covers
+        });
+        if let Some(headers) = stored {
+            builder = builder.chain_state(bdk_kyoto::bip157::chain::ChainState::Snapshot(headers));
+        }
+
         // An onion address is only reachable through Tor. Handing one to a
         // node connecting directly spends an attempt on something that cannot
         // work, and the remembered list is mostly onions after a run with Tor
@@ -603,6 +623,49 @@ impl Session {
             return Vec::new();
         };
         distinct_peers(peers)
+    }
+
+    /// Write this network's block headers out for the next start.
+    ///
+    /// Headers are public chain data and identical for every wallet, so this
+    /// is per network rather than per wallet: a second wallet on a chain Sieve
+    /// has already seen starts with the headers rather than fetching them
+    /// again, and so does the next launch.
+    ///
+    /// One local round trip per header — `get_header` reads the node's own
+    /// memory rather than the network — but a quarter of a million of them is
+    /// still work, so this runs once, after a sync has landed, and never while
+    /// one is in progress.
+    pub async fn store_headers(&self, from: u32) {
+        let Ok(tip) = self.requester.chain_tip().await else { return };
+        if tip.height <= from {
+            return;
+        }
+
+        let started = std::time::Instant::now();
+        let mut headers = Vec::with_capacity((tip.height - from + 1) as usize);
+        for height in from..=tip.height {
+            match self.requester.get_header(height).await {
+                Ok(Some(header)) => headers.push(header),
+                // A gap means the node does not have what we thought it had.
+                // A partial chain is not worth storing: the loader would
+                // reject it anyway, and a shorter one is not more useful.
+                _ => {
+                    tracing::debug!(height, "no header at this height; not storing");
+                    return;
+                }
+            }
+        }
+
+        if let Err(e) = crate::wallet::headers::save(self.network, &headers) {
+            tracing::warn!(%e, "could not store block headers");
+            return;
+        }
+        tracing::info!(
+            count = headers.len(),
+            seconds = started.elapsed().as_secs_f32(),
+            "stored this network's block headers"
+        );
     }
 
     /// Await the next progress event. `None` when the node has stopped.

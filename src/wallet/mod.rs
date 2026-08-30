@@ -27,6 +27,7 @@ use zeroize::Zeroizing;
 
 pub mod accounts;
 pub mod send;
+pub mod headers;
 pub mod watch;
 pub mod node;
 

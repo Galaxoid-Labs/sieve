@@ -56,6 +56,9 @@ pub struct App {
     /// round trips through circuits. Without this, a signet chain, a signet
     /// peer list, or worse a signet *balance* lands on a mainnet wallet.
     generation: u64,
+    /// Whether this session has already written its headers out. Once is
+    /// enough: it walks the whole chain the node holds.
+    headers_stored: bool,
     /// The last locally computed fee estimate: height, sat/vB, and where it
     /// came from. Kept so switching to Send twice does not download the same
     /// block twice.
@@ -422,6 +425,7 @@ impl Component for App {
             active: None,
             balance_sats: None,
             generation: 0,
+            headers_stored: false,
             fee_estimate: None,
             chain_tip: None,
             peers_read: None,
@@ -1034,6 +1038,20 @@ impl Component for App {
             }
             AppCmd::Update { generation, result: Ok(summary) } if self.current(generation) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
+                // A sync has landed, so the node's header chain is worth
+                // keeping — for the next wallet on this network and for the
+                // next start. Once per session: it walks every header.
+                if !self.headers_stored
+                    && let Some(session) = self.session.clone()
+                    && let Some(from) =
+                        self.active.as_ref().and_then(wallet::Meta::load).map(|m| m.birthday_height)
+                {
+                    self.headers_stored = true;
+                    sender.oneshot_command(async move {
+                        session.store_headers(from).await;
+                        AppCmd::Tick
+                    });
+                }
                 self.balance_sats = Some(summary.balance_sats);
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
@@ -1491,6 +1509,7 @@ impl App {
         // A new session, so anything still in flight for the last one is
         // from a wallet that is no longer on screen.
         self.generation += 1;
+        self.headers_stored = false;
         let generation = self.generation;
         let tor = self.tor_proxy();
         sender.oneshot_command(async move {
