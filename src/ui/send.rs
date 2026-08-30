@@ -278,16 +278,6 @@ impl Component for SendForm {
                                 // the app.
                                 add_css_class: "numeric",
 
-                                // A field that only holds numbers should only
-                                // take numbers. Refused at the keystroke rather
-                                // than explained afterwards: an amount that
-                                // cannot be typed cannot be misread.
-                                connect_insert_text => move |row, text, _position| {
-                                    if !text.chars().all(is_amount_character) {
-                                        row.stop_signal_emission_by_name("insert-text");
-                                    }
-                                },
-
                                 // Typing an amount is a way of saying "not
                                 // everything", so the field stays editable and
                                 // an edit releases Max rather than being
@@ -395,6 +385,15 @@ impl Component for SendForm {
         model.to_row = Some(widgets.to_row.clone());
         model.amount_row = Some(widgets.amount_row.clone());
 
+        // A field that only holds numbers should only take numbers, refused at
+        // the keystroke rather than explained afterwards.
+        //
+        // Connected to the delegate, not to the row: `adw::EntryRow` implements
+        // `Editable` by delegating to an inner `GtkText`, and `insert-text` is
+        // emitted there. Connecting to the row compiles, runs, and does
+        // nothing — which is exactly what it did.
+        install_amount_filter(&widgets.amount_row);
+
         ComponentParts { model, widgets }
     }
 
@@ -445,6 +444,17 @@ impl Component for SendForm {
             }
 
             SendMsg::AmountEdited => {
+                // Whatever route the text arrived by — typing, paste, drop —
+                // it leaves as digits. `changed` is forwarded from the
+                // delegate, so this runs even where `insert-text` does not.
+                let text = widgets.amount_row.text();
+                if !text.chars().all(is_amount_character) {
+                    let cleaned: String =
+                        text.chars().filter(|c| is_amount_character(*c)).collect();
+                    widgets.amount_row.set_text(&cleaned);
+                    widgets.amount_row.set_position(-1);
+                }
+
                 // Still the whole balance? Still a max send. Anything else and
                 // the toggle no longer describes what is in the field.
                 if self.max
@@ -611,6 +621,21 @@ impl SendForm {
     }
 }
 
+/// Refuse anything that is not part of a number, at the keystroke.
+///
+/// Connected to the delegate, not to the row: `adw::EntryRow` implements
+/// `Editable` by delegating to an inner `GtkText`, and `insert-text` is emitted
+/// there. Connecting to the row itself compiles, runs, and does nothing —
+/// which is exactly what it did.
+fn install_amount_filter(row: &adw::EntryRow) {
+    let Some(delegate) = row.delegate() else { return };
+    delegate.connect_insert_text(|editable, text, _position| {
+        if !text.chars().all(is_amount_character) {
+            editable.stop_signal_emission_by_name("insert-text");
+        }
+    });
+}
+
 /// What may be typed into an amount.
 ///
 /// Digits and a decimal point, plus the separators a grouped number is shown
@@ -633,6 +658,30 @@ fn capitalise(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::capitalise;
+    use adw::prelude::*;
+    use relm4::adw;
+
+    /// Proves the filter is attached where the signal is actually emitted.
+    /// Needs a display, so it is not part of the default run.
+    #[test]
+    #[ignore = "needs a display"]
+    fn the_amount_field_refuses_letters() {
+        relm4::gtk::init().unwrap();
+        let row = super::adw::EntryRow::new();
+        super::install_amount_filter(&row);
+
+        let mut position = 0;
+        row.insert_text("123", &mut position);
+        assert_eq!(row.text(), "123", "digits should go in");
+
+        let mut position = row.text().len() as i32;
+        row.insert_text("abc", &mut position);
+        assert_eq!(row.text(), "123", "letters should not");
+
+        let mut position = row.text().len() as i32;
+        row.insert_text(".5", &mut position);
+        assert_eq!(row.text(), "123.5", "a decimal point should");
+    }
 
     #[test]
     fn amounts_take_digits_and_separators_only() {
