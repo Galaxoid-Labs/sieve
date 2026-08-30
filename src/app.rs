@@ -61,6 +61,8 @@ pub struct App {
     headers_stored: bool,
     /// When scan progress was last written down.
     scan_recorded: Option<std::time::Instant>,
+    /// When headers were last banked during the walk.
+    headers_banked: Option<std::time::Instant>,
     /// The last locally computed fee estimate: height, sat/vB, and where it
     /// came from. Kept so switching to Send twice does not download the same
     /// block twice.
@@ -109,6 +111,9 @@ pub struct App {
 /// in the theme ships silently. Add to this list when adding an icon.
 /// How often the peer list may be re-read while connections are churning.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often to bank headers while they are still coming in.
+const HEADER_BANK: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// How far behind the estimated scan position to record a resume point.
 ///
 /// Two thousand blocks — a difficulty period. The position is derived from a
@@ -437,6 +442,7 @@ impl Component for App {
             generation: 0,
             headers_stored: false,
             scan_recorded: None,
+            headers_banked: None,
             fee_estimate: None,
             chain_tip: None,
             peers_read: None,
@@ -1099,9 +1105,18 @@ impl Component for App {
                 // recovery scan that ran for an hour and was then restarted
                 // saved nothing and fetched every header again. The headers
                 // were ready in the first two minutes.
-                if matches!(progress, Progress::Scanning(_) | Progress::Synced) {
-                    self.store_headers(&sender);
-                    self.record_scan_progress(&progress);
+                // Headers are banked while they arrive, not only once they
+                // are all in. The walk takes a quarter of an hour on a
+                // whole-chain wallet, and a restart inside that window used to
+                // lose every one of them — which is the window anybody
+                // watching a slow wallet actually restarts in.
+                match progress {
+                    Progress::Headers(_) => self.store_headers_periodically(&sender),
+                    Progress::Scanning(_) | Progress::Synced => {
+                        self.store_headers(&sender);
+                        self.record_scan_progress(&progress);
+                    }
+                    _ => {}
                 }
                 self.wallet.emit(WalletPageMsg::SetProgress(progress));
                 self.await_progress(&sender);
@@ -1402,6 +1417,31 @@ impl App {
         self.scan_recorded = Some(std::time::Instant::now());
         tracing::info!(height = safe, "recording how far the scan has checked");
         wallet::Meta::record_scanned_to(&paths, safe);
+    }
+
+    /// Bank the headers gathered so far, now and then, while they arrive.
+    ///
+    /// Each call takes only what is new, so this is cheap after the first.
+    fn store_headers_periodically(&mut self, sender: &ComponentSender<Self>) {
+        let due = self
+            .headers_banked
+            .map(|last| last.elapsed() >= HEADER_BANK)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.headers_banked = Some(std::time::Instant::now());
+
+        let (Some(session), Some(from)) = (
+            self.session.clone(),
+            self.active.as_ref().and_then(wallet::Meta::load).map(|m| m.birthday_height),
+        ) else {
+            return;
+        };
+        sender.oneshot_command(async move {
+            session.store_headers(from).await;
+            AppCmd::Tick
+        });
     }
 
     /// Write this network's block headers out, once per session.
