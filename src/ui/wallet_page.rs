@@ -57,7 +57,10 @@ impl FactoryComponent for PeerRow {
                 Some(false) => "No compact filters",
                 // Kyoto reports nothing for some connections; saying so beats
                 // claiming the peer is useless when we simply do not know.
-                None => "Services not reported",
+                // kyoto reports nothing for many connections, and during
+                // the header stage it has not asked: headers come from any
+                // peer at all.
+                None => "Has not said what it serves",
             },
 
             add_prefix = &gtk::Image {
@@ -631,6 +634,25 @@ impl WalletPage {
         }
     }
 
+    /// What the peers list says about itself.
+    ///
+    /// The two stages have different rules, and not saying so makes the peer
+    /// list look broken: block headers come from any peer — filter support is
+    /// irrelevant to them — and only once filters start does kyoto require it
+    /// and drop everyone else. That is the eviction people watch and wonder
+    /// about.
+    fn peers_note(&self) -> String {
+        if matches!(self.progress, Progress::Headers(_)) {
+            return "Block headers come from any peer, so this stage does not ask for \
+                    compact filters. When filters start, peers that cannot serve them \
+                    are dropped."
+                .into();
+        }
+        "Every peer here serves compact filters — the ones that cannot are dropped as \
+         soon as filters are needed."
+            .into()
+    }
+
     /// What the Connection row says.
     ///
     /// Named plainly in both directions. "Direct" is the default and not a
@@ -783,6 +805,19 @@ impl WalletPage {
                 None => return "Connecting…".into(),
             },
         };
+        // One peer, on purpose, while block headers come in: kyoto asks for a
+        // single connection until it is past that phase, then opens up to its
+        // target for the filters. Watching the count sit at one for twenty
+        // minutes with nothing saying why is maddening, and it is the most
+        // normal thing the sync does.
+        if matches!(self.progress, Progress::Headers(_)) {
+            return match connections {
+                0 => "Connecting…".into(),
+                1 => "1 peer — all that headers need. More join for the filters".into(),
+                n => format!("{n} peers — headers need one. More join for the filters"),
+            };
+        }
+
         let required = crate::wallet::node::REQUIRED_PEERS as usize;
 
         // Connections and machines are two true numbers answering different
@@ -1470,6 +1505,8 @@ impl Component for WalletPage {
 
                     adw::PreferencesGroup {
                         set_title: "Peers",
+                        #[watch]
+                        set_description: Some(&model.peers_note()),
                         #[watch]
                         set_description: Some(&model.peer_count()),
 
