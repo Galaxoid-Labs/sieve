@@ -1383,6 +1383,15 @@ impl App {
     /// blocks — which is missing money, not lost time. So the figure is
     /// derived from the fraction and then pulled back by a wide margin.
     fn record_scan_progress(&mut self, progress: &Progress) {
+        // A finished scan is exact: everything up to the tip has been checked,
+        // so there is no estimate to be careful about.
+        if matches!(progress, Progress::Synced)
+            && let (Some(paths), Some(tip)) = (self.active.clone(), self.chain_tip)
+        {
+            wallet::Meta::record_scanned_to(&paths, tip);
+            return;
+        }
+
         let Progress::Scanning(fraction) = progress else { return };
         let (Some(paths), Some(tip)) = (self.active.clone(), self.chain_tip) else { return };
         let Some(meta) = wallet::Meta::load(&paths) else { return };

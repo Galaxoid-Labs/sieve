@@ -215,6 +215,17 @@ opt-in, disclosed, and justified in the row that enables it.
 identical for every wallet on a network, so the file is per network — `chain/<network>/headers.dat`,
 eighty bytes each — and one download serves every wallet on that chain *and* every later start.
 
+**The node cannot be given these headers, and that is the library's decision, not an oversight.**
+`bdk_kyoto::build_with_wallets` sets `self.chain_state(ChainState::Checkpoint(cp_min))` one line
+before it builds, so any snapshot handed to the builder is discarded. Nine hundred thousand
+validated headers were loaded and thrown away on every start until that line was found. Do not
+re-add a `ChainState::Snapshot` call: it will look right, log nothing, and do nothing.
+
+**So the store earns its keep as a source of block hashes.** `cp_min` comes from the
+`ScanType::Recovery { checkpoint }` we pass, so moving that checkpoint forward is the one lever
+the API offers — and a checkpoint needs the block hash at its height, which only the stored chain
+has. Headers, resume points and interrupted scans are therefore one feature, not three.
+
 **What it is trusted for, and how that trust is bounded.** The file becomes the node's idea of
 the chain, so it is anchored: the first header must hash to a checkpoint compiled into this
 binary, and every header after it must name its predecessor. A file failing either test is

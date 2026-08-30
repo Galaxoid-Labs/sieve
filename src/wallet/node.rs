@@ -285,29 +285,18 @@ impl Session {
         let remembered = crate::peers::remembered(network);
         tracing::info!(count = remembered.len(), %network, "seeding with remembered peers");
         let mut builder = Builder::new(network);
-        // Headers this network has already given us, if they reach back far
-        // enough for what this wallet needs. Using a chain that starts *after*
-        // a wallet's birthday would scan from the wrong place and show a
-        // balance missing everything before it — so the range is checked, and
-        // anything short is ignored rather than trimmed to fit.
-        let stored = crate::wallet::headers::load(network).filter(|headers| {
-            // `max(1)`: a node has no header at genesis, so a chain stored from
-            // the very beginning starts at height one. Demanding it start at or
-            // before a birthday of zero is a test nothing can pass — which is
-            // how a validated file of nine hundred thousand headers came to be
-            // loaded and then thrown away.
-            let needed = meta.birthday_height.max(1);
-            let covers = headers.first().is_some_and(|first| first.height <= needed);
-            if !covers {
-                tracing::info!(
-                    "stored headers start after this wallet's birthday; fetching instead"
-                );
-            }
-            covers
-        });
-        if let Some(headers) = stored {
-            builder = builder.chain_state(bdk_kyoto::bip157::chain::ChainState::Snapshot(headers));
-        }
+        // The stored headers are deliberately *not* handed to the node.
+        //
+        // `bdk_kyoto::build_with_wallets` sets its own chain state one line
+        // before it builds — `self.chain_state(ChainState::Checkpoint(cp_min))`
+        // — so a snapshot given to the builder is discarded. Nine hundred
+        // thousand validated headers were loaded and thrown away on every
+        // start until that line was found.
+        //
+        // The store earns its keep through `resume_point` instead: the
+        // recovery checkpoint *is* `cp_min`, so moving it forward is the one
+        // lever this API offers, and moving it needs the block hash at that
+        // height — which only the stored chain has.
 
         // An onion address is only reachable through Tor. Handing one to a
         // node connecting directly spends an attempt on something that cannot
