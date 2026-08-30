@@ -113,9 +113,6 @@ pub enum OnboardingMsg {
     EnteredByChoice,
     /// Whether a wallet list sits behind this screen.
     CanCancel(bool),
-    /// Start at the welcome screen with a way back. Only used by the preview
-    /// row in preferences — TEMPORARY, remove that row and this with it.
-    ShowWelcome,
     Back,
     SetPassword(Secret, Secret, String),
     PhraseWritten,
@@ -512,11 +509,6 @@ impl Component for Onboarding {
                 self.can_cancel = true;
                 self.skip_welcome = true;
                 self.step = Step::Password;
-            }
-            OnboardingMsg::ShowWelcome => {
-                self.can_cancel = true;
-                self.skip_welcome = false;
-                self.step = Step::Welcome;
             }
             OnboardingMsg::CanCancel(can) => self.can_cancel = can,
             OnboardingMsg::Begin => self.step = Step::Password,
