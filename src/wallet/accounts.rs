@@ -496,3 +496,74 @@ impl fmt::Debug for Portfolio {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use bdk_wallet::bitcoin::{
+        Amount, Network, OutPoint, Transaction, TxIn, TxOut, Txid, absolute, transaction,
+    };
+    use bdk_wallet::chain::ChainPosition;
+
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon \
+                          abandon abandon abandon abandon abandon about";
+
+    /// A transaction Sieve broadcast is recorded before it is in a block, and
+    /// that record has to survive a restart: the wallet cannot see a mempool,
+    /// so if the row were lost on quit, a payment already on the network would
+    /// simply vanish from the history until it confirmed.
+    #[test]
+    fn an_unconfirmed_transaction_survives_a_restart() {
+        let network = Network::Signet;
+        let dir = std::env::temp_dir().join(format!("sieve-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join(ScriptType::Taproot.db_file());
+
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let txid = {
+            let mut account =
+                Account::create(xprv, ScriptType::Taproot, &db, network, 25).unwrap();
+            let address = account
+                .wallet
+                .reveal_next_address(KeychainKind::External)
+                .address;
+            let tx = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(
+                        "0000000000000000000000000000000000000000000000000000000000000001"
+                            .parse::<Txid>()
+                            .unwrap(),
+                        0,
+                    ),
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(50_000),
+                    script_pubkey: address.script_pubkey(),
+                }],
+            };
+            let txid = tx.compute_txid();
+            account.wallet.apply_unconfirmed_txs([(tx, 1_700_000_000u64)]);
+            account.persist().unwrap();
+            txid
+        };
+
+        // Reopened the way a restart reopens it: from the database alone.
+        let mut account = Account::load(ScriptType::Taproot, &db, network).unwrap().unwrap();
+        let found = account
+            .wallet
+            .transactions()
+            .find(|tx| tx.tx_node.txid == txid)
+            .expect("the pending transaction did not survive the restart");
+        assert!(
+            matches!(found.chain_position, ChainPosition::Unconfirmed { .. }),
+            "it came back, but not as pending"
+        );
+        assert_eq!(account.wallet.balance().untrusted_pending, Amount::from_sat(50_000));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
