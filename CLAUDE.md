@@ -250,6 +250,18 @@ not headers.
 
 ## Remembered peers
 
+**The two stages have different peer rules, and the interface says so.** Block headers are a
+strict chain — each `getheaders` locator depends on the previous answer — so there is nothing to
+parallelise, and kyoto holds exactly one connection while it walks them (`NodeState::Behind => 1`),
+as Bitcoin Core does. Filter support is irrelevant to headers, so it is not asked for, which is
+why a header-stage peer usually reports no services at all. Filters are the opposite: hundreds of
+thousands of independent items, each verifiable against its committed header, so the node opens up
+to `REQUIRED_PEERS` and pulls them in parallel — and disconnects everyone lacking
+`NODE_COMPACT_FILTERS | NODE_NETWORK`, which is the eviction people watch and wonder about.
+
+None of that is a fault, and all of it looks like one unexplained, so the peer count and the peers
+list both say which stage they are describing.
+
 **Peers connected while filters are syncing, and only those.** That is proof rather than
 hearsay: kyoto drops any peer whose version message lacks `NODE_COMPACT_FILTERS | NODE_NETWORK`
 as soon as it is past the block-header phase (`node.rs`, the version handshake), so a peer still
