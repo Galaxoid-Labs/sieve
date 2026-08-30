@@ -78,6 +78,10 @@ const QUIET_BEFORE_WAITING: Duration = Duration::from_secs(20);
 /// arrive in gaps that would look like a stall at the direct-connection
 /// figure.
 const QUIET_OVER_TOR: Duration = Duration::from_secs(60);
+/// How many headers to gather before writing them out. Twenty thousand is
+/// about a megabyte and a few seconds of walking — small enough that an
+/// interrupt costs little, large enough not to rewrite the file constantly.
+const CHUNK: usize = 20_000;
 
 /// Group digits so six-figure block heights stay readable.
 fn thousands(n: u32) -> String {
@@ -185,6 +189,9 @@ pub struct Session {
     scanning: Arc<AtomicBool>,
     /// Which chain this session is on, so remembered peers never cross over.
     network: bdk_wallet::bitcoin::Network,
+    /// The height headers have been written out to, so each save fetches
+    /// only what is new rather than the whole chain again.
+    stored_upto: std::sync::Mutex<Option<u32>>,
     /// The last thing the node actually said about progress.
     ///
     /// Silence is not news. When a scan is under way and nothing arrives for a
@@ -396,6 +403,7 @@ impl Session {
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
             warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
             requester: client.requester(),
+            stored_upto: std::sync::Mutex::new(None),
             last_progress: std::sync::Mutex::new(None),
             quiet: if tor.is_some() { QUIET_OVER_TOR } else { QUIET_BEFORE_WAITING },
             median_time: std::sync::Mutex::new(None),
@@ -660,36 +668,95 @@ impl Session {
     /// memory rather than the network — but a quarter of a million of them is
     /// still work, so this runs once, after a sync has landed, and never while
     /// one is in progress.
-    pub async fn store_headers(&self, from: u32) {
+    /// Called repeatedly while headers come in, and once when they are done.
+    /// Each call takes only what is new: the first writes everything from the
+    /// birthday, and the rest append.
+    ///
+    /// Saving only at the end was the same as never saving. A whole-chain walk
+    /// takes a quarter of an hour, and anyone who restarts inside that window
+    /// — which is anyone watching a wallet that looks stuck — throws all of it
+    /// away and starts again from the birthday. The headers are worth keeping
+    /// from the first minute.
+    pub async fn store_headers(&self, birthday: u32) {
         let Ok(tip) = self.requester.chain_tip().await else { return };
-        if tip.height <= from {
+
+        let from = match *self.stored_upto.lock().unwrap() {
+            Some(stored) => stored + 1,
+            None => birthday,
+        };
+        if tip.height < from {
             return;
         }
 
         let started = std::time::Instant::now();
-        let mut headers = Vec::with_capacity((tip.height - from + 1) as usize);
+        let mut chunk = Vec::with_capacity(CHUNK);
+        let mut written = 0usize;
+
         for height in from..=tip.height {
             match self.requester.get_header(height).await {
-                Ok(Some(header)) => headers.push(header),
+                Ok(Some(header)) => chunk.push(header),
                 // A gap means the node does not have what we thought it had.
-                // A partial chain is not worth storing: the loader would
-                // reject it anyway, and a shorter one is not more useful.
-                _ => {
-                    tracing::debug!(height, "no header at this height; not storing");
+                // Keep what came before it: a shorter chain ending at the gap
+                // still links, and the loader checks that it does.
+                _ => break,
+            }
+
+            // Written as it goes. Fetching a whole chain is a million round
+            // trips and a quarter of an hour; saving only at the end meant
+            // that an interrupt anywhere in that window — a restart, a wallet
+            // switch, a quit — threw away every one of them. Which is exactly
+            // what kept happening.
+            if chunk.len() >= CHUNK {
+                if !self.write_headers(&chunk).await {
                     return;
                 }
+                written += chunk.len();
+                chunk.clear();
             }
         }
 
-        if let Err(e) = crate::wallet::headers::save(self.network, &headers) {
-            tracing::warn!(%e, "could not store block headers");
-            return;
+        if !chunk.is_empty() {
+            if !self.write_headers(&chunk).await {
+                return;
+            }
+            written += chunk.len();
         }
-        tracing::info!(
-            count = headers.len(),
-            seconds = started.elapsed().as_secs_f32(),
-            "stored this network's block headers"
-        );
+
+        if written > 0 {
+            tracing::info!(
+                added = written,
+                upto = ?*self.stored_upto.lock().unwrap(),
+                seconds = started.elapsed().as_secs_f32(),
+                "stored block headers"
+            );
+        }
+    }
+
+    /// Write one chunk, remembering how far the file now reaches.
+    async fn write_headers(&self, chunk: &[bdk_kyoto::bip157::chain::IndexedHeader]) -> bool {
+        let last = chunk.last().map(|h| h.height);
+        let network = self.network;
+        let owned = chunk.to_vec();
+        // Off the async executor: this serializes and writes megabytes.
+        let saved = tokio::task::spawn_blocking(move || {
+            crate::wallet::headers::save(network, &owned)
+        })
+        .await;
+
+        match saved {
+            Ok(Ok(())) => {
+                *self.stored_upto.lock().unwrap() = last;
+                true
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "could not store block headers");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(%e, "storing block headers panicked");
+                false
+            }
+        }
     }
 
     /// Await the next progress event. `None` when the node has stopped.
