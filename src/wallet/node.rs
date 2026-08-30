@@ -92,6 +92,13 @@ fn thousands(n: u32) -> String {
     out
 }
 
+/// How much of kyoto's progress figure is the filter-header phase.
+///
+/// Its fraction is `(filter_headers + 3 * filters) / (4 * total)`, so filter
+/// headers are exactly the first quarter — which is why a sync that cannot
+/// reach filters stops at precisely twenty-five percent.
+pub const FILTER_HEADER_SHARE: f64 = 0.25;
+
 /// Sync progress, as the UI wants to render it.
 #[derive(Debug, Clone)]
 pub enum Progress {
@@ -129,9 +136,22 @@ impl Progress {
             Progress::Headers(height) => {
                 format!("Downloading block headers — {} blocks", thousands(*height))
             }
-            // Two decimals: on a chain of this size one decimal would sit
-            // still for thousands of filters and read as frozen.
-            Progress::Scanning(f) => format!("Scanning block filters — {:.2}%", f * 100.0),
+            // Two phases behind one number, and they are nothing alike. The
+            // first quarter of kyoto's figure is filter *headers* — thirty-two
+            // bytes each, thousands a second. The rest is the filters
+            // themselves, fifteen kilobytes each, which is the whole download.
+            // Calling both "scanning block filters" made the fast part look
+            // like the slow part and the boundary between them look like a
+            // stall.
+            //
+            // Two decimals on the filters: on a chain of this size one decimal
+            // would sit still for thousands of filters and read as frozen.
+            Progress::Scanning(f) if *f < FILTER_HEADER_SHARE => {
+                format!("Fetching filter headers — {:.1}%", f * 100.0)
+            }
+            Progress::Scanning(f) => {
+                format!("Downloading and checking filters — {:.2}%", f * 100.0)
+            }
             Progress::Synced => "Up to date".into(),
             Progress::Waiting => "Waiting for peers to respond…".into(),
         }

@@ -617,9 +617,14 @@ impl WalletPage {
         // What remains, taken from the progress fraction, so the number moves
         // with the percentage beside it. A static total under a climbing
         // percentage reads as a stuck counter.
+        let share = crate::wallet::node::FILTER_HEADER_SHARE;
         match self.progress.fraction() {
-            Some(fraction) if fraction > 0.0 => {
-                let left = (total as f64 * (1.0 - fraction)).round() as u32;
+            // Only during the filter phase is "blocks left" a real number:
+            // before it, no filter has been fetched, so all of them are left
+            // however far the header count has come.
+            Some(fraction) if fraction > share => {
+                let done = (fraction - share) / (1.0 - share);
+                let left = (total as f64 * (1.0 - done)).round() as u32;
                 format!("{label} · about {} blocks left", thousands(left))
             }
             _ => format!("{label} · {} blocks of history to check", thousands(total)),
