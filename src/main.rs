@@ -59,6 +59,13 @@ fn main() {
     //
     // The radius has to be matched by clipping the picture to it, or the
     // code's own white square fills the corners it cuts away.
+    //
+    // The balance mark's tints are the second and last place a colour is
+    // written down rather than taken from the theme. They are identity, not
+    // decoration: orange is bitcoin's, and the test networks get their own so
+    // that a glance at the card says which chain this wallet is on — the
+    // mistake worth making impossible. Kept at a fifth of an alpha so the hue
+    // reads the same against a light or a dark card.
     app.set_global_css(
         ".qr-ground { background-color: #ffffff; border-radius: 18px; padding: 6px; } \
          .seed-word { \
@@ -74,7 +81,10 @@ fn main() {
            margin-left: -34px; \
            margin-bottom: -76px; \
            transform: rotate(-14deg); \
-         }",
+         } \
+         .mark-bitcoin { color: alpha(#f7931a, 0.20); } \
+         .mark-signet { color: alpha(#e01b24, 0.20); } \
+         .mark-testnet { color: alpha(#33d17a, 0.20); }",
     );
 
     // Sieve's own icons, compiled into the binary. Adwaita has no plain

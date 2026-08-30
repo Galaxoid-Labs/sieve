@@ -209,6 +209,21 @@ impl FactoryComponent for TxRow {
     }
 }
 
+/// The balance mark's classes for a network.
+///
+/// A free function so the mapping can be tested without building a page full
+/// of widgets — the mapping is the part that matters.
+fn mark_classes(network: Option<&str>) -> &'static [&'static str] {
+    match network {
+        Some("bitcoin") => &["balance-mark", "mark-bitcoin"],
+        Some("signet") => &["balance-mark", "mark-signet"],
+        Some("testnet") | Some("testnet4") => &["balance-mark", "mark-testnet"],
+        // Regtest is a chain on this machine, and an unknown network is not
+        // ours to colour: the plain mark suits both.
+        _ => &["balance-mark"],
+    }
+}
+
 /// "1 coin", "3 coins".
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
@@ -565,6 +580,14 @@ impl WalletPage {
         }
     }
 
+    /// The balance mark's classes, which carry its tint.
+    ///
+    /// From the summary, so it clears with everything else when a wallet is
+    /// switched rather than leaving one chain's colour over another's money.
+    fn mark_classes(&self) -> &'static [&'static str] {
+        mark_classes(self.summary.as_ref().map(|s| s.network.as_str()))
+    }
+
     /// The clock consensus uses, which is not the tip's own timestamp.
     fn median_time(&self) -> String {
         let Some(chain) = &self.chain else { return "Not yet known".into() };
@@ -885,7 +908,11 @@ impl Component for WalletPage {
                                 // barely there and takes its colour from the
                                 // theme rather than being painted on.
                                 add_overlay = &gtk::Label {
-                                    add_css_class: "balance-mark",
+                                    // Tinted by network, so which chain this
+                                    // wallet is on is answerable at a glance
+                                    // rather than by reading a subtitle.
+                                    #[watch]
+                                    set_css_classes: model.mark_classes(),
                                     set_label: "₿",
                                     set_halign: gtk::Align::Start,
                                     set_valign: gtk::Align::End,
@@ -2002,6 +2029,28 @@ fn detail_row(title: &str, value: &str) -> adw::ActionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tint is how you tell at a glance which chain the money is on, so
+    /// mainnet must never wear a test network's colour or the reverse.
+    #[test]
+    fn every_network_gets_its_own_tint() {
+        use super::mark_classes;
+
+        assert_eq!(mark_classes(Some("bitcoin")), ["balance-mark", "mark-bitcoin"]);
+        assert_eq!(mark_classes(Some("signet")), ["balance-mark", "mark-signet"]);
+        assert_eq!(mark_classes(Some("testnet")), ["balance-mark", "mark-testnet"]);
+        assert_eq!(mark_classes(Some("testnet4")), ["balance-mark", "mark-testnet"]);
+
+        // A chain on this machine, anything unrecognised, and a wallet that
+        // has not synced yet all stay plain rather than borrowing a colour
+        // that means something else.
+        assert_eq!(mark_classes(Some("regtest")), ["balance-mark"]);
+        assert_eq!(mark_classes(Some("something-new")), ["balance-mark"]);
+        assert_eq!(mark_classes(None), ["balance-mark"]);
+
+        // Mainnet must never wear a test network's colour, or the reverse.
+        assert_ne!(mark_classes(Some("bitcoin")), mark_classes(Some("signet")));
+    }
 
     #[test]
     fn explorer_urls_match_the_network() {
