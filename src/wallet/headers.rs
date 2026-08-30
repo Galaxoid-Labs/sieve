@@ -86,37 +86,37 @@ pub fn load(network: Network) -> Option<Vec<IndexedHeader>> {
 pub fn save(network: Network, headers: &[IndexedHeader]) -> std::io::Result<()> {
     let Some(first) = headers.first() else { return Ok(()) };
 
-    // Keep whichever range reaches back further, extended to whichever tip is
-    // higher. The two are contiguous by construction — the same chain — so a
-    // wider start and a newer end can simply be joined.
-    let existing = load(network);
-    let combined: Vec<IndexedHeader> = match existing {
-        Some(stored)
-            if stored.first().is_some_and(|s| s.height < first.height) =>
-        {
-            let last_stored = stored.last().map(|h| h.height).unwrap_or(0);
-            let mut merged = stored;
-            // Only the part of the new chain that the stored one does not
-            // already cover, and only if it joins on.
-            merged.extend(
-                headers
-                    .iter()
-                    .filter(|h| h.height > last_stored)
-                    .cloned(),
-            );
-            let contiguous = merged
-                .windows(2)
-                .all(|w| w[1].height == w[0].height + 1);
-            if !contiguous {
-                tracing::debug!(%network, "stored and new headers do not join; keeping the wider");
-                merged.truncate(
-                    merged.iter().position(|h| h.height > last_stored).unwrap_or(merged.len()),
-                );
+    // A union of what is on disk and what has just been walked, so the file
+    // only ever grows.
+    //
+    // The rule this replaces kept the stored chain only when it started
+    // *earlier*. Two chains that both start at height one are not "earlier",
+    // so a freshly started node with two thousand headers overwrote a stored
+    // nine hundred thousand — the file went backwards, and the next start
+    // fetched the lot again.
+    let combined: Vec<IndexedHeader> = match load(network) {
+        Some(stored) => {
+            let mut by_height: std::collections::BTreeMap<u32, IndexedHeader> =
+                stored.into_iter().map(|h| (h.height, h)).collect();
+            for header in headers {
+                by_height.insert(header.height, header.clone());
             }
-            merged
+
+            // The longest run with no gap in it, starting from the lowest
+            // height: a chain with a hole is not a chain, and the loader would
+            // refuse it anyway.
+            let mut contiguous: Vec<IndexedHeader> = Vec::with_capacity(by_height.len());
+            for (height, header) in by_height {
+                match contiguous.last() {
+                    Some(previous) if previous.height + 1 != height => break,
+                    _ => contiguous.push(header),
+                }
+            }
+            contiguous
         }
-        _ => headers.to_vec(),
+        None => headers.to_vec(),
     };
+
     let headers = &combined[..];
     let Some(first) = headers.first() else { return Ok(()) };
 
@@ -216,6 +216,48 @@ mod tests {
         headers
     }
 
+    /// A run of linked headers starting at `from`.
+    fn sample_run(from: u32, count: u32) -> Vec<IndexedHeader> {
+        let mut headers = Vec::new();
+        let mut previous: Option<bdk_wallet::bitcoin::BlockHash> = None;
+        for index in 0..count {
+            let header = Header {
+                version: bdk_wallet::bitcoin::block::Version::TWO,
+                prev_blockhash: previous.unwrap_or_else(|| {
+                    "000000000000000004ec466ce4732fe6f1ed1cddc2ed4b328fff5224276e3f6f"
+                        .parse()
+                        .unwrap()
+                }),
+                merkle_root: "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+                    .parse()
+                    .unwrap(),
+                time: 1_450_000_000 + index,
+                bits: bdk_wallet::bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+                nonce: index,
+            };
+            previous = Some(header.block_hash());
+            headers.push(IndexedHeader { height: from + index, header });
+        }
+        headers
+    }
+
+    /// The merge `save` performs, without touching a filesystem.
+    fn union(stored: &[IndexedHeader], fresh: &[IndexedHeader]) -> Vec<IndexedHeader> {
+        let mut by_height: std::collections::BTreeMap<u32, IndexedHeader> =
+            stored.iter().map(|h| (h.height, h.clone())).collect();
+        for header in fresh {
+            by_height.insert(header.height, header.clone());
+        }
+        let mut contiguous: Vec<IndexedHeader> = Vec::new();
+        for (height, header) in by_height {
+            match contiguous.last() {
+                Some(previous) if previous.height + 1 != height => break,
+                _ => contiguous.push(header),
+            }
+        }
+        contiguous
+    }
+
     #[test]
     fn what_is_written_is_read_back() {
         let headers = sample();
@@ -275,6 +317,39 @@ mod tests {
         short.extend_from_slice(&5u32.to_le_bytes());
         short.extend_from_slice(&[0u8; HEADER_LEN]);
         assert!(parse(&short).is_none());
+    }
+
+    /// The file must never go backwards.
+    ///
+    /// A node that has just started holds a couple of thousand headers; the
+    /// file may hold a million. Saving the short one over the long one — which
+    /// is what happened — throws away everything and fetches it all again on
+    /// the next start.
+    #[test]
+    fn a_shorter_chain_never_replaces_a_longer_one() {
+        let long = sample_run(1, 50);
+        let short = sample_run(1, 5);
+
+        // Both start at the same height, so "starts earlier" cannot decide it;
+        // the union has to.
+        let merged = union(&long, &short);
+        assert_eq!(merged.len(), 50, "the longer chain was lost");
+
+        // And a later chunk extends rather than replaces.
+        let tail = sample_run(51, 10);
+        let extended = union(&merged, &tail);
+        assert_eq!(extended.len(), 60);
+        assert_eq!(extended.first().unwrap().height, 1);
+        assert_eq!(extended.last().unwrap().height, 60);
+    }
+
+    /// A gap means the run stops there rather than storing a chain with a hole
+    /// in it, which the loader would refuse anyway.
+    #[test]
+    fn a_gap_ends_the_stored_chain() {
+        let first = sample_run(1, 10);
+        let detached = sample_run(100, 10);
+        assert_eq!(union(&first, &detached).len(), 10);
     }
 
     /// Networks keep their own file: mainnet headers fed to a signet node
