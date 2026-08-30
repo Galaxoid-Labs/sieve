@@ -225,11 +225,13 @@ pub fn seeds(network: &str) -> Vec<String> {
         _ => &[],
     };
 
+    // Every filter-serving request first, then the plain ones. Interleaving
+    // them meant a seeder that ignores the prefix supplied ordinary nodes
+    // before the next seeder had been asked for filter nodes at all — and a
+    // peer that cannot serve filters is no use to this wallet.
     let mut names = Vec::with_capacity(hosts.len() * 2);
-    for host in hosts {
-        names.push(format!("x49.{host}"));
-        names.push((*host).to_string());
-    }
+    names.extend(hosts.iter().map(|host| format!("x49.{host}")));
+    names.extend(hosts.iter().map(|host| (*host).to_string()));
     names
 }
 

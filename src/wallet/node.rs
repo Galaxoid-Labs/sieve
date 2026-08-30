@@ -41,6 +41,15 @@ use super::{Meta, Paths, Summary};
 /// The cost is bandwidth and memory, which is why this is not simply 15.
 pub const REQUIRED_PEERS: u8 = 8;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The same two, over Tor.
+///
+/// kyoto's default handshake timeout is two seconds, which is a sensible
+/// figure for a direct connection and hopeless through a circuit: building one
+/// and reaching a peer at the far end takes five to twenty seconds, so every
+/// attempt died at the two second mark and the node never got past "waiting
+/// for peers". Replies are slower for the same reason.
+const TOR_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const TOR_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// If the node says nothing for this long, tell the user so rather than
 /// leaving a spinner turning against a frozen label.
 const QUIET_BEFORE_WAITING: Duration = Duration::from_secs(20);
@@ -200,7 +209,10 @@ impl Session {
         }
 
         if let Some(proxy) = tor {
-            builder = builder.socks5_proxy(proxy.addr());
+            builder = builder
+                .socks5_proxy(proxy.addr())
+                .handshake_timeout(TOR_HANDSHAKE_TIMEOUT)
+                .response_timeout(TOR_RESPONSE_TIMEOUT);
             tracing::info!(%proxy, "routing peer connections through Tor");
 
             // kyoto falls back to a DNS lookup when it runs out of peers to
@@ -234,10 +246,13 @@ impl Session {
             }
         }
 
+        if tor.is_none() {
+            builder = builder.response_timeout(RESPONSE_TIMEOUT);
+        }
+
         let client: LightClient<_, Multiple> = builder
             .required_peers(REQUIRED_PEERS)
             .data_dir(headers)
-            .response_timeout(RESPONSE_TIMEOUT)
             .build_with_wallets(wallets)
             .map_err(|e| anyhow!("could not build the light client: {e}"))?;
 
