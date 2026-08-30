@@ -683,15 +683,23 @@ impl Session {
     /// away and starts again from the birthday. The headers are worth keeping
     /// from the first minute.
     pub async fn store_headers(&self, birthday: u32) {
-        let Ok(tip) = self.requester.chain_tip().await else { return };
+        let tip = match self.requester.chain_tip().await {
+            Ok(tip) => tip,
+            Err(e) => {
+                tracing::warn!(%e, "cannot store headers: the node did not give its tip");
+                return;
+            }
+        };
 
         let from = match *self.stored_upto.lock().unwrap() {
             Some(stored) => stored + 1,
             None => birthday,
         };
         if tip.height < from {
+            tracing::debug!(from, tip = tip.height, "nothing new to store");
             return;
         }
+        tracing::info!(from, to = tip.height, "walking headers to store them");
 
         let started = std::time::Instant::now();
         let mut chunk = Vec::with_capacity(CHUNK);
@@ -702,8 +710,22 @@ impl Session {
                 Ok(Some(header)) => chunk.push(header),
                 // A gap means the node does not have what we thought it had.
                 // Keep what came before it: a shorter chain ending at the gap
-                // still links, and the loader checks that it does.
-                _ => break,
+                // still links, and the loader checks that it does. Said out
+                // loud, because a silent stop here is indistinguishable from
+                // the whole feature never running — which is exactly how this
+                // went unnoticed through several attempts.
+                Ok(None) => {
+                    tracing::warn!(
+                        height,
+                        written,
+                        "the node has no header at this height; stopping there"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(height, %e, "could not read a header from the node");
+                    break;
+                }
             }
 
             // Written as it goes. Fetching a whole chain is a million round
@@ -716,6 +738,7 @@ impl Session {
                     return;
                 }
                 written += chunk.len();
+                tracing::info!(written, upto = height, "banked a chunk of headers");
                 chunk.clear();
             }
         }
