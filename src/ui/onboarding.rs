@@ -252,56 +252,67 @@ impl Component for Onboarding {
 
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_valign: gtk::Align::Center,
-                            set_spacing: 6,
                             set_margin_all: 24,
 
-                            // The logo itself, not the currency glyph: the
-                            // tilt and the proportions are the mark, and a
-                            // font's ₿ is only an approximation of them.
-                            gtk::Image {
-                                set_icon_name: Some("bitcoin-logo"),
-                                set_pixel_size: 148,
-                                set_halign: gtk::Align::Center,
-                                add_css_class: "welcome-mark",
+                            // The wallet and the way in, centred in whatever
+                            // room the window has.
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 6,
+                                set_vexpand: true,
+                                set_valign: gtk::Align::Center,
+
+                                // The logo itself, not the currency glyph: the
+                                // tilt and the proportions are the mark, and a
+                                // font's ₿ is only an approximation of them.
+                                gtk::Image {
+                                    set_icon_name: Some("bitcoin-logo"),
+                                    set_pixel_size: 148,
+                                    set_halign: gtk::Align::Center,
+                                    add_css_class: "welcome-mark",
+                                },
+
+                                gtk::Label {
+                                    add_css_class: "welcome-name",
+                                    set_label: "Sieve",
+                                    set_halign: gtk::Align::Center,
+                                },
+
+                                gtk::Label {
+                                    add_css_class: "welcome-line",
+                                    set_label: "A privacy-focused Bitcoin wallet,\nbuilt on compact block filters",
+                                    set_justify: gtk::Justification::Center,
+                                    set_halign: gtk::Align::Center,
+                                    set_wrap: true,
+                                    set_margin_bottom: 24,
+                                },
+
+                                gtk::Button {
+                                    add_css_class: "suggested-action",
+                                    add_css_class: "pill",
+                                    set_label: "Create a new wallet",
+                                    connect_clicked => OnboardingMsg::Begin,
+                                },
+                                gtk::Button {
+                                    add_css_class: "pill",
+                                    set_label: "I already have a wallet",
+                                    set_margin_top: 6,
+                                    connect_clicked => OnboardingMsg::Restore,
+                                },
                             },
 
-                            gtk::Label {
-                                add_css_class: "welcome-name",
-                                set_label: "Sieve",
-                                set_halign: gtk::Align::Center,
-                            },
-
-                            gtk::Label {
-                                add_css_class: "welcome-line",
-                                set_label: "A privacy-focused Bitcoin wallet,\nbuilt on compact block filters",
-                                set_justify: gtk::Justification::Center,
-                                set_halign: gtk::Align::Center,
-                                set_wrap: true,
-                                set_margin_bottom: 12,
-                            },
-
+                            // At the foot of the screen: the claim the wallet
+                            // is built on, which is worth reading and not
+                            // worth competing with the name for attention.
                             gtk::Label {
                                 add_css_class: "welcome-note",
                                 set_label: "The blockchain is checked here, on this machine. \
                                             No server is ever told which addresses are yours.",
                                 set_justify: gtk::Justification::Center,
                                 set_halign: gtk::Align::Center,
+                                set_valign: gtk::Align::End,
                                 set_wrap: true,
-                                set_margin_bottom: 24,
-                            },
-
-                            gtk::Button {
-                                add_css_class: "suggested-action",
-                                add_css_class: "pill",
-                                set_label: "Create a new wallet",
-                                connect_clicked => OnboardingMsg::Begin,
-                            },
-                            gtk::Button {
-                                add_css_class: "pill",
-                                set_label: "I already have a wallet",
-                                set_margin_top: 6,
-                                connect_clicked => OnboardingMsg::Restore,
+                                set_margin_top: 24,
                             },
                         },
                     },
