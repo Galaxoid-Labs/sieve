@@ -56,6 +56,13 @@ async-hwi = { version = "0.0.32", default-features = false, features = ["ledger"
 # unoptimised and debuggable.
 [profile.dev.package."*"]
 opt-level = 3
+# As close to release as a dev build gets for the code that does the work.
+# Filter matching decodes a Golomb-coded set and intersects it against every
+# script this wallet watches, a couple of hundred thousand times over — a hot
+# loop where an overflow check on every arithmetic operation is not free. Our
+# own crate keeps its checks; these are libraries we are not debugging.
+debug-assertions = false
+overflow-checks = false
 
 # And a little for our own code. Dependencies do the heavy lifting — filter
 # matching lives in bip157 and bdk — but a summary is rebuilt on every update,

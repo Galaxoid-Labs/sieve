@@ -137,6 +137,33 @@ pub const SIGNET_CHECKPOINTS: &[Checkpoint] = &[
     },
 ];
 
+/// A block whose height and time are both known, for estimating where the
+/// chain has got to since.
+///
+/// The node cannot answer that during a header sync: it only knows what it has
+/// walked so far, and peers are not asked. But blocks arrive every ten minutes
+/// on average, so a known block plus the clock puts the tip within a per cent
+/// or so — enough to fill a progress bar honestly, which beats a spinner that
+/// says nothing for a quarter of an hour.
+const TIP_REFERENCE: &[(Network, u32, u64)] = &[
+    (Network::Bitcoin, 950_000, 1_779_141_269),
+    (Network::Signet, 319_000, 1_787_490_227),
+];
+
+/// Roughly where the chain is now.
+///
+/// An estimate, and labelled as one wherever it is shown. Never lower than the
+/// reference block, so it cannot go backwards if the clock is wrong.
+pub fn estimated_tip(network: Network) -> Option<u32> {
+    let (_, height, time) = TIP_REFERENCE.iter().find(|(n, _, _)| *n == network)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let elapsed = now.saturating_sub(*time);
+    Some(height + (elapsed / 600) as u32)
+}
+
 pub fn checkpoints(network: Network) -> &'static [Checkpoint] {
     match network {
         Network::Bitcoin => MAINNET_CHECKPOINTS,

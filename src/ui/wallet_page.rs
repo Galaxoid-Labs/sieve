@@ -634,6 +634,30 @@ impl WalletPage {
         }
     }
 
+    /// How far along the sync is, including the header stage.
+    ///
+    /// kyoto's own fraction covers filters only — it has no idea how many
+    /// block headers are still to come, because nothing tells it where the
+    /// chain ends until it gets there. But blocks arrive every ten minutes, so
+    /// a known block plus the clock estimates the tip closely enough to fill a
+    /// bar, which beats a spinner that says nothing for a quarter of an hour.
+    fn progress_fraction(&self) -> Option<f64> {
+        let Progress::Headers(height) = self.progress else {
+            return self.progress.fraction();
+        };
+
+        let network: bdk_wallet::bitcoin::Network =
+            self.summary.as_ref()?.network.parse().ok()?;
+        let tip = crate::wallet::estimated_tip(network)?;
+        let from = self.birthday.unwrap_or(0);
+        if tip <= from || height <= from {
+            return None;
+        }
+        // Never quite full: the estimate can be short, and a bar that sits at
+        // 100% while work continues is worse than one that stops at 99.
+        Some((f64::from(height - from) / f64::from(tip - from)).clamp(0.0, 0.99))
+    }
+
     /// What the peers list says about itself.
     ///
     /// The two stages have different rules, and not saying so makes the peer
@@ -1349,12 +1373,16 @@ impl Component for WalletPage {
 
                             add_suffix = &gtk::Spinner {
                                 set_valign: gtk::Align::Center,
+                                // Only when there is genuinely nothing to
+                                // measure. A spinner is what you show when you
+                                // cannot say how far along you are, and for
+                                // most of a sync we can.
                                 #[watch]
                                 set_visible: model.syncing()
-                                    && model.progress.fraction().is_none(),
+                                    && model.progress_fraction().is_none(),
                                 #[watch]
                                 set_spinning: model.syncing()
-                                    && model.progress.fraction().is_none(),
+                                    && model.progress_fraction().is_none(),
                             },
 
                             add_suffix = &gtk::ProgressBar {
@@ -1362,9 +1390,9 @@ impl Component for WalletPage {
                                 set_width_request: 120,
                                 #[watch]
                                 set_visible: model.syncing()
-                                    && model.progress.fraction().is_some(),
+                                    && model.progress_fraction().is_some(),
                                 #[watch]
-                                set_fraction: model.progress.fraction().unwrap_or(0.0),
+                                set_fraction: model.progress_fraction().unwrap_or(0.0),
                             },
                         },
 

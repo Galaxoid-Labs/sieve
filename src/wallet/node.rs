@@ -133,8 +133,11 @@ impl Progress {
         match self {
             Progress::Connecting => "Looking for peers…".into(),
             Progress::Connected => "Connected to peers".into(),
+            // The height reached, not a percentage: the percentage belongs to
+            // the bar beside it, which knows the wallet's starting point and
+            // can estimate where the chain ends. This says where it is now.
             Progress::Headers(height) => {
-                format!("Downloading block headers — {} blocks", thousands(*height))
+                format!("Downloading block headers — at block {}", thousands(*height))
             }
             // Two phases behind one number, and they are nothing alike. The
             // first quarter of kyoto's figure is filter *headers* — thirty-two
