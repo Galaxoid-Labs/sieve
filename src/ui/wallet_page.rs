@@ -514,6 +514,16 @@ impl WalletPage {
         let (Some(chain), Some(summary)) = (&self.chain, &self.summary) else {
             return "—".into();
         };
+        // A wallet that has verified nothing is not "964,758 blocks behind" —
+        // that is the height of the chain, not a distance it has fallen. It
+        // has not started, and saying so is both true and less alarming.
+        if summary.tip == 0 {
+            return match chain.tip_height {
+                0 => "Nothing verified yet".into(),
+                tip => format!("Nothing verified yet — the chain is at {}", thousands(tip)),
+            };
+        }
+
         match chain.tip_height.saturating_sub(summary.tip) {
             0 => "Up to date with the network".into(),
             1 => "1 block behind".into(),

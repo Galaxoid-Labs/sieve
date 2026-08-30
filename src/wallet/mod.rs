@@ -1156,24 +1156,60 @@ pub fn import_descriptor(
     birthday: Checkpoint,
     name: Option<String>,
 ) -> Result<Summary> {
-    let descriptors = watch::parse(text)?;
+    import_descriptors(&[text.to_string()], paths, network, birthday, name)
+}
+
+/// The same, for a wallet described by several descriptors at once.
+///
+/// A hardware wallet holds a legacy, a nested, a native segwit and a taproot
+/// account from one seed, exactly as a recovery phrase does — so a device
+/// import watches all of them, for the same reason a seed import does. Which
+/// path has the coins is not something the person importing should have to
+/// know.
+pub fn import_descriptors(
+    texts: &[String],
+    paths: &Paths,
+    network: Network,
+    birthday: Checkpoint,
+    name: Option<String>,
+) -> Result<Summary> {
+    if texts.is_empty() {
+        anyhow::bail!("there is nothing to import");
+    }
 
     let dir = data_dir(paths);
     std::fs::create_dir_all(dir)?;
-    let db = dir.join(descriptors.script_type.db_file());
-    let mut account = accounts::Account::create_watching(
-        &descriptors.external,
-        &descriptors.internal,
-        descriptors.script_type,
-        &db,
-        network,
-    )?;
-    account.persist()?;
 
-    Meta::watch_only(network, birthday, descriptors.script_type, name).save(paths)?;
+    let mut accounts = Vec::new();
+    let mut script_types = Vec::new();
+    for text in texts {
+        let descriptors = watch::parse(text)?;
+        let db = dir.join(descriptors.script_type.db_file());
+        let mut account = accounts::Account::create_watching(
+            &descriptors.external,
+            &descriptors.internal,
+            descriptors.script_type,
+            &db,
+            network,
+        )?;
+        account.persist()?;
+        script_types.push(descriptors.script_type);
+        accounts.push(account);
+    }
 
-    let mut portfolio =
-        accounts::Portfolio { accounts: vec![account], primary: descriptors.script_type };
+    // Receiving on native segwit where the wallet has it: the most widely
+    // accepted address kind, and what the other import paths choose.
+    let primary = script_types
+        .iter()
+        .copied()
+        .find(|s| *s == accounts::ScriptType::NativeSegwit)
+        .unwrap_or(script_types[0]);
+
+    let mut meta = Meta::watch_only(network, birthday, primary, name);
+    meta.script_types = script_types;
+    meta.save(paths)?;
+
+    let mut portfolio = accounts::Portfolio { accounts, primary };
     Summary::from_portfolio(&mut portfolio)
 }
 

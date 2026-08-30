@@ -14,7 +14,7 @@
 //! the commonest reason a plugged-in device is not seen — said plainly in the
 //! interface rather than left as an empty list.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use async_hwi::HWI;
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::bitcoin::bip32::DerivationPath;
@@ -158,30 +158,57 @@ pub fn account_path(script_type: ScriptType, network: Network) -> Result<Derivat
         .map_err(|e| anyhow!("could not build the derivation path: {e}"))
 }
 
-/// Ask a device for the descriptor of one of its accounts.
+/// Ask a device for every standard account it holds.
 ///
 /// This is the whole of importing a hardware wallet: the fingerprint says
-/// which seed, the path says which account, and the extended public key is
-/// enough to find every address it will ever hand out. No secret crosses the
-/// USB cable in this direction, and none ever crosses it in the other.
-pub async fn account_descriptor(
+/// which seed, each path says which account, and the extended public keys are
+/// enough to find every address the device will ever hand out. No secret
+/// crosses the USB cable in this direction, and none ever crosses it in the
+/// other.
+///
+/// All four paths, for the same reason a seed import searches all four: one
+/// device holds a legacy, a nested, a native segwit and a taproot account at
+/// once, and which one has the coins is not something the person importing
+/// should have to know. Guessing wrong shows an empty wallet, which reads as
+/// lost money.
+///
+/// One connection and one fingerprint, then a key per path. A path the device
+/// refuses is skipped rather than failing the import — an older firmware with
+/// no taproot support should still give up its segwit account.
+pub async fn account_descriptors(
     kind: Kind,
-    script_type: ScriptType,
     network: Network,
-) -> Result<String> {
+) -> Result<Vec<(ScriptType, String)>> {
     let device = connect(kind).await?;
-    let path = account_path(script_type, network)?;
 
     let fingerprint = device
         .get_master_fingerprint()
         .await
         .map_err(|e| anyhow!("{}", explain(&e)))?;
-    let xpub = device
-        .get_extended_pubkey(&path)
-        .await
-        .map_err(|e| anyhow!("{}", explain(&e)))?;
 
-    Ok(descriptor(script_type, fingerprint, &path, &xpub))
+    let mut found = Vec::new();
+    let mut refusals = Vec::new();
+    for script_type in ScriptType::ALL {
+        let path = account_path(script_type, network)?;
+        match device.get_extended_pubkey(&path).await {
+            Ok(xpub) => {
+                tracing::info!(%script_type, %path, "read an account from the device");
+                found.push((script_type, descriptor(script_type, fingerprint, &path, &xpub)));
+            }
+            Err(e) => {
+                tracing::warn!(%script_type, error = %explain(&e), "the device would not give this path");
+                refusals.push(format!("{script_type}: {}", explain(&e)));
+            }
+        }
+    }
+
+    if found.is_empty() {
+        bail!(
+            "the device gave no accounts at all. {}",
+            refusals.first().cloned().unwrap_or_default()
+        );
+    }
+    Ok(found)
 }
 
 /// Assemble the descriptor a device's key describes.

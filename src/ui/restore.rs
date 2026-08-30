@@ -23,14 +23,6 @@ const KINDS: [CredentialKind; 5] = [
     CredentialKind::Descriptor,
 ];
 
-/// The address kinds a device can be asked for, in the order worth offering.
-const ADDRESS_KINDS: [ScriptType; 4] = [
-    ScriptType::NativeSegwit,
-    ScriptType::Taproot,
-    ScriptType::NestedSegwit,
-    ScriptType::Legacy,
-];
-
 /// Secret with a redacted `Debug`, so relm4's message tracing cannot print a
 /// seed phrase, a key, or a password.
 pub struct Secret(Zeroizing<String>);
@@ -60,7 +52,6 @@ pub enum RestoreMsg {
     /// Look for devices on the USB ports.
     LookForDevices,
     DeviceChosen(u32),
-    AddressKindChosen(u32),
     BirthdayChanged(u32),
     NetworkChanged(u32),
     Submit(Box<Submission>),
@@ -77,8 +68,9 @@ pub enum RestoreOutput {
 pub enum RestoreCmd {
     /// What a look for devices turned up.
     Devices(Vec<crate::hardware::Found>),
-    /// A device answered with the descriptor of one of its accounts.
-    FromDevice(Result<String, String>),
+    /// A device answered with the descriptors of its accounts — one per
+    /// standard path, the way a seed import searches all of them.
+    FromDevice(Result<Vec<String>, String>),
     Finished(Result<(Paths, Summary), String>),
 }
 
@@ -102,9 +94,6 @@ pub struct Restore {
     /// Devices found by the last look, and which one is chosen.
     devices: Vec<crate::hardware::Found>,
     device_index: u32,
-    /// Which addresses to ask a device for. A device holds every kind at
-    /// once; the wallet is one of them.
-    address_index: u32,
     /// Whether a look for devices has happened at all, so "none found" and
     /// "not looked yet" can say different things.
     looked: bool,
@@ -119,13 +108,6 @@ fn networks() -> [bdk_wallet::bitcoin::Network; 2] {
 }
 
 impl Restore {
-    fn address_kind(&self) -> ScriptType {
-        ADDRESS_KINDS
-            .get(self.address_index as usize)
-            .copied()
-            .unwrap_or(ScriptType::NativeSegwit)
-    }
-
     fn chosen_device(&self) -> Option<&crate::hardware::Found> {
         self.devices.get(self.device_index as usize)
     }
@@ -175,7 +157,6 @@ impl Restore {
     /// What the import will actually watch.
     fn paths_summary(&self) -> String {
         match self.kind {
-            CredentialKind::Hardware => self.address_kind().label().to_string(),
             CredentialKind::Descriptor => "As described by the descriptor".into(),
             _ => ScriptType::ALL
                 .iter()
@@ -283,18 +264,6 @@ impl Component for Restore {
                         connect_selected_notify[sender] => move |row| {
                             sender.input(RestoreMsg::DeviceChosen(row.selected()));
                         } @device_chosen,
-                    },
-
-                    adw::ComboRow {
-                        set_title: "Addresses",
-                        set_subtitle: "Which kind to watch. Native SegWit unless the device \
-                                       was set up as something else",
-                        set_model: Some(&gtk::StringList::new(
-                            &ADDRESS_KINDS.map(|s| s.label())
-                        )),
-                        connect_selected_notify[sender] => move |row| {
-                            sender.input(RestoreMsg::AddressKindChosen(row.selected()));
-                        },
                     },
 
                     adw::ActionRow {
@@ -493,7 +462,6 @@ impl Component for Restore {
             error: None,
             devices: Vec::new(),
             device_index: 0,
-            address_index: 0,
             looked: false,
             scanning: false,
             pending: None,
@@ -515,7 +483,6 @@ impl Component for Restore {
                 });
             }
             RestoreMsg::DeviceChosen(index) => self.device_index = index,
-            RestoreMsg::AddressKindChosen(index) => self.address_index = index,
 
             RestoreMsg::KindChanged(index) => {
                 if let Some(kind) = KINDS.get(index as usize) {
@@ -589,7 +556,6 @@ impl Component for Restore {
                 if submission.kind == CredentialKind::Hardware {
                     let Some(device) = self.chosen_device() else { return };
                     let kind = device.kind;
-                    let script_type = self.address_kind();
                     self.pending = Some(PendingImport {
                         network,
                         birthday,
@@ -600,8 +566,11 @@ impl Component for Restore {
                     });
                     sender.oneshot_command(async move {
                         RestoreCmd::FromDevice(
-                            crate::hardware::account_descriptor(kind, script_type, network)
+                            crate::hardware::account_descriptors(kind, network)
                                 .await
+                                .map(|found| {
+                                    found.into_iter().map(|(_, text)| text).collect()
+                                })
                                 .map_err(|e| e.to_string()),
                         )
                     });
@@ -698,7 +667,7 @@ impl Component for Restore {
                 return;
             }
 
-            RestoreCmd::FromDevice(Ok(descriptor)) => {
+            RestoreCmd::FromDevice(Ok(descriptors)) => {
                 // The device answered; now it is an ordinary descriptor
                 // import, which is the whole point of the seam.
                 let Some(pending) = self.pending.take() else {
@@ -709,8 +678,8 @@ impl Component for Restore {
                 let created = paths.clone();
                 sender.spawn_oneshot_command(move || {
                     RestoreCmd::Finished(
-                        wallet::import_descriptor(
-                            &descriptor,
+                        wallet::import_descriptors(
+                            &descriptors,
                             &paths,
                             pending.network,
                             pending.birthday,

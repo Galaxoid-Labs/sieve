@@ -57,6 +57,13 @@ async-hwi = { version = "0.0.32", default-features = false, features = ["ledger"
 [profile.dev.package."*"]
 opt-level = 3
 
+# And a little for our own code. Dependencies do the heavy lifting — filter
+# matching lives in bip157 and bdk — but a summary is rebuilt on every update,
+# walking every transaction and every output, and at opt-level 0 that is felt
+# during a scan. Level 1 keeps builds quick and debuggable.
+[profile.dev]
+opt-level = 1
+
 [build-dependencies]
 # Compiles the icons into the binary, so they travel with it.
 glib-build-tools = "0.21"

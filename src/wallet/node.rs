@@ -53,6 +53,10 @@ const TOR_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// If the node says nothing for this long, tell the user so rather than
 /// leaving a spinner turning against a frozen label.
 const QUIET_BEFORE_WAITING: Duration = Duration::from_secs(20);
+/// The same, over Tor. Every message crosses three relays, and filter batches
+/// arrive in gaps that would look like a stall at the direct-connection
+/// figure.
+const QUIET_OVER_TOR: Duration = Duration::from_secs(60);
 
 /// Group digits so six-figure block heights stay readable.
 fn thousands(n: u32) -> String {
@@ -137,6 +141,16 @@ pub struct Session {
     scanning: Arc<AtomicBool>,
     /// Which chain this session is on, so remembered peers never cross over.
     network: bdk_wallet::bitcoin::Network,
+    /// The last thing the node actually said about progress.
+    ///
+    /// Silence is not news. When a scan is under way and nothing arrives for a
+    /// while, the honest report is the last real state, not "waiting for
+    /// peers" — the node is working, and saying otherwise reads as a stall
+    /// that is not happening.
+    last_progress: std::sync::Mutex<Option<Progress>>,
+    /// How long silence has to last before it is worth reporting. Longer over
+    /// Tor, where every message crosses three relays and gaps are ordinary.
+    quiet: Duration,
     /// The median time past, and the tip it was worked out for.
     ///
     /// Eleven header round trips is nothing on a direct connection and a great
@@ -285,6 +299,8 @@ impl Session {
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
             warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
             requester: client.requester(),
+            last_progress: std::sync::Mutex::new(None),
+            quiet: if tor.is_some() { QUIET_OVER_TOR } else { QUIET_BEFORE_WAITING },
             median_time: std::sync::Mutex::new(None),
             synced: Arc::new(AtomicBool::new(false)),
             scanning: Arc::new(AtomicBool::new(false)),
@@ -544,18 +560,27 @@ impl Session {
     pub async fn next_progress(&self) -> Option<Progress> {
         let mut info = self.info.lock().await;
         loop {
-        let event = match tokio::time::timeout(QUIET_BEFORE_WAITING, info.recv()).await {
+        let event = match tokio::time::timeout(self.quiet, info.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => return None,
-            // Silence after the first sync is the normal resting state — the
-            // node is simply waiting for the next block. Reporting that as
-            // "waiting for peers" made a finished wallet look broken.
             Err(_elapsed) => {
-                return Some(if self.synced.load(Ordering::Relaxed) {
-                    Progress::Synced
-                } else {
-                    Progress::Waiting
-                });
+                // Silence after the first sync is the normal resting state —
+                // the node is simply waiting for the next block. Reporting
+                // that as "waiting for peers" made a finished wallet look
+                // broken.
+                if self.synced.load(Ordering::Relaxed) {
+                    return Some(Progress::Synced);
+                }
+                // Mid-scan silence is not the same thing. The node is working
+                // through filters and simply has nothing to announce; saying
+                // "waiting for peers" claims a problem that is not there, and
+                // hides the progress already made.
+                if self.scanning.load(Ordering::Relaxed)
+                    && let Some(last) = self.last_progress.lock().unwrap().clone()
+                {
+                    return Some(last);
+                }
+                return Some(Progress::Waiting);
             }
         };
         // Peer churn is constant and orthogonal to scan progress. Once
@@ -586,6 +611,11 @@ impl Session {
                 }
             }
             Info::BlockReceived(_) => Progress::Connected,
+        })
+        // Remembered, so a quiet spell can report the last real state rather
+        // than inventing a problem.
+        .inspect(|progress| {
+            *self.last_progress.lock().unwrap() = Some(progress.clone());
         });
         }
     }
