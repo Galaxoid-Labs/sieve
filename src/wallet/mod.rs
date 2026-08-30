@@ -128,7 +128,7 @@ pub struct Paths {
 
 /// Root of everything Sieve stores.
 pub fn data_root() -> PathBuf {
-    directories::ProjectDirs::from("com", "jdavis", "Sieve")
+    directories::ProjectDirs::from("com", "galaxoidlabs", "Sieve")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -674,6 +674,23 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
 
 #[cfg(test)]
 mod tests {
+    /// Renaming the application identifier must not move anybody's wallets.
+    ///
+    /// On Linux `ProjectDirs` ignores the qualifier and organisation and uses
+    /// the lowercased application name alone — checked when the identifier
+    /// changed from one organisation to another — so the directory is
+    /// `~/.local/share/sieve` regardless. This test is here so that a future
+    /// rename that *would* move it fails loudly instead of orphaning a vault.
+    #[test]
+    fn the_data_directory_does_not_depend_on_the_organisation() {
+        let root = super::data_root();
+        assert!(
+            root.ends_with("sieve"),
+            "wallets live in a directory named for the app, not the vendor: {}",
+            root.display()
+        );
+    }
+
     use super::*;
     // Used by the tests only; cargo fix removed it from the module imports
     // when the last non-test use went away.

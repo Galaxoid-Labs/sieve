@@ -98,7 +98,7 @@ pending and replaced states.
       with the proxy verified as actually being Tor (the `RESOLVE` extension), and kyoto's
       unproxied DNS seeding replaced by seeds resolved through Tor.
 - [x] Tor without asking the user to install it — Sieve starts one itself when nothing is
-      listening, and `packaging/com.jdavis.Sieve.yml` builds Tor into the app so there is
+      listening, and `packaging/com.galaxoidlabs.Sieve.yml` builds Tor into the app so there is
       something to start. The manifest has never been built; there is no flatpak-builder on
       the development machine.
 - [ ] Build and test that Flatpak, add the AppStream metainfo Flathub requires (M8).

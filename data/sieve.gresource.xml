@@ -5,7 +5,7 @@
      the resource path is the prefix plus the file's own path, which buries the
      icon several directories below where GTK looks. -->
 <gresources>
-  <gresource prefix="/com/jdavis/Sieve/icons/scalable/actions">
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/scalable/actions">
     <file preprocess="xml-stripblanks" alias="sieve-receive-symbolic.svg">icons/hicolor/scalable/actions/sieve-receive-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="sieve-send-symbolic.svg">icons/hicolor/scalable/actions/sieve-send-symbolic.svg</file>
   </gresource>

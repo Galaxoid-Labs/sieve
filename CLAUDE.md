@@ -92,7 +92,7 @@ setting, so no call site can forget it.
 or 9150 is borrowed and never touched; otherwise a `tor` binary is found and *started by us*,
 with its own data directory, a port Tor picks, and `__OwningControllerProcess` so it exits if
 Sieve dies without stopping it. The binary is looked for at `$SIEVE_TOR`, then beside the
-executable — which is where `packaging/com.jdavis.Sieve.yml` puts it — then on `PATH`.
+executable — which is where `packaging/com.galaxoidlabs.Sieve.yml` puts it — then on `PATH`.
 
 That last part is why the Flatpak manifest exists: it builds Tor from source into
 `/app/bin/tor`, so someone who has never installed Tor gets it. Sparrow ships Tor binaries,

@@ -11,7 +11,7 @@
 # real build to need adjusting, particularly the Rust module, which needs a
 # generated cargo-sources.json for Flathub's offline builder
 # (flatpak-builder-tools/cargo).
-id: com.jdavis.Sieve
+id: com.galaxoidlabs.Sieve
 runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
@@ -80,7 +80,7 @@ modules:
     build-commands:
       - cargo build --release --offline
       - install -Dm755 target/release/sieve /app/bin/sieve
-      - install -Dm644 data/com.jdavis.Sieve.desktop /app/share/applications/com.jdavis.Sieve.desktop
+      - install -Dm644 data/com.galaxoidlabs.Sieve.desktop /app/share/applications/com.galaxoidlabs.Sieve.desktop
       - |
         for icon in data/icons/hicolor/scalable/actions/*.svg; do
           install -Dm644 "$icon" "/app/share/icons/hicolor/scalable/actions/$(basename "$icon")"

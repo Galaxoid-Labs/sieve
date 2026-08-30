@@ -16,7 +16,7 @@ use relm4::RelmApp;
 
 /// Reverse-DNS ID. Must match the .desktop file or GNOME won't associate the
 /// window with the app icon.
-const APP_ID: &str = "com.jdavis.Sieve";
+const APP_ID: &str = "com.galaxoidlabs.Sieve";
 
 /// Best-effort process hardening, applied before any secret exists.
 ///

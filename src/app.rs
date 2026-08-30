@@ -283,7 +283,7 @@ impl Component for App {
             // it from the application id. It is one line, and the failure mode
             // of assuming otherwise is a broken picture with nothing in the
             // log.
-            theme.add_resource_path("/com/jdavis/Sieve/icons");
+            theme.add_resource_path("/com/galaxoidlabs/Sieve/icons");
 
             // Every icon the app names, not just its own. A name that is not
             // in the theme draws a placeholder and logs nothing, so the only

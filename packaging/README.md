@@ -2,7 +2,7 @@
 
 ## Why this exists
 
-`com.jdavis.Sieve.yml` builds Sieve **with its own Tor**. That is the whole
+`com.galaxoidlabs.Sieve.yml` builds Sieve **with its own Tor**. That is the whole
 reason to package rather than hand out a binary: Tor lands at `/app/bin/tor`,
 beside the app, where `tor::daemon::find_binary` looks first, so Tor works for
 someone who has never installed it and never opens a terminal.
@@ -22,8 +22,8 @@ Only 3 needs packaging, and only 3 covers a person with nothing installed.
 ```sh
 flatpak install org.gnome.Sdk//48 org.gnome.Platform//48 \
                 org.freedesktop.Sdk.Extension.rust-stable//24.08
-flatpak-builder --user --install --force-clean build packaging/com.jdavis.Sieve.yml
-flatpak run com.jdavis.Sieve
+flatpak-builder --user --install --force-clean build packaging/com.galaxoidlabs.Sieve.yml
+flatpak run com.galaxoidlabs.Sieve
 ```
 
 Flathub builds are offline, so the Rust module needs its dependencies listed
@@ -54,7 +54,7 @@ the wallet.
 
 ## Not done yet
 
-- AppStream metainfo (`com.jdavis.Sieve.metainfo.xml`), required by Flathub.
+- AppStream metainfo (`com.galaxoidlabs.Sieve.metainfo.xml`), required by Flathub.
 - Reproducible builds and signed tags — M8 in `ROADMAP.md`.
 - This manifest has never been built: there is no flatpak-builder on the
   machine it was written on.
