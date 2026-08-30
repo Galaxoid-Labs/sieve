@@ -97,10 +97,16 @@ pending and replaced states.
 - [x] Tor for every outbound connection — peers, price, fees — through a system SOCKS5 proxy,
       with the proxy verified as actually being Tor (the `RESOLVE` extension), and kyoto's
       unproxied DNS seeding replaced by seeds resolved through Tor.
-- [ ] Bundled Tor via `arti`, for machines with no daemon. Production-ready for client use as
-      of 2026 and it can reach onion services, but it is a very large dependency tree with its
-      own bootstrap, and an arti client will terminate the process when the consensus says it
-      is too old. A packaging decision as much as a code one — revisit at M8 with Flatpak.
+- [ ] Tor without asking the user to install it. Sparrow, Wasabi and Feather all bundle Tor;
+      expecting a system daemon is the minority position and leaves the feature unused by the
+      people who most want it. Three steps, in increasing order of work:
+      1. Spawn a `tor` binary already on the machine (installed but not running as a service),
+         with our own `DataDirectory` and an ephemeral SocksPort, waiting for
+         "Bootstrapped 100%". Covers most Linux users who have the package.
+      2. Ship the binary in the Flatpak at M8, which is how Sparrow and Wasabi do it.
+      3. Embed `arti`. Its own SOCKS listener is behind `experimental-api` and outside semver,
+         so this means writing a local SOCKS server over `arti_client` streams — plus a large
+         dependency tree and a client that terminates the process on an obsolete consensus.
 - [ ] Onion peers: `peers.rs` stores `IpAddr`, so a remembered peer cannot be an onion
       address. kyoto dials them happily; only our own memory of them is missing.
 - [ ] Manual peer pinning with `whitelist_only`, coin control, BIP-329 labels, and an audit
