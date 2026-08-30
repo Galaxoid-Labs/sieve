@@ -84,7 +84,20 @@ fn main() {
          } \
          .mark-bitcoin { color: alpha(#f7931a, 0.20); } \
          .mark-signet { color: alpha(#e01b24, 0.20); } \
-         .mark-testnet { color: alpha(#33d17a, 0.20); }",
+         .mark-testnet { color: alpha(#33d17a, 0.20); } \
+         .welcome-mark { \
+           font-size: 96px; \
+           font-weight: 800; \
+           color: #f7931a; \
+           text-shadow: 0 2px 24px alpha(#f7931a, 0.35); \
+           margin-bottom: 6px; \
+         } \
+         .welcome-name { \
+           font-size: 34px; \
+           font-weight: 800; \
+           letter-spacing: 1px; \
+         } \
+         .welcome-line { font-size: 1.05em; }",
     );
 
     // Sieve's own icons, compiled into the binary. Adwaita has no plain

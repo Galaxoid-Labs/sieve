@@ -159,6 +159,8 @@ pub enum AppMsg {
     ShowWallets,
     /// Slide the recovery-phrase screen in over preferences.
     ShowRecoveryPhrase,
+    /// TEMPORARY: look at the welcome screen without deleting anything.
+    PreviewWelcome,
     /// Ask whether to delete the open wallet from this computer.
     AskRemoveWallet,
     /// Asked and answered.
@@ -684,6 +686,12 @@ impl Component for App {
                 // Slides in over preferences with its own back button, rather
                 // than throwing the dialog away to navigate the window behind.
                 self.prefs.push_subpage(&self.chooser_page);
+            }
+
+            AppMsg::PreviewWelcome => {
+                self.close_prefs();
+                self.onboarding.emit(OnboardingMsg::ShowWelcome);
+                self.nav.push_by_tag("onboarding");
             }
 
             AppMsg::AskRemoveWallet => {
@@ -1780,6 +1788,20 @@ impl App {
             }
             peers.add_suffix(&forget);
             this.add(&peers);
+        }
+
+        // TEMPORARY — a way to look at the welcome screen without deleting
+        // every wallet to reach it. Delete this block, AppMsg::PreviewWelcome
+        // and OnboardingMsg::ShowWelcome together.
+        {
+            let preview = adw::ActionRow::new();
+            preview.set_title("Show the welcome screen");
+            preview.set_subtitle("Temporary, for looking at the first-run screen");
+            preview.set_activatable(true);
+            preview.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            let sender = sender.clone();
+            preview.connect_activated(move |_| sender.input(AppMsg::PreviewWelcome));
+            this.add(&preview);
         }
 
         // Last in the group, and the only destructive thing in preferences.

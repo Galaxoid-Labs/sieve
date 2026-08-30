@@ -113,6 +113,9 @@ pub enum OnboardingMsg {
     EnteredByChoice,
     /// Whether a wallet list sits behind this screen.
     CanCancel(bool),
+    /// Start at the welcome screen with a way back. Only used by the preview
+    /// row in preferences — TEMPORARY, remove that row and this with it.
+    ShowWelcome,
     Back,
     SetPassword(Secret, Secret, String),
     PhraseWritten,
@@ -237,20 +240,53 @@ impl Component for Onboarding {
                 set_visible_child_name: model.step.tag(),
 
                 // ---- welcome ----
-                add_named[Some("welcome")] = &adw::StatusPage {
-                    set_icon_name: Some("channel-secure-symbolic"),
-                    set_title: "Welcome to Sieve",
-                    set_description: Some(
-                        "Sieve checks the blockchain privately, on your own machine. \
-                         No server is ever told which addresses belong to you."
-                    ),
+                // The first screen anybody sees. Built by hand rather than
+                // from an adw::StatusPage: the mark wants to be larger and
+                // closer to the name than a status icon sits, and this is the
+                // one screen where that is worth the extra lines.
+                add_named[Some("welcome")] = &gtk::ScrolledWindow {
+                    set_vexpand: true,
 
-                    #[wrap(Some)]
-                    set_child = &adw::Clamp {
-                        set_maximum_size: 320,
+                    adw::Clamp {
+                        set_maximum_size: 420,
+
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
-                            set_spacing: 12,
+                            set_valign: gtk::Align::Center,
+                            set_spacing: 6,
+                            set_margin_all: 24,
+
+                            gtk::Label {
+                                add_css_class: "welcome-mark",
+                                set_label: "₿",
+                                set_halign: gtk::Align::Center,
+                            },
+
+                            gtk::Label {
+                                add_css_class: "welcome-name",
+                                set_label: "Sieve",
+                                set_halign: gtk::Align::Center,
+                            },
+
+                            gtk::Label {
+                                add_css_class: "welcome-line",
+                                add_css_class: "dim-label",
+                                set_label: "A privacy-focused Bitcoin wallet,\nbuilt on compact block filters",
+                                set_justify: gtk::Justification::Center,
+                                set_halign: gtk::Align::Center,
+                                set_wrap: true,
+                                set_margin_bottom: 12,
+                            },
+
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                set_label: "The blockchain is checked here, on this machine. \
+                                            No server is ever told which addresses are yours.",
+                                set_justify: gtk::Justification::Center,
+                                set_halign: gtk::Align::Center,
+                                set_wrap: true,
+                                set_margin_bottom: 24,
+                            },
 
                             gtk::Button {
                                 add_css_class: "suggested-action",
@@ -261,6 +297,7 @@ impl Component for Onboarding {
                             gtk::Button {
                                 add_css_class: "pill",
                                 set_label: "I already have a wallet",
+                                set_margin_top: 6,
                                 connect_clicked => OnboardingMsg::Restore,
                             },
                         },
@@ -461,6 +498,11 @@ impl Component for Onboarding {
                 self.can_cancel = true;
                 self.skip_welcome = true;
                 self.step = Step::Password;
+            }
+            OnboardingMsg::ShowWelcome => {
+                self.can_cancel = true;
+                self.skip_welcome = false;
+                self.step = Step::Welcome;
             }
             OnboardingMsg::CanCancel(can) => self.can_cancel = can,
             OnboardingMsg::Begin => self.step = Step::Password,
