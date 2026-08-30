@@ -57,6 +57,9 @@ pub struct App {
     tor_status: Option<String>,
     /// Whether that status is a failure, so it can be coloured like one.
     tor_failed: bool,
+    /// Set when someone has just asked for Tor, so a failure can put their
+    /// switch back rather than leaving a wallet that will not connect.
+    tor_asked_for: bool,
     /// The status row and the switch, kept so bootstrap progress can be
     /// written into them directly. Rebuilding the whole preferences page for
     /// each percentage threw the reader back to the top of it.
@@ -126,6 +129,9 @@ pub enum AppMsg {
     SetTorProxy(String),
     /// Ask the proxy whether it is there, and whether it is Tor.
     CheckTor,
+    /// Try again after a failure, without treating it as a fresh request —
+    /// a retry that fails must not quietly switch Tor off.
+    RetryTor,
     /// Fill in a fee rate for a payment about to be made. Asked for when the
     /// send form comes into view, because both sources cost something: one a
     /// block download, the other a disclosure.
@@ -181,8 +187,11 @@ pub enum AppCmd {
     Estimated(Result<(f64, String), String>),
     /// Bootstrap news, while Tor is starting.
     TorProgress(String),
-    /// Tor is up at this proxy, or could not be.
-    TorReady(Result<crate::tor::Proxy, String>),
+    /// Tor is up at this proxy, or could not be. `asked_for` distinguishes a
+    /// switch someone just flipped — which goes back when it fails — from Tor
+    /// already being on, where the honest answer is to stay on and not
+    /// connect.
+    TorReady { asked_for: bool, result: Result<crate::tor::Proxy, String> },
 }
 
 #[relm4::component(pub)]
@@ -266,6 +275,7 @@ impl Component for App {
                     AppMsg::RevealAddress(script_type)
                 }
                 crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
+                crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
                 crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
                     AppMsg::PlanSend(draft)
                 }
@@ -384,6 +394,7 @@ impl Component for App {
             chain_tip: None,
             tor_status: None,
             tor_failed: false,
+            tor_asked_for: false,
             tor_row: None,
             tor_switch: None,
             tor_active: None,
@@ -509,7 +520,7 @@ impl Component for App {
                 // Brought up before it is believed. Turning Tor on and finding
                 // out later that nothing was listening is the failure this
                 // whole feature exists to avoid.
-                self.ensure_tor(&sender);
+                self.ensure_tor_asked(&sender);
             }
 
             AppMsg::SetTorProxy(address) => {
@@ -520,6 +531,11 @@ impl Component for App {
             }
 
             AppMsg::CheckTor => {
+                self.tor_active = None;
+                self.ensure_tor_asked(&sender);
+            }
+
+            AppMsg::RetryTor => {
                 self.tor_active = None;
                 self.ensure_tor(&sender);
             }
@@ -861,10 +877,11 @@ impl Component for App {
                 self.refresh_tor_row();
             }
 
-            AppCmd::TorReady(Ok(proxy)) => {
+            AppCmd::TorReady { result: Ok(proxy), .. } => {
                 tracing::info!(%proxy, "Tor is ready");
                 self.tor_failed = false;
                 self.tor_active = Some(proxy);
+                self.wallet.emit(WalletPageMsg::TorProblem(None));
                 self.tor_status = Some(if crate::tor::daemon::is_ours() {
                     format!("Connected through Tor at {proxy}, started by Sieve")
                 } else {
@@ -874,19 +891,28 @@ impl Component for App {
                 self.restart_session(&sender);
             }
 
-            AppCmd::TorReady(Err(message)) => {
-                // The switch goes back rather than leaving the app looking as
-                // though it is on Tor when it is not.
+            AppCmd::TorReady { asked_for, result: Err(message) } => {
                 tracing::warn!(%message, "could not bring Tor up");
                 self.tor_active = None;
-                self.settings.tor = false;
-                self.settings.save();
                 self.tor_failed = true;
                 let message = crate::ui::send::capitalise(&message);
-                // A switch that flips itself back and says nothing is a bug
-                // report waiting to happen. The dialog carries its own toasts,
-                // so this lands over the switch that just moved.
-                self.prefs.add_toast(adw::Toast::new(&message));
+
+                if asked_for {
+                    // Somebody just flipped the switch and it could not be
+                    // done, so the switch goes back rather than leaving the
+                    // app looking as though it is on Tor when it is not.
+                    self.settings.tor = false;
+                    self.settings.save();
+                    self.prefs.add_toast(adw::Toast::new(&message));
+                    self.wallet.emit(WalletPageMsg::TorProblem(None));
+                } else {
+                    // Tor was already on and could not be brought up. Going
+                    // out over the clear instead would be the one thing this
+                    // must never do quietly, so nothing connects and the
+                    // wallet says so, with a way to try again.
+                    self.wallet.emit(WalletPageMsg::TorProblem(Some(message.clone())));
+                }
+
                 self.tor_status = Some(message);
                 self.refresh_tor_row();
             }
@@ -1130,12 +1156,18 @@ impl App {
     ///
     /// Slow — a first bootstrap can take half a minute — so it reports as it
     /// goes rather than leaving a switch mid-flip with nothing to show.
+    fn ensure_tor_asked(&mut self, sender: &ComponentSender<Self>) {
+        self.tor_asked_for = true;
+        self.ensure_tor(sender);
+    }
+
     fn ensure_tor(&mut self, sender: &ComponentSender<Self>) {
         self.tor_failed = false;
         self.tor_status = Some("Starting Tor…".into());
         self.refresh_tor_row();
 
         let configured = self.configured_proxy();
+        let asked_for = std::mem::take(&mut self.tor_asked_for);
         sender.command(move |out, shutdown| {
             shutdown
                 .register(async move {
@@ -1148,7 +1180,7 @@ impl App {
                         })
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()));
-                        let _ = out.send(AppCmd::TorReady(result));
+                        let _ = out.send(AppCmd::TorReady { asked_for, result });
                         return;
                     }
 
@@ -1165,7 +1197,7 @@ impl App {
                     }
 
                     let result = work.await.unwrap_or_else(|e| Err(e.to_string()));
-                    let _ = out.send(AppCmd::TorReady(result));
+                    let _ = out.send(AppCmd::TorReady { asked_for, result });
                 })
                 .drop_on_shutdown()
         });

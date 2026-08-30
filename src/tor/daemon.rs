@@ -73,6 +73,68 @@ pub fn available() -> bool {
     super::detect().is_some() || find_binary().is_some()
 }
 
+/// Where the port of a Tor we started is written, and where its pid goes.
+///
+/// Tor refuses to share a data directory, so a copy left behind by a previous
+/// run blocks the next one — which is how "Tor turned itself off" happens
+/// after a hard exit. These two files are what makes the leftover recoverable
+/// instead of fatal.
+fn port_file(dir: &std::path::Path) -> PathBuf {
+    dir.join("socks.port")
+}
+
+fn pid_file(dir: &std::path::Path) -> PathBuf {
+    dir.join("tor.pid")
+}
+
+/// A Tor from a previous run that is still answering.
+///
+/// Adopted rather than replaced: it is already bootstrapped, which is the
+/// slow part, and killing it to start an identical one would be theatre.
+fn adopt(dir: &std::path::Path) -> Option<Proxy> {
+    let text = std::fs::read_to_string(port_file(dir)).ok()?;
+    let port: u16 = text.trim().parse().ok()?;
+    let proxy = Proxy::local(port);
+    // Answering, and answering as Tor.
+    super::check(proxy).ok()?;
+    tracing::info!(%proxy, "adopting the Tor left by an earlier run");
+    Some(proxy)
+}
+
+/// Stop a Tor from a previous run that is no longer usable.
+///
+/// Without this its data directory stays locked and every later start fails
+/// with "another Tor process is running with the same data directory".
+fn clear_stale(dir: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(pid_file(dir)) else { return };
+    let Ok(pid) = text.trim().parse::<i32>() else { return };
+    if pid <= 1 {
+        return;
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        // Signal 0 asks whether it exists without touching it.
+        if libc::kill(pid, 0) != 0 {
+            return;
+        }
+        tracing::warn!(pid, "a Tor from an earlier run is still holding the data directory");
+        libc::kill(pid, libc::SIGTERM);
+    }
+
+    // Tor unlinks its lock on the way out; give it a moment to do so.
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(50));
+        #[cfg(unix)]
+        unsafe {
+            if libc::kill(pid, 0) != 0 {
+                return;
+            }
+        }
+    }
+    tracing::warn!(pid, "the earlier Tor did not exit; starting anyway");
+}
+
 /// Get a working Tor proxy, starting one if nothing is listening.
 ///
 /// Blocking, and slow on a first run: call it from a command, never on the
@@ -102,6 +164,15 @@ pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
 
     let dir = crate::wallet::data_root().join("tor");
     std::fs::create_dir_all(&dir)?;
+
+    // A Tor from a previous run may still be there: adopt it if it works, and
+    // clear it if it does not. Tor will not share a data directory, so the
+    // alternative is a start that fails for a reason nobody can act on.
+    if let Some(proxy) = adopt(&dir) {
+        progress("Reusing the Tor already running".into());
+        return Ok(proxy);
+    }
+    clear_stale(&dir);
     // Tor refuses to start if anyone else can read its data directory, and it
     // is right to.
     #[cfg(unix)]
@@ -145,6 +216,9 @@ pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
         .args(["--Log", "notice stdout"])
         .args(["--ClientOnly", "1"])
         .args(["--AvoidDiskWrites", "1"])
+        // So a leftover can be found and stopped next time.
+        .arg("--PidFile")
+        .arg(pid_file(&dir))
         // If Sieve dies without stopping Tor, Tor stops itself.
         .args(["--__OwningControllerProcess", &std::process::id().to_string()])
         .stdout(Stdio::piped())
@@ -220,6 +294,9 @@ pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
                 // Before returning, so the watchdog stands down rather than
                 // killing a Tor that did exactly what was asked of it.
                 ready.store(true, Ordering::SeqCst);
+                // Written for the next run, which can then adopt this Tor
+                // rather than colliding with it.
+                let _ = std::fs::write(port_file(&dir), port.to_string());
                 tracing::info!(seconds = started.elapsed().as_secs(), "Tor is ready");
                 return Ok(Proxy::local(port));
             }
@@ -279,6 +356,9 @@ pub fn stop() {
         tracing::info!("stopping the Tor we started");
         let _ = child.kill();
         let _ = child.wait();
+        // Nothing to adopt any more.
+        let dir = crate::wallet::data_root().join("tor");
+        let _ = std::fs::remove_file(port_file(&dir));
     }
 }
 

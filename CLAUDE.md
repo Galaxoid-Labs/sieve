@@ -122,6 +122,20 @@ through the proxy and hands the results to the builder as configured peers. The 
 asks a seeder for nodes that serve compact filters. If nothing resolves and there are no
 remembered peers, `Session::start` fails rather than letting kyoto fall back to the resolver.
 
+**Fail closed, and only fail closed.** If Tor is on and cannot be brought up, nothing connects:
+no session starts, and the wallet shows a banner saying so with a Try again button. Going out
+over the clear because Tor was unavailable is the one thing this must never do quietly. The
+exception is someone flipping the switch on right now — that request cannot be honoured, so the
+switch goes back, which is not the same as silently abandoning a setting they already had.
+
+A Tor left behind by a previous run holds the data directory and Tor will not share one, so the
+next start used to fail with "another Tor process is running". `daemon::ensure` now adopts a
+leftover that still answers (via `socks.port`, since it is on a random port `detect` would never
+find) and stops one that does not (via `tor.pid`).
+
+Onion addresses are only handed to the node when Tor is on: dialling one directly spends a
+connection attempt on something that cannot work.
+
 **Two things that bit, and must not come back.** The watchdog that rescues a Tor which never
 finishes starting has to be told when to stand down — an earlier version simply slept and then
 killed, so every Tor Sieve started was shot exactly two minutes later. And when the proxy goes

@@ -203,8 +203,16 @@ impl Session {
         let remembered = crate::peers::remembered(network);
         tracing::info!(count = remembered.len(), %network, "seeding with remembered peers");
         let mut builder = Builder::new(network);
-        let peers = remembered.len();
-        for address in remembered {
+        // An onion address is only reachable through Tor. Handing one to a
+        // node connecting directly spends an attempt on something that cannot
+        // work, and the remembered list is mostly onions after a run with Tor
+        // on.
+        let usable: Vec<String> = remembered
+            .into_iter()
+            .filter(|address| tor.is_some() || !crate::tor::onion::looks_like_onion(address))
+            .collect();
+        let peers = usable.len();
+        for address in usable {
             if let Some(peer) = trusted_peer(&address) {
                 builder = builder.add_peer(peer);
             }

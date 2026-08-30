@@ -23,6 +23,8 @@ pub enum WalletPageOutput {
     NewAddress(crate::wallet::accounts::ScriptType),
     /// The send form came into view and wants a fee rate to start from.
     EstimateFee,
+    /// Try to bring Tor up again after it failed.
+    RetryTor,
     /// Build a transaction, watch-only, and hand back what it would cost.
     PlanSend(Box<Draft>),
     /// Sign the reviewed transaction and broadcast it.
@@ -300,6 +302,8 @@ pub struct WalletPage {
     send: Controller<SendForm>,
     /// How connections are being made, when they go through Tor.
     tor: Option<String>,
+    /// Why nothing is connecting, when Tor is on and could not be started.
+    tor_problem: Option<String>,
     /// Machines, as opposed to connections. kyoto opens more than one
     /// connection to some peers, so the two numbers differ and saying only the
     /// first invites the reader to count the list and find it wrong.
@@ -332,6 +336,9 @@ pub enum WalletPageMsg {
     SetTor(Option<String>),
     /// The connected peers, arriving faster than the chain view can.
     SetPeers(Vec<crate::wallet::node::PeerInfo>),
+    /// Tor is on and could not be started, so nothing is connecting.
+    TorProblem(Option<String>),
+    RetryTor,
     /// From the send form, on its way to the app.
     PlanSend(Box<Draft>),
     SendNow { plan: Box<Plan>, password: Password },
@@ -694,9 +701,21 @@ impl Component for WalletPage {
             // qualifies whatever number you happen to be looking at.
             add_top_bar = &adw::Banner {
                 #[watch]
-                set_revealed: model.syncing() && !model.locked,
+                set_revealed: model.syncing() && !model.locked && model.tor_problem.is_none(),
                 #[watch]
                 set_title: &model.progress.label(),
+            },
+
+            // Tor was asked for and could not be had. Nothing is connecting,
+            // which is the point: going out over the clear instead would be
+            // the one thing this must never do quietly.
+            add_top_bar = &adw::Banner {
+                #[watch]
+                set_revealed: model.tor_problem.is_some() && !model.locked,
+                #[watch]
+                set_title: model.tor_problem.as_deref().unwrap_or_default(),
+                set_button_label: Some("Try again"),
+                connect_button_clicked => WalletPageMsg::RetryTor,
             },
 
             #[wrap(Some)]
@@ -1267,6 +1286,7 @@ impl Component for WalletPage {
             stack: None,
             send,
             tor: None,
+            tor_problem: None,
             distinct_peers: 0,
             locked: true,
             price: None,
@@ -1371,6 +1391,11 @@ impl Component for WalletPage {
                 self.chain = chain;
             }
             WalletPageMsg::SetTor(tor) => self.tor = tor,
+
+            WalletPageMsg::TorProblem(problem) => self.tor_problem = problem,
+            WalletPageMsg::RetryTor => {
+                let _ = sender.output(WalletPageOutput::RetryTor);
+            }
 
             WalletPageMsg::SetPeers(peers) => {
                 self.distinct_peers = peers.len();
