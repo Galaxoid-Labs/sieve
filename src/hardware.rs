@@ -123,6 +123,12 @@ async fn connect(kind: Kind) -> Result<Box<dyn HWI + Send>> {
         Kind::Ledger => {
             let ledger = async_hwi::ledger::Ledger::try_connect_hid()
                 .map_err(|e| anyhow!("could not open the Ledger: {e}"))?;
+            // Read the accounts without asking for a button press each. Four
+            // paths would otherwise be four confirmations for something that
+            // discloses nothing — the xpubs are public.
+            let ledger = ledger
+                .display_xpub(false)
+                .map_err(|e| anyhow!("could not set up the Ledger: {}", explain(&e)))?;
             Ok(Box::new(ledger))
         }
         Kind::Coldcard => {
@@ -181,6 +187,20 @@ pub async fn account_descriptors(
 ) -> Result<Vec<(ScriptType, String)>> {
     let device = connect(kind).await?;
 
+    // Asked for first and logged, because it is the thing that explains most
+    // refusals: async-hwi speaks the current command set, and an older app
+    // answers "not supported" to everything while looking perfectly healthy.
+    let version = match device.get_version().await {
+        Ok(version) => {
+            tracing::info!(%kind, %version, "device version");
+            Some(version.to_string())
+        }
+        Err(e) => {
+            tracing::debug!(%kind, error = %explain(&e), "device would not give its version");
+            None
+        }
+    };
+
     let fingerprint = device
         .get_master_fingerprint()
         .await
@@ -203,9 +223,27 @@ pub async fn account_descriptors(
     }
 
     if found.is_empty() {
+        // Every path refused, which is a different problem from one path
+        // refused. The device answered two questions already, so it is neither
+        // locked nor asleep — and the commonest cause by far is a network
+        // mismatch: test networks derive under coin type 1, and a Ledger's
+        // Bitcoin app knows only coin type 0. It says "not supported" to every
+        // path and nothing about why.
+        let detail = refusals.first().cloned().unwrap_or_default();
+        let version = version.map(|v| format!(" (version {v})")).unwrap_or_default();
+
+        if network != Network::Bitcoin {
+            bail!(
+                "{kind}{version} would not give any {network} account. Test networks derive \
+                 under a different path than Bitcoin does, and a device's Bitcoin app knows \
+                 only Bitcoin's — on a Ledger, open the Bitcoin Test app for {network}, or \
+                 choose Bitcoin as the network. The device said: {detail}"
+            );
+        }
         bail!(
-            "the device gave no accounts at all. {}",
-            refusals.first().cloned().unwrap_or_default()
+            "{kind}{version} answered, but would not give any account. Its app may be older \
+             than Sieve can talk to — a Ledger needs its Bitcoin app at 2.1.2 or newer. \
+             The device said: {detail}"
         );
     }
     Ok(found)
@@ -237,6 +275,18 @@ pub fn descriptor(
 
 /// Turn a device error into something a person can act on.
 fn explain(error: &async_hwi::Error) -> String {
+    // The device answered and refused. Repeating "check it is unlocked" at
+    // something that has already replied is the kind of advice that sends
+    // people to look in the wrong place.
+    if let async_hwi::Error::Device(detail) = error
+        && detail.contains("NotSupported")
+    {
+        return format!(
+            "the device does not support this command — its app is probably older than \
+             Sieve can talk to ({detail})"
+        );
+    }
+
     match error {
         async_hwi::Error::DeviceNotFound => {
             "the device is no longer there — check the cable".into()
