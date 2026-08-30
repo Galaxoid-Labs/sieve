@@ -46,6 +46,13 @@ pub struct App {
     unlock_dialog: adw::Dialog,
     /// The wallet currently open, if any.
     active: Option<Paths>,
+    /// Which session the results arriving now belong to.
+    ///
+    /// A command started against one wallet can land after another has been
+    /// opened — trivially, over Tor, where reading the chain takes a dozen
+    /// round trips through circuits. Without this, a signet chain, a signet
+    /// peer list, or worse a signet *balance* lands on a mainnet wallet.
+    generation: u64,
     /// The last locally computed fee estimate: height, sat/vB, and where it
     /// came from. Kept so switching to Send twice does not download the same
     /// block twice.
@@ -179,19 +186,19 @@ pub enum AppMsg {
 
 #[derive(Debug)]
 pub enum AppCmd {
-    Started(Result<Arc<Session>, String>),
-    Update(Result<Summary, String>),
+    Started { generation: u64, result: Result<Arc<Session>, String> },
+    Update { generation: u64, result: Result<Summary, String> },
     /// `None` means the node stopped.
-    Progress(Option<Progress>),
-    Warning(Option<Notice>),
-    Revealed(Result<(String, Summary), String>),
-    Chain(Result<crate::wallet::node::ChainInfo, String>),
+    Progress { generation: u64, progress: Option<Progress> },
+    Warning { generation: u64, notice: Option<Notice> },
+    Revealed { generation: u64, result: Result<(String, Summary), String> },
+    Chain { generation: u64, result: Result<crate::wallet::node::ChainInfo, String> },
     Planned(Result<crate::wallet::send::Plan, String>),
     Sent(Result<(String, Summary), String>),
     Tick,
     Priced(Result<crate::price::Price, String>),
     /// Who is connected, without waiting for the chain.
-    Peers(Vec<crate::wallet::node::PeerInfo>),
+    Peers { generation: u64, peers: Vec<crate::wallet::node::PeerInfo> },
     /// A fee rate in sat/vB, and where it came from.
     Estimated(Result<(f64, String), String>),
     /// Bootstrap news, while Tor is starting.
@@ -399,6 +406,7 @@ impl Component for App {
             settings,
             unlock_dialog: unlock_dialog.clone(),
             active: None,
+            generation: 0,
             fee_estimate: None,
             chain_tip: None,
             peers_read: None,
@@ -480,8 +488,12 @@ impl Component for App {
 
             AppMsg::RefreshChain => {
                 let Some(session) = self.session.clone() else { return };
+                let generation = self.generation;
                 sender.oneshot_command(async move {
-                    AppCmd::Chain(session.chain_info().await.map_err(|e| e.to_string()))
+                    AppCmd::Chain {
+                        generation,
+                        result: session.chain_info().await.map_err(|e| e.to_string()),
+                    }
                 });
             }
 
@@ -713,9 +725,16 @@ impl Component for App {
                 // sync state — including a reassuring "Up to date" it has not
                 // earned.
                 let switched = self.active.as_ref().map(|p| &p.dir) != Some(&paths.dir);
-                if switched && let Some(session) = self.session.take() {
-                    tracing::info!("switching wallets; stopping the previous light client");
-                    session.shutdown();
+                if switched {
+                    // Cleared whether or not a client was running. A wallet
+                    // whose node never started still left its balance, its
+                    // chain and its peers on screen for the next one.
+                    if let Some(session) = self.session.take() {
+                        tracing::info!("switching wallets; stopping the previous light client");
+                        session.shutdown();
+                    }
+                    // Anything still in flight belongs to the wallet being left.
+                    self.generation += 1;
                     self.wallet.emit(WalletPageMsg::Reset);
                 }
 
@@ -742,10 +761,12 @@ impl Component for App {
                     // Nothing to reveal from until the client is up.
                     return;
                 };
+                let generation = self.generation;
                 sender.oneshot_command(async move {
-                    AppCmd::Revealed(
-                        session.reveal_next(script_type).await.map_err(|e| e.to_string()),
-                    )
+                    AppCmd::Revealed {
+                        generation,
+                        result: session.reveal_next(script_type).await.map_err(|e| e.to_string()),
+                    }
                 });
             }
 
@@ -818,7 +839,7 @@ impl Component for App {
         _root: &Self::Root,
     ) {
         match msg {
-            AppCmd::Started(Ok(session)) => {
+            AppCmd::Started { generation, result: Ok(session) } if self.current(generation) => {
                 tracing::info!("light client started");
                 self.session = Some(session);
                 // Two independent loops: one awaits wallet updates, the other
@@ -830,11 +851,11 @@ impl Component for App {
                 sender.input(AppMsg::RefreshChain);
                 self.schedule_tick(&sender);
             }
-            AppCmd::Started(Err(message)) => {
+            AppCmd::Started { generation, result: Err(message) } if self.current(generation) => {
                 tracing::error!(%message, "could not start the light client");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
-            AppCmd::Chain(Ok(info)) => {
+            AppCmd::Chain { generation, result: Ok(info) } if self.current(generation) => {
                 // What makes a block-derived fee estimate stale.
                 self.chain_tip = Some(info.tip_height);
                 self.wallet.emit(WalletPageMsg::SetChain(Some(info)));
@@ -844,27 +865,31 @@ impl Component for App {
                 sender.input(AppMsg::RefreshChain);
                 self.schedule_tick(&sender);
             }
-            AppCmd::Chain(Err(message)) => {
+            AppCmd::Chain { generation, result: Err(message) } if self.current(generation) => {
                 tracing::warn!(%message, "could not read the chain");
             }
-            AppCmd::Update(Ok(summary)) => {
+            AppCmd::Update { generation, result: Ok(summary) } if self.current(generation) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
                 sender.input(AppMsg::RefreshChain);
                 self.await_update(&sender);
             }
-            AppCmd::Update(Err(message)) => {
+            AppCmd::Update { generation, result: Err(message) } if self.current(generation) => {
                 // Do not re-arm: the loop would spin on a persistent failure.
                 tracing::error!(%message, "sync failed");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
-            AppCmd::Progress(Some(progress)) => {
+            AppCmd::Progress { generation, progress: Some(progress) }
+                if self.current(generation) =>
+            {
                 self.wallet.emit(WalletPageMsg::SetProgress(progress));
                 self.await_progress(&sender);
             }
-            AppCmd::Progress(None) => tracing::warn!("the node stopped emitting progress"),
-            AppCmd::Warning(Some(notice)) => {
+            AppCmd::Progress { progress: None, .. } => {
+                tracing::warn!("the node stopped emitting progress")
+            }
+            AppCmd::Warning { generation, notice: Some(notice) } if self.current(generation) => {
                 match notice {
                     Notice::Peers { connected, required } => {
                         self.wallet.emit(WalletPageMsg::Peers { connected, required });
@@ -883,8 +908,9 @@ impl Component for App {
                             .unwrap_or(true);
                         if due && let Some(session) = self.session.clone() {
                             self.peers_read = Some(std::time::Instant::now());
+                            let generation = self.generation;
                             sender.oneshot_command(async move {
-                                AppCmd::Peers(session.peers().await)
+                                AppCmd::Peers { generation, peers: session.peers().await }
                             });
                         }
                     }
@@ -893,8 +919,12 @@ impl Component for App {
                 }
                 self.await_warning(&sender);
             }
-            AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
-            AppCmd::Peers(peers) => self.wallet.emit(WalletPageMsg::SetPeers(peers)),
+            AppCmd::Warning { notice: None, .. } => {
+                tracing::warn!("the node stopped emitting warnings")
+            }
+            AppCmd::Peers { generation, peers } if self.current(generation) => {
+                self.wallet.emit(WalletPageMsg::SetPeers(peers))
+            }
 
             AppCmd::TorProgress(message) => {
                 self.tor_status = Some(message);
@@ -965,7 +995,9 @@ impl Component for App {
             AppCmd::Sent(Err(message)) => {
                 self.wallet.emit(WalletPageMsg::Sent(Box::new(Err(message))));
             }
-            AppCmd::Revealed(Ok((address, summary))) => {
+            AppCmd::Revealed { generation, result: Ok((address, summary)) }
+                if self.current(generation) =>
+            {
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::ShowFreshAddress(address));
             }
@@ -978,9 +1010,22 @@ impl Component for App {
                 tracing::warn!(%message, "could not fetch a price");
                 self.wallet.emit(WalletPageMsg::SetPrice(None));
             }
-            AppCmd::Revealed(Err(message)) => {
+            AppCmd::Revealed { generation, result: Err(message) } if self.current(generation) => {
                 tracing::error!(%message, "could not reveal an address");
                 self.wallet.emit(WalletPageMsg::Failed(message));
+            }
+
+            // Everything the guards above rejected: a result for a wallet that
+            // is no longer the one on screen. Dropped, and said once at debug
+            // so it is visible when chasing a screen that looks stale.
+            AppCmd::Started { .. }
+            | AppCmd::Update { .. }
+            | AppCmd::Progress { .. }
+            | AppCmd::Warning { .. }
+            | AppCmd::Chain { .. }
+            | AppCmd::Peers { .. }
+            | AppCmd::Revealed { .. } => {
+                tracing::debug!("ignoring a result from a wallet that is no longer open");
             }
         }
     }
@@ -1263,11 +1308,19 @@ impl App {
             return;
         }
 
+        // A new session, so anything still in flight for the last one is
+        // from a wallet that is no longer on screen.
+        self.generation += 1;
+        let generation = self.generation;
         let tor = self.tor_proxy();
         sender.oneshot_command(async move {
-            AppCmd::Started(
-                Session::start(&paths, tor).await.map(Arc::new).map_err(|e| e.to_string()),
-            )
+            AppCmd::Started {
+                generation,
+                result: Session::start(&paths, tor)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string()),
+            }
         });
     }
 
@@ -1612,20 +1665,38 @@ impl App {
         self.prefs_page = Some(page);
     }
 
+    /// Is this result from the session currently on screen?
+    ///
+    /// Anything older belongs to a wallet that has been left, and applying it
+    /// would put one wallet's numbers under another's name.
+    fn current(&self, generation: u64) -> bool {
+        generation == self.generation
+    }
+
     fn await_update(&self, sender: &ComponentSender<Self>) {
         let Some(session) = self.session.clone() else { return };
+        let generation = self.generation;
         sender.oneshot_command(async move {
-            AppCmd::Update(session.next_update().await.map_err(|e| e.to_string()))
+            AppCmd::Update {
+                generation,
+                result: session.next_update().await.map_err(|e| e.to_string()),
+            }
         });
     }
 
     fn await_progress(&self, sender: &ComponentSender<Self>) {
         let Some(session) = self.session.clone() else { return };
-        sender.oneshot_command(async move { AppCmd::Progress(session.next_progress().await) });
+        let generation = self.generation;
+        sender.oneshot_command(async move {
+            AppCmd::Progress { generation, progress: session.next_progress().await }
+        });
     }
 
     fn await_warning(&self, sender: &ComponentSender<Self>) {
         let Some(session) = self.session.clone() else { return };
-        sender.oneshot_command(async move { AppCmd::Warning(session.next_warning().await) });
+        let generation = self.generation;
+        sender.oneshot_command(async move {
+            AppCmd::Warning { generation, notice: session.next_warning().await }
+        });
     }
 }

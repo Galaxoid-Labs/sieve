@@ -137,6 +137,13 @@ pub struct Session {
     scanning: Arc<AtomicBool>,
     /// Which chain this session is on, so remembered peers never cross over.
     network: bdk_wallet::bitcoin::Network,
+    /// The median time past, and the tip it was worked out for.
+    ///
+    /// Eleven header round trips is nothing on a direct connection and a great
+    /// deal through Tor, where each one is a circuit. It only changes when the
+    /// tip does, so it is worked out once per block rather than once per
+    /// refresh.
+    median_time: std::sync::Mutex<Option<(u32, u64)>>,
 }
 
 impl Session {
@@ -278,6 +285,7 @@ impl Session {
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
             warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
             requester: client.requester(),
+            median_time: std::sync::Mutex::new(None),
             synced: Arc::new(AtomicBool::new(false)),
             scanning: Arc::new(AtomicBool::new(false)),
             network,
@@ -878,18 +886,30 @@ impl Session {
             crate::peers::remember(self.network, &addresses);
         }
 
-        // Eleven headers, which the node already holds in memory.
-        let mut recent = Vec::with_capacity(11);
-        for back in 0..11u32 {
-            let Some(height) = tip.height.checked_sub(back) else { break };
-            match self.requester.get_header(height).await {
-                Ok(Some(header)) => recent.push(header.header.time as u64),
-                _ => break,
+        // Eleven headers. Cached against the tip they describe: over Tor
+        // that is eleven circuit round trips, and repeating them every refresh
+        // both wasted the network and stretched the window in which a result
+        // for the previous wallet could still arrive.
+        let cached = *self.median_time.lock().unwrap();
+        match cached {
+            Some((height, median)) if height == tip.height => {
+                info.median_time_past = Some(median);
             }
-        }
-        if recent.len() == 11 {
-            recent.sort_unstable();
-            info.median_time_past = Some(recent[5]);
+            _ => {
+                let mut recent = Vec::with_capacity(11);
+                for back in 0..11u32 {
+                    let Some(height) = tip.height.checked_sub(back) else { break };
+                    match self.requester.get_header(height).await {
+                        Ok(Some(header)) => recent.push(header.header.time as u64),
+                        _ => break,
+                    }
+                }
+                if recent.len() == 11 {
+                    recent.sort_unstable();
+                    info.median_time_past = Some(recent[5]);
+                    *self.median_time.lock().unwrap() = Some((tip.height, recent[5]));
+                }
+            }
         }
 
         if let Ok(rate) = self.requester.broadcast_min_feerate().await {

@@ -193,6 +193,14 @@ Onion addresses are remembered alongside plain ones: a run over Tor connects to 
 and those are exactly the ones reachable the next time Tor is on. `tor::onion` encodes and
 decodes them, checksum included, so a corrupted entry is dropped rather than dialled.
 
+**Results outlive the wallet that asked for them.** Every command driven by a `Session` carries
+the `App::generation` it was started under, and anything from an older one is dropped. Without
+it a chain view, a peer list or a *balance* belonging to the wallet you just left lands on the
+one you just opened. Tor makes it easy to hit — reading the chain is a dozen round trips
+through circuits — but the race exists on any connection, and `Reset` alone cannot close it
+because the stale result arrives after the reset. `Reset` now also fires when a wallet is
+switched with no client running at all.
+
 **Two counts, two questions.** kyoto opens more than one connection to some peers, so
 "connections" and "peers" differ and neither is wrong. The status line says which it is
 showing. And the peer list is read with `Session::peers`, not `chain_info`: the latter waits on
