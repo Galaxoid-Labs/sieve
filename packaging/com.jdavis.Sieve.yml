@@ -1,0 +1,94 @@
+# Sieve, with its own Tor.
+#
+# The point of this manifest is the `tor` module. A privacy wallet that tells
+# people to go and install Tor first is a privacy wallet with the feature
+# switched off; Sparrow, Wasabi and Feather all ship Tor for the same reason.
+# Built from source here rather than shipped as a binary, which is what makes
+# it auditable — and it lands at /app/bin/tor, right beside the app, which is
+# the first place `tor::daemon::find_binary` looks.
+#
+# UNTESTED: written without flatpak-builder on the machine. Expect the first
+# real build to need adjusting, particularly the Rust module, which needs a
+# generated cargo-sources.json for Flathub's offline builder
+# (flatpak-builder-tools/cargo).
+id: com.jdavis.Sieve
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: sieve
+
+finish-args:
+  # Bitcoin peers, and the Tor we start to reach them through.
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Nothing else. No home directory, no host filesystem: the wallet lives in
+  # the app's own data directory, which is the isolation this packaging is for.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/sieve/cargo
+
+modules:
+  # Tor's event loop. Not in the GNOME runtime, so it is built first.
+  - name: libevent
+    buildsystem: autotools
+    config-opts:
+      - --disable-libevent-regress
+      - --disable-samples
+      - --disable-static
+    sources:
+      - type: archive
+        url: https://github.com/libevent/libevent/releases/download/release-2.1.13-stable/libevent-2.1.13-stable.tar.gz
+        sha256: f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - '*.la'
+
+  # The daemon Sieve starts for itself. Client only: this never becomes a relay
+  # and never serves an onion address.
+  #
+  # Before bumping the version, check the signature as well as the digest —
+  # the digest below matches Tor's published sha256sum, which proves the
+  # download was not corrupted, not that it was Tor who published it.
+  # See https://support.torproject.org/tbb/how-to-verify-signature/
+  - name: tor
+    buildsystem: autotools
+    config-opts:
+      - --disable-asciidoc
+      - --disable-manpage
+      - --disable-html-manual
+      - --disable-systemd
+      - --disable-unittests
+      - --disable-tool-name-check
+    sources:
+      - type: archive
+        url: https://dist.torproject.org/tor-0.4.9.11.tar.gz
+        sha256: 2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed
+    cleanup:
+      - /include
+      - /share/doc
+      - '*.la'
+
+  - name: sieve
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --offline
+      - install -Dm755 target/release/sieve /app/bin/sieve
+      - install -Dm644 data/com.jdavis.Sieve.desktop /app/share/applications/com.jdavis.Sieve.desktop
+      - |
+        for icon in data/icons/hicolor/scalable/actions/*.svg; do
+          install -Dm644 "$icon" "/app/share/icons/hicolor/scalable/actions/$(basename "$icon")"
+        done
+    sources:
+      - type: dir
+        path: ..
+      # Add generated-sources.json here for an offline build:
+      #   python3 flatpak-cargo-generator.py ../Cargo.lock -o generated-sources.json
+      # - type: file
+      #   path: generated-sources.json

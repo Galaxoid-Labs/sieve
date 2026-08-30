@@ -55,6 +55,9 @@ pub struct App {
     chain_tip: Option<u32>,
     /// What the last proxy check found, shown under the Tor switch.
     tor_status: Option<String>,
+    /// The proxy currently in use — the one Sieve found running, or the one it
+    /// started. Nothing connects through Tor until this is set.
+    tor_active: Option<crate::tor::Proxy>,
     session: Option<Arc<Session>>,
     chooser: Controller<Chooser>,
     onboarding: Controller<Onboarding>,
@@ -167,9 +170,10 @@ pub enum AppCmd {
     Priced(Result<crate::price::Price, String>),
     /// A fee rate in sat/vB, and where it came from.
     Estimated(Result<(f64, String), String>),
-    /// Whether the proxy answered, and what it said. `bool` is whether the
-    /// check was for turning Tor on, which decides what a failure means.
-    TorChecked { turning_on: bool, result: Result<String, String> },
+    /// Bootstrap news, while Tor is starting.
+    TorProgress(String),
+    /// Tor is up at this proxy, or could not be.
+    TorReady(Result<crate::tor::Proxy, String>),
 }
 
 #[relm4::component(pub)]
@@ -370,6 +374,7 @@ impl Component for App {
             fee_estimate: None,
             chain_tip: None,
             tor_status: None,
+            tor_active: None,
             session: None,
             chooser,
             onboarding,
@@ -475,34 +480,24 @@ impl Component for App {
             }
 
             AppMsg::SetTor(on) => {
+                self.settings.tor = on;
+                self.settings.save();
+
                 if !on {
-                    self.settings.tor = false;
-                    self.settings.save();
+                    // Ours to stop; a system daemon we merely borrowed is left
+                    // alone by `stop`.
+                    crate::tor::daemon::stop();
+                    self.tor_active = None;
                     self.tor_status = None;
                     self.rebuild_preferences(&sender);
                     self.restart_session(&sender);
                     return;
                 }
 
-                // Checked before it is believed. Turning Tor on and finding
-                // out later that nothing was listening is the failure mode
-                // this whole feature exists to avoid.
-                self.tor_status = Some("Checking…".into());
-                self.rebuild_preferences(&sender);
-
-                let proxy = self
-                    .settings
-                    .tor_proxy
-                    .as_deref()
-                    .and_then(|text| text.parse().ok())
-                    .unwrap_or_else(|| crate::tor::Proxy::local(crate::tor::PORTS[0]));
-
-                sender.spawn_oneshot_command(move || AppCmd::TorChecked {
-                    turning_on: true,
-                    result: crate::tor::check(proxy)
-                        .map(|_| format!("Tor answered at {proxy}"))
-                        .map_err(|e| e.to_string()),
-                });
+                // Brought up before it is believed. Turning Tor on and finding
+                // out later that nothing was listening is the failure this
+                // whole feature exists to avoid.
+                self.ensure_tor(&sender);
             }
 
             AppMsg::SetTorProxy(address) => {
@@ -513,17 +508,8 @@ impl Component for App {
             }
 
             AppMsg::CheckTor => {
-                let proxy = self.tor_proxy().unwrap_or_else(|| {
-                    crate::tor::Proxy::local(crate::tor::PORTS[0])
-                });
-                self.tor_status = Some("Checking…".into());
-                self.rebuild_preferences(&sender);
-                sender.spawn_oneshot_command(move || AppCmd::TorChecked {
-                    turning_on: false,
-                    result: crate::tor::check(proxy)
-                        .map(|_| format!("Tor answered at {proxy}"))
-                        .map_err(|e| e.to_string()),
-                });
+                self.tor_active = None;
+                self.ensure_tor(&sender);
             }
 
             AppMsg::SetMempoolFees(on) => {
@@ -705,17 +691,7 @@ impl Component for App {
 
                 self.fetch_price(&sender);
 
-                if self.session.is_none() {
-                    let tor = self.tor_proxy();
-                    sender.oneshot_command(async move {
-                        AppCmd::Started(
-                            Session::start(&paths, tor)
-                                .await
-                                .map(Arc::new)
-                                .map_err(|e| e.to_string()),
-                        )
-                    });
-                }
+                self.start_session(&sender);
             }
 
             AppMsg::RevealAddress(script_type) => {
@@ -858,27 +834,29 @@ impl Component for App {
                 self.await_warning(&sender);
             }
             AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
-            AppCmd::TorChecked { turning_on, result } => match result {
-                Ok(message) => {
-                    self.tor_status = Some(message);
-                    if turning_on {
-                        self.settings.tor = true;
-                        self.settings.save();
-                        self.restart_session(&sender);
-                    }
-                    self.rebuild_preferences(&sender);
-                }
-                Err(message) => {
-                    // The switch goes back rather than leaving the app looking
-                    // as though it is on Tor when it is not.
-                    self.tor_status = Some(crate::ui::send::capitalise(&message));
-                    if turning_on {
-                        self.settings.tor = false;
-                        self.settings.save();
-                    }
-                    self.rebuild_preferences(&sender);
-                }
-            },
+            AppCmd::TorProgress(message) => {
+                self.tor_status = Some(message);
+                self.rebuild_preferences(&sender);
+            }
+
+            AppCmd::TorReady(Ok(proxy)) => {
+                tracing::info!(%proxy, "Tor is ready");
+                self.tor_active = Some(proxy);
+                self.tor_status = Some(format!("Connected through Tor at {proxy}"));
+                self.rebuild_preferences(&sender);
+                self.restart_session(&sender);
+            }
+
+            AppCmd::TorReady(Err(message)) => {
+                // The switch goes back rather than leaving the app looking as
+                // though it is on Tor when it is not.
+                tracing::warn!(%message, "could not bring Tor up");
+                self.tor_active = None;
+                self.settings.tor = false;
+                self.settings.save();
+                self.tor_status = Some(crate::ui::send::capitalise(&message));
+                self.rebuild_preferences(&sender);
+            }
 
             AppCmd::Estimated(Ok((rate, source))) => {
                 if let Some(height) = self.chain_tip {
@@ -924,7 +902,12 @@ impl Component for App {
         }
     }
 
+    /// Take the Tor we started down with us.
+    ///
+    /// Belt and braces: Tor is also started with `__OwningControllerProcess`,
+    /// so it exits by itself if Sieve is killed and never reaches this.
     fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
+        crate::tor::daemon::stop();
         if let Some(session) = &self.session {
             session.shutdown();
         }
@@ -1014,19 +997,91 @@ impl App {
     /// One reader for the setting, so no call site can forget it: peers, the
     /// price and the fee rates all ask here.
     fn tor_proxy(&self) -> Option<crate::tor::Proxy> {
-        if !self.settings.tor {
-            return None;
+        self.settings.tor.then_some(self.tor_active).flatten()
+    }
+
+    /// The proxy the settings name, when they name one.
+    ///
+    /// An address typed in preferences is taken as an instruction: use that
+    /// one, do not go starting anything.
+    fn configured_proxy(&self) -> Option<crate::tor::Proxy> {
+        let text = self.settings.tor_proxy.as_deref()?;
+        match text.parse() {
+            Ok(proxy) => Some(proxy),
+            Err(e) => {
+                tracing::warn!(%e, "unreadable proxy address in settings");
+                None
+            }
         }
-        match &self.settings.tor_proxy {
-            Some(text) => match text.parse() {
-                Ok(proxy) => Some(proxy),
-                Err(e) => {
-                    tracing::warn!(%e, "unreadable proxy address; using the usual one");
-                    Some(crate::tor::Proxy::local(crate::tor::PORTS[0]))
-                }
-            },
-            None => Some(crate::tor::Proxy::local(crate::tor::PORTS[0])),
+    }
+
+    /// Bring Tor up: use what is listening, or start one.
+    ///
+    /// Slow — a first bootstrap can take half a minute — so it reports as it
+    /// goes rather than leaving a switch mid-flip with nothing to show.
+    fn ensure_tor(&mut self, sender: &ComponentSender<Self>) {
+        self.tor_status = Some("Starting Tor…".into());
+        self.rebuild_preferences(sender);
+
+        let configured = self.configured_proxy();
+        sender.command(move |out, shutdown| {
+            shutdown
+                .register(async move {
+                    // An address given in preferences is used as given: it may
+                    // be a proxy on another machine, and starting a local Tor
+                    // would silently ignore what was asked for.
+                    if let Some(proxy) = configured {
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::tor::check(proxy).map(|_| proxy).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                        let _ = out.send(AppCmd::TorReady(result));
+                        return;
+                    }
+
+                    let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+                    let work = tokio::task::spawn_blocking(move || {
+                        crate::tor::daemon::ensure(|message| {
+                            let _ = progress.send(message);
+                        })
+                        .map_err(|e| e.to_string())
+                    });
+
+                    while let Some(message) = updates.recv().await {
+                        let _ = out.send(AppCmd::TorProgress(message));
+                    }
+
+                    let result = work.await.unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = out.send(AppCmd::TorReady(result));
+                })
+                .drop_on_shutdown()
+        });
+    }
+
+    /// Start the light client, once everything it depends on is ready.
+    fn start_session(&mut self, sender: &ComponentSender<Self>) {
+        if self.session.is_some() {
+            return;
         }
+        let Some(paths) = self.active.clone() else { return };
+        if !self.unlocked {
+            return;
+        }
+
+        // Tor first, always. Connecting over the clear while the switch says
+        // Tor is the one outcome this must never produce.
+        if self.settings.tor && self.tor_active.is_none() {
+            self.ensure_tor(sender);
+            return;
+        }
+
+        let tor = self.tor_proxy();
+        sender.oneshot_command(async move {
+            AppCmd::Started(
+                Session::start(&paths, tor).await.map(Arc::new).map_err(|e| e.to_string()),
+            )
+        });
     }
 
     /// Stop the light client and start another with the current settings.
@@ -1039,19 +1094,7 @@ impl App {
             session.shutdown();
             self.wallet.emit(WalletPageMsg::Reset);
         }
-
-        // Only a wallet that has been unlocked has a session to restart.
-        let Some(paths) = self.active.clone() else { return };
-        if !self.unlocked {
-            return;
-        }
-
-        let tor = self.tor_proxy();
-        sender.oneshot_command(async move {
-            AppCmd::Started(
-                Session::start(&paths, tor).await.map(Arc::new).map_err(|e| e.to_string()),
-            )
-        });
+        self.start_session(sender);
     }
 
     /// Close a dialog only if it is on screen. Closing one that was never
@@ -1183,9 +1226,10 @@ impl App {
         let tor = adw::SwitchRow::new();
         tor.set_title("Route connections through Tor");
         tor.set_subtitle(
-            "Peers, price and fee lookups all go through a Tor proxy already running on this \
-             machine — Sieve does not ship one. If the proxy is not answering, Sieve refuses \
-             to connect rather than going out over the clear.",
+            "Peers, price and fee lookups all go through Tor. Sieve uses a Tor already \
+             running on this machine, and starts one itself if there is none. If Tor cannot \
+             be reached at all, Sieve refuses to connect rather than going out over the \
+             clear.",
         );
         tor.set_active(self.settings.tor);
         {

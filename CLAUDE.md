@@ -88,22 +88,20 @@ Off by default, and when it is on it covers everything: peer connections, the pr
 the fee lookup all go through the same SOCKS5 proxy. `App::tor_proxy` is the only reader of the
 setting, so no call site can forget it.
 
-**A system daemon so far — which is the minority position, and known to be.** Sieve currently
-expects Tor already running on the machine: `127.0.0.1:9050`, or Tor Browser's `9150`. That is
-what Bitcoin Core and Electrum do, but it is *not* what comparable privacy wallets do. Sparrow
-ships Tor binaries and starts an internal proxy when no external one is configured; Wasabi uses
-a local Tor if it finds one and falls back to its own bundled copy; Feather bundles Tor as
-well. Requiring an external daemon is therefore a gap, not a design principle — most people
-who would want this do not have `tor` installed, and telling them to go install it is how a
-privacy feature ends up unused.
+**Sieve provides Tor, rather than asking for it.** In order: a proxy already listening on 9050
+or 9150 is borrowed and never touched; otherwise a `tor` binary is found and *started by us*,
+with its own data directory, a port Tor picks, and `__OwningControllerProcess` so it exits if
+Sieve dies without stopping it. The binary is looked for at `$SIEVE_TOR`, then beside the
+executable — which is where `packaging/com.jdavis.Sieve.yml` puts it — then on `PATH`.
 
-Two ways to close it, both recorded in ROADMAP M6: spawn a bundled `tor` binary as a child
-process, which is what the wallets above do and what fits the M8 Flatpak; or embed
-[arti](https://tpo.pages.torproject.net/core/doc/rust/arti_client/). Note that arti's own SOCKS
-listener is behind `experimental-api` and explicitly outside its semver guarantees, so
-embedding arti means writing our own local SOCKS server over `arti_client` streams — plus a
-very large dependency tree and a client that terminates the process when the consensus says it
-is too old.
+That last part is why the Flatpak manifest exists: it builds Tor from source into
+`/app/bin/tor`, so someone who has never installed Tor gets it. Sparrow ships Tor binaries,
+Wasabi falls back to a bundled copy, Feather bundles it too; expecting the user to install a
+daemon is what Bitcoin Core and Electrum do, and a node is not a wallet. Embedding
+[arti](https://tpo.pages.torproject.net/core/doc/rust/arti_client/) instead is possible but
+worse for now: its own SOCKS listener sits behind `experimental-api` and outside semver, so it
+would mean writing a local SOCKS server over `arti_client` streams, plus a client that
+terminates the process on an obsolete consensus.
 
 **Proving the proxy is Tor.** Anything can listen on 9050. `RESOLVE` (0xF0) is Tor's extension
 to SOCKS5, not RFC 1928, so a plain SOCKS proxy answers `0x07 command not supported` and only
