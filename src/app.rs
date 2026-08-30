@@ -891,13 +891,37 @@ impl Component for App {
                     self.wallet.emit(WalletPageMsg::Reset);
                 }
 
-                let watch_only =
-                    wallet::Meta::load(&paths).is_some_and(|m| m.watch_only);
+                let id = paths
+                    .dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let meta = wallet::Meta::load(&paths);
+                let watch_only = meta.as_ref().is_some_and(|m| m.watch_only);
+
                 self.active = Some(paths.clone());
                 self.balance_sats = Some(summary.balance_sats);
                 self.unlocked = true;
                 self.wallet.emit(WalletPageMsg::SetWatchOnly(watch_only));
-                if let Some(meta) = wallet::Meta::load(&paths) {
+
+                // The name, which this path used to leave alone. Opening a
+                // wallet from the list sets it; arriving here from an import
+                // or from creating one did not, so a freshly imported wallet
+                // wore the previous wallet's name over its own balance, its
+                // own chain and its own peers. Everything on screen was right
+                // except the one word saying whose it was.
+                self.wallet.emit(WalletPageMsg::SetName(
+                    meta.as_ref().map(|m| m.display_name(&id)).unwrap_or_else(|| id.clone()),
+                ));
+
+                // And it is the wallet to come back to next time. Without
+                // this, importing a wallet and restarting opened the old one.
+                if self.settings.last_wallet.as_deref() != Some(id.as_str()) {
+                    self.settings.last_wallet = Some(id);
+                    self.settings.save();
+                }
+
+                if let Some(meta) = &meta {
                     // So the sync status can say how big the job is, rather
                     // than only how far through it is.
                     self.wallet.emit(WalletPageMsg::SetBirthday(meta.birthday_height));
