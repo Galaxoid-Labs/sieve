@@ -178,6 +178,22 @@ pub fn sign(signing: &Wallet, psbt: &mut Psbt) -> Result<bool> {
         .map_err(|e| anyhow!("signing failed: {e}"))
 }
 
+/// Coins this wallet holds that are not in a block yet.
+///
+/// Excluded from coin selection. Everything unconfirmed here is a transaction
+/// Sieve broadcast itself — a filter client cannot see anyone else's mempool —
+/// so spending it means building on a transaction that could still be dropped
+/// or replaced, which would invalidate the child along with it. Waiting for a
+/// block is the honest default, and the balance shown as available already
+/// counts only confirmed coins.
+pub(super) fn unconfirmed_outpoints(wallet: &Wallet) -> Vec<bdk_wallet::bitcoin::OutPoint> {
+    wallet
+        .list_unspent()
+        .filter(|utxo| !utxo.chain_position.is_confirmed())
+        .map(|utxo| utxo.outpoint)
+        .collect()
+}
+
 /// Which output is the recipient's, and which is change.
 pub(super) fn split_outputs(psbt: &Psbt, to: &ScriptBuf) -> (Amount, Option<Amount>) {
     let mut spend = Amount::ZERO;
@@ -291,6 +307,48 @@ mod tests {
             );
             psbt.clone().extract_tx().expect("could not extract the signed transaction");
         }
+    }
+
+    /// Change from a transaction still waiting for a block is not available
+    /// to spend, however tempting the balance looks.
+    #[test]
+    fn unconfirmed_coins_are_not_spent() {
+        let network = Network::Signet;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let mut wallet = hd_signer(xprv, ScriptType::Taproot, network).unwrap();
+
+        let funded = wallet.reveal_next_address(KeychainKind::External).address;
+        let funding = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(
+                    "0000000000000000000000000000000000000000000000000000000000000001"
+                        .parse::<Txid>()
+                        .unwrap(),
+                    0,
+                ),
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: funded.script_pubkey(),
+            }],
+        };
+        wallet.apply_unconfirmed_txs([(funding, 0u64)]);
+
+        let unconfirmed = unconfirmed_outpoints(&wallet);
+        assert_eq!(unconfirmed.len(), 1, "the funding should be pending");
+
+        let to = parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+        let mut builder = wallet.build_tx();
+        builder.unspendable(unconfirmed);
+        builder.add_recipient(to.script_pubkey(), Amount::from_sat(20_000));
+        builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+        assert!(
+            builder.finish().is_err(),
+            "a pending coin was spent when it should not have been"
+        );
     }
 
     /// A signer derived with a different BIP-39 passphrase is a different

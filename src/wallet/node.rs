@@ -313,9 +313,16 @@ impl Session {
             .find(|a| a.script_type == draft.from)
             .context("that derivation path is not part of this wallet")?;
 
+        // A payment already broadcast and not yet in a block is not money to
+        // spend again: it can still be dropped or replaced, and anything built
+        // on it dies with it.
+        let pending = super::send::unconfirmed_outpoints(&account.wallet);
+        let waiting_on_a_block = !pending.is_empty();
+
         let script = draft.to.script_pubkey();
         let psbt = {
             let mut builder = account.wallet.build_tx();
+            builder.unspendable(pending);
             builder.fee_rate(draft.fee_rate);
             match draft.amount {
                 Sending::Exact(amount) => {
@@ -328,7 +335,17 @@ impl Session {
                     builder.drain_to(script.clone());
                 }
             }
-            builder.finish().map_err(|e| anyhow!("{e}"))?
+            builder.finish().map_err(|e| {
+                // Otherwise the message reports less money than the balance
+                // above it shows, with no explanation for the difference.
+                if waiting_on_a_block {
+                    anyhow!(
+                        "{e}. Coins from a payment that has not confirmed yet cannot be spent."
+                    )
+                } else {
+                    anyhow!("{e}")
+                }
+            })?
         };
 
         // Laying out change revealed an address on the internal keychain.

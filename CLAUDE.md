@@ -133,6 +133,12 @@ a clear refusal, not a broken send.
 One transaction spends from one derivation path, because each path is its own BDK wallet with
 its own UTXOs. When more than one path holds coins, the form asks which.
 
+Unconfirmed coins are excluded from selection (`unconfirmed_outpoints` → `TxBuilder::unspendable`).
+Everything unconfirmed in this wallet is a payment Sieve broadcast itself — a filter client sees
+no one else's mempool — so spending it means building on a transaction that could still be
+dropped, taking the child with it. The available balance already counts only confirmed coins, so
+the two agree; when a build fails while something is pending, the error says why.
+
 Broadcast comes before recording locally — a transaction no peer accepted is not a
 transaction — and then the tx is applied to the wallet as unconfirmed so it appears in
 Activity immediately. Note that broadcasting tells the receiving peer this transaction is
