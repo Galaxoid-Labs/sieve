@@ -172,6 +172,16 @@ for most connections, so demanding the flag would remember almost nobody.
 So the list is "peers present through a working sync", not "peers known to serve filters".
 Do not describe it as the latter — the flags to prove that are usually absent.
 
+Onion addresses are remembered alongside plain ones: a run over Tor connects to onion peers,
+and those are exactly the ones reachable the next time Tor is on. `tor::onion` encodes and
+decodes them, checksum included, so a corrupted entry is dropped rather than dialled.
+
+**Two counts, two questions.** kyoto opens more than one connection to some peers, so
+"connections" and "peers" differ and neither is wrong. The status line says which it is
+showing. And the peer list is read with `Session::peers`, not `chain_info`: the latter waits on
+a block header, which during a header download is the slowest thing the node is doing, so the
+list used to stay empty until the sync finished — exactly when it stopped being interesting.
+
 ## Sending
 
 Building a transaction is watch-only work: BDK needs public descriptors and UTXOs to choose

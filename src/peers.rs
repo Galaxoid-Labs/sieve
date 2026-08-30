@@ -26,12 +26,26 @@ fn path(network: Network) -> PathBuf {
 }
 
 /// Addresses last known to be part of a working sync on this network.
-pub fn remembered(network: Network) -> Vec<IpAddr> {
+///
+/// Returned as written rather than parsed: an onion address is not an
+/// `IpAddr`, and the peers worth remembering from a run over Tor are precisely
+/// the onion ones.
+pub fn remembered(network: Network) -> Vec<String> {
     let Ok(bytes) = std::fs::read(path(network)) else {
         return Vec::new();
     };
     let stored: Vec<String> = serde_json::from_slice(&bytes).unwrap_or_default();
-    stored.iter().filter_map(|s| s.parse().ok()).collect()
+    stored.into_iter().filter(|a| is_address(a)).collect()
+}
+
+/// Something we could dial again: an IP, or an onion address whose checksum
+/// holds. Anything else is a corrupted file or a hand-edit, and connecting to
+/// it would only waste attempts.
+fn is_address(text: &str) -> bool {
+    if crate::tor::onion::looks_like_onion(text) {
+        return crate::tor::onion::decode(text).is_some();
+    }
+    text.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().is_ok()
 }
 
 /// Record the peers currently connected on this network.
@@ -45,7 +59,7 @@ pub fn remember(network: Network, addresses: &[String]) {
     let mut seen = std::collections::HashSet::new();
     let keep: Vec<String> = addresses
         .iter()
-        .filter(|a| a.parse::<IpAddr>().is_ok())
+        .filter(|a| is_address(a))
         .filter(|a| seen.insert((*a).clone()))
         .take(KEEP)
         .cloned()
@@ -78,12 +92,24 @@ pub fn clear(network: Network) {
 mod tests {
     use super::*;
 
+    const REAL_ONION: &str =
+        "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
+
     #[test]
-    fn only_parseable_addresses_are_kept() {
-        // A malformed entry must not poison the list for everything after it.
-        let stored = ["1.2.3.4".to_string(), "nonsense".to_string(), "::1".to_string()];
-        let kept: Vec<IpAddr> = stored.iter().filter_map(|s| s.parse().ok()).collect();
-        assert_eq!(kept.len(), 2);
+    fn only_addresses_that_could_be_dialled_are_kept() {
+        // Tests the filter itself, not a copy of it: a malformed entry must
+        // not poison the list, and an onion address must survive it — those
+        // are the peers a run over Tor has to remember.
+        assert!(is_address("1.2.3.4"));
+        assert!(is_address("::1"));
+        assert!(is_address("[::1]"));
+        assert!(is_address(REAL_ONION));
+
+        assert!(!is_address("nonsense"));
+        assert!(!is_address(""));
+        // An onion address with one character changed is unreachable, and
+        // storing it would spend connection attempts on nothing.
+        assert!(!is_address(&REAL_ONION.replacen("2gzyxa5", "2gzyxa6", 1)));
     }
 
     #[test]
@@ -93,16 +119,17 @@ mod tests {
         let addresses = vec![
             "1.2.3.4".to_string(),
             "1.2.3.4".to_string(),
-            "5.6.7.8".to_string(),
-            "1.2.3.4".to_string(),
+            REAL_ONION.to_string(),
+            "nonsense".to_string(),
+            REAL_ONION.to_string(),
         ];
         let mut seen = std::collections::HashSet::new();
         let kept: Vec<&String> = addresses
             .iter()
-            .filter(|a| a.parse::<IpAddr>().is_ok())
+            .filter(|a| is_address(a))
             .filter(|a| seen.insert((*a).clone()))
             .collect();
-        assert_eq!(kept.len(), 2);
+        assert_eq!(kept.len(), 2, "{kept:?}");
     }
 
     #[test]

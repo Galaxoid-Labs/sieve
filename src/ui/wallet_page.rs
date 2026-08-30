@@ -300,6 +300,10 @@ pub struct WalletPage {
     send: Controller<SendForm>,
     /// How connections are being made, when they go through Tor.
     tor: Option<String>,
+    /// Machines, as opposed to connections. kyoto opens more than one
+    /// connection to some peers, so the two numbers differ and saying only the
+    /// first invites the reader to count the list and find it wrong.
+    distinct_peers: usize,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -326,6 +330,8 @@ pub enum WalletPageMsg {
     RefreshChain,
     /// How connections are being made: `Some` when they go through Tor.
     SetTor(Option<String>),
+    /// The connected peers, arriving faster than the chain view can.
+    SetPeers(Vec<crate::wallet::node::PeerInfo>),
     /// From the send form, on its way to the app.
     PlanSend(Box<Draft>),
     SendNow { plan: Box<Plan>, password: Password },
@@ -578,9 +584,19 @@ impl WalletPage {
                 crate::wallet::node::REQUIRED_PEERS
             );
         }
-        match self.peers {
-            Some((connected, required)) => format!("{connected} of {required} connected"),
-            None => "Connecting…".into(),
+        let Some((connections, required)) = self.peers else {
+            return "Connecting…".into();
+        };
+
+        // Two true numbers that are not the same question. Showing only the
+        // connection count over a list of distinct addresses reads as an
+        // error in one of them.
+        match self.distinct_peers {
+            0 => format!("{connections} of {required} connections"),
+            peers if peers == connections => {
+                format!("{peers} peers, {required} wanted")
+            }
+            peers => format!("{peers} peers over {connections} connections"),
         }
     }
 
@@ -1254,6 +1270,7 @@ impl Component for WalletPage {
             stack: None,
             send,
             tor: None,
+            distinct_peers: 0,
             locked: true,
             price: None,
             toaster: Toaster::default(),
@@ -1343,20 +1360,29 @@ impl Component for WalletPage {
                 let _ = sender.output(WalletPageOutput::RefreshChain);
             }
             WalletPageMsg::SetChain(chain) => {
-                let mut guard = self.peers_list.guard();
-                guard.clear();
                 if let Some(info) = &chain {
+                    self.distinct_peers = info.peers.len();
+                    let mut guard = self.peers_list.guard();
+                    guard.clear();
                     for peer in &info.peers {
                         guard.push_back(peer.clone());
                     }
                 }
-                drop(guard);
                 // What peers will relay is the floor under the fee field.
                 self.send
                     .emit(SendMsg::SetMinFee(chain.as_ref().and_then(|c| c.min_relay_fee)));
                 self.chain = chain;
             }
             WalletPageMsg::SetTor(tor) => self.tor = tor,
+
+            WalletPageMsg::SetPeers(peers) => {
+                self.distinct_peers = peers.len();
+                let mut guard = self.peers_list.guard();
+                guard.clear();
+                for peer in peers {
+                    guard.push_back(peer);
+                }
+            }
 
             WalletPageMsg::SetPrice(price) => {
                 self.send.emit(SendMsg::SetPrice(price));
@@ -1395,6 +1421,7 @@ impl Component for WalletPage {
                 self.summary = None;
                 self.progress = Progress::Connecting;
                 self.peers = None;
+                self.distinct_peers = 0;
                 self.note = None;
                 self.error = None;
                 self.receive_index = 0;

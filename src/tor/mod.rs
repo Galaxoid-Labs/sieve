@@ -27,6 +27,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 
 pub mod daemon;
+pub mod onion;
 
 /// Where Tor usually listens. The system daemon first, then Tor Browser's.
 pub const PORTS: [u16; 2] = [9050, 9150];
@@ -348,3 +349,4 @@ mod tests {
         assert!(error.contains("nothing is answering"), "{error}");
     }
 }
+

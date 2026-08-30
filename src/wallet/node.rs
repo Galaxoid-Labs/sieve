@@ -204,8 +204,10 @@ impl Session {
         tracing::info!(count = remembered.len(), %network, "seeding with remembered peers");
         let mut builder = Builder::new(network);
         let peers = remembered.len();
-        for ip in remembered {
-            builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
+        for address in remembered {
+            if let Some(peer) = trusted_peer(&address) {
+                builder = builder.add_peer(peer);
+            }
         }
 
         if let Some(proxy) = tor {
@@ -503,6 +505,21 @@ impl Session {
         Ok((txid, summary))
     }
 
+    /// Who is connected, right now.
+    ///
+    /// Split out from `chain_info` because that one waits on the chain tip and
+    /// a block header, which during a header download can take as long as the
+    /// response timeout — thirty seconds over Tor. The peer list was therefore
+    /// stale exactly when it was most interesting, and only filled in once the
+    /// sync had finished. This asks the node for its own connection table and
+    /// returns.
+    pub async fn peers(&self) -> Vec<PeerInfo> {
+        let Ok(peers) = self.requester.peer_info().await else {
+            return Vec::new();
+        };
+        distinct_peers(peers)
+    }
+
     /// Await the next progress event. `None` when the node has stopped.
     ///
     /// Silence is itself reportable: if nothing arrives for a while the caller
@@ -676,12 +693,58 @@ pub struct PeerInfo {
 }
 
 /// A peer address as a person would write it, rather than as Rust prints it.
+/// One entry per machine, from kyoto's one entry per connection.
+fn distinct_peers(
+    peers: Vec<(bdk_wallet::bitcoin::p2p::address::AddrV2, bdk_wallet::bitcoin::p2p::ServiceFlags)>,
+) -> Vec<PeerInfo> {
+    let mut seen = std::collections::HashSet::new();
+    peers
+        .into_iter()
+        .map(|(address, services)| (format_address(&address), services))
+        .filter(|(address, _)| seen.insert(address.clone()))
+        .map(|(address, services)| PeerInfo {
+            address,
+            // `NONE` is "not reported", which is most of the time — not "does
+            // not serve filters". Saying otherwise would libel the peer.
+            serves_filters: (services != bdk_wallet::bitcoin::p2p::ServiceFlags::NONE).then(
+                || services.has(bdk_wallet::bitcoin::p2p::ServiceFlags::COMPACT_FILTERS),
+            ),
+        })
+        .collect()
+}
+
+/// A remembered address, as kyoto wants it.
+///
+/// Both kinds: a plain address, and an onion one, which is the whole point of
+/// remembering peers found while running over Tor — those are exactly the
+/// peers reachable the next time Tor is on.
+fn trusted_peer(address: &str) -> Option<bdk_kyoto::bip157::TrustedPeer> {
+    use bdk_wallet::bitcoin::p2p::address::AddrV2;
+
+    if crate::tor::onion::looks_like_onion(address) {
+        let pubkey = crate::tor::onion::decode(address)?;
+        return Some(bdk_kyoto::bip157::TrustedPeer::new(
+            AddrV2::TorV3(pubkey),
+            None,
+            bdk_wallet::bitcoin::p2p::ServiceFlags::NONE,
+        ));
+    }
+
+    // Written with brackets when it is IPv6, the way the list shows it.
+    let trimmed = address.trim_start_matches('[').trim_end_matches(']');
+    let ip: std::net::IpAddr = trimmed.parse().ok()?;
+    Some(bdk_kyoto::bip157::TrustedPeer::from_ip(ip))
+}
+
 fn format_address(address: &bdk_wallet::bitcoin::p2p::address::AddrV2) -> String {
     use bdk_wallet::bitcoin::p2p::address::AddrV2;
     match address {
         AddrV2::Ipv4(ip) => ip.to_string(),
         AddrV2::Ipv6(ip) => format!("[{ip}]"),
-        AddrV2::TorV3(_) => "Tor address".into(),
+        // The real address, not the word "onion": it is what identifies the
+        // peer, what gets remembered, and what someone would compare against
+        // their own node.
+        AddrV2::TorV3(pubkey) => crate::tor::onion::encode(pubkey),
         other => format!("{other:?}"),
     }
 }
@@ -738,24 +801,7 @@ impl Session {
             // question: how many connections are open, and how many distinct
             // machines they reach.
             info.connections = peers.len();
-            let mut seen = std::collections::HashSet::new();
-            let peers: Vec<_> = peers
-                .into_iter()
-                .filter(|(address, _)| seen.insert(format_address(address)))
-                .collect();
-            info.peers = peers
-                .into_iter()
-                .map(|(address, services)| PeerInfo {
-                    address: format_address(&address),
-                    serves_filters: (services
-                        != bdk_wallet::bitcoin::p2p::ServiceFlags::NONE)
-                        .then(|| {
-                            services.has(
-                                bdk_wallet::bitcoin::p2p::ServiceFlags::COMPACT_FILTERS,
-                            )
-                        }),
-                })
-                .collect();
+            info.peers = distinct_peers(peers);
         }
 
         // Only remember peers once a sync has actually landed. Before that the

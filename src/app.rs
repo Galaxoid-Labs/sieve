@@ -175,6 +175,8 @@ pub enum AppCmd {
     Sent(Result<(String, Summary), String>),
     Tick,
     Priced(Result<crate::price::Price, String>),
+    /// Who is connected, without waiting for the chain.
+    Peers(Vec<crate::wallet::node::PeerInfo>),
     /// A fee rate in sat/vB, and where it came from.
     Estimated(Result<(f64, String), String>),
     /// Bootstrap news, while Tor is starting.
@@ -835,9 +837,16 @@ impl Component for App {
                 match notice {
                     Notice::Peers { connected, required } => {
                         self.wallet.emit(WalletPageMsg::Peers { connected, required });
-                        // The peer list is a snapshot; without this it shows
-                        // whoever was connected when the last sync finished.
-                        sender.input(AppMsg::RefreshChain);
+                        // Just the peers, not the whole chain view: reading the
+                        // chain waits on a header, which during a header
+                        // download is the slowest thing the node is doing. That
+                        // is why the list used to stay empty until the sync had
+                        // finished — precisely when it stopped being useful.
+                        if let Some(session) = self.session.clone() {
+                            sender.oneshot_command(async move {
+                                AppCmd::Peers(session.peers().await)
+                            });
+                        }
                     }
                     Notice::Problem(message) => self.wallet.emit(WalletPageMsg::Note(message)),
                     Notice::Ignorable => {}
@@ -845,6 +854,8 @@ impl Component for App {
                 self.await_warning(&sender);
             }
             AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
+            AppCmd::Peers(peers) => self.wallet.emit(WalletPageMsg::SetPeers(peers)),
+
             AppCmd::TorProgress(message) => {
                 self.tor_status = Some(message);
                 self.refresh_tor_row();
