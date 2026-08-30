@@ -572,30 +572,27 @@ impl WalletPage {
     }
 
     fn peers(&self) -> String {
-        // One source of truth. The node's NeedConnections warning stops firing
-        // once the requirement is met, so a count taken from it freezes at the
-        // last value below the target and disagrees with the list below.
-        if let Some(chain) = &self.chain {
-            // Connections against the target, which is what the node is
-            // working toward. The distinct-address count belongs to the list.
-            return format!(
-                "{} of {} connected",
-                chain.connections,
-                crate::wallet::node::REQUIRED_PEERS
-            );
-        }
-        let Some((connections, required)) = self.peers else {
-            return "Connecting…".into();
+        // One reading, both numbers. The chain snapshot is preferred because
+        // the node's NeedConnections warning stops firing once the target is
+        // met, so a count taken from it freezes at the last value below the
+        // target; before the first snapshot arrives, that warning is all there
+        // is.
+        let (connections, peers) = match &self.chain {
+            Some(chain) => (chain.connections, chain.peers.len()),
+            None => match self.peers {
+                Some((connections, _)) => (connections, self.distinct_peers),
+                None => return "Connecting…".into(),
+            },
         };
+        let required = crate::wallet::node::REQUIRED_PEERS as usize;
 
-        // Two true numbers that are not the same question. Showing only the
-        // connection count over a list of distinct addresses reads as an
-        // error in one of them.
-        match self.distinct_peers {
+        // Connections and machines are two true numbers answering different
+        // questions, and kyoto holds more than one connection to some peers.
+        // Printing only the first over a list of the second reads as an error
+        // in one of them.
+        match peers {
             0 => format!("{connections} of {required} connections"),
-            peers if peers == connections => {
-                format!("{peers} peers, {required} wanted")
-            }
+            peers if peers == connections => format!("{peers} of {required} peers connected"),
             peers => format!("{peers} peers over {connections} connections"),
         }
     }
