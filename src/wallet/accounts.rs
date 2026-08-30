@@ -151,15 +151,22 @@ pub enum CredentialKind {
     ExtendedKey,
     /// An output descriptor or extended public key — watch-only, no keys.
     Descriptor,
+    /// A device on the end of a USB cable. Watch-only here too: what comes
+    /// across is a public key, and signing stays on the device.
+    Hardware,
 }
 
 impl CredentialKind {
     pub fn label(self) -> &'static str {
         match self {
+            // Short, because a ComboRow shows the chosen one in the space
+            // left over on the right and truncates whatever will not fit. The
+            // detail belongs in the group description underneath.
             CredentialKind::Mnemonic => "Recovery phrase",
-            CredentialKind::Wif => "Private key (WIF)",
-            CredentialKind::ExtendedKey => "Extended private key (xprv)",
-            CredentialKind::Descriptor => "Descriptor or xpub (watch-only)",
+            CredentialKind::Wif => "Private key",
+            CredentialKind::ExtendedKey => "Extended key",
+            CredentialKind::Descriptor => "Descriptor or xpub",
+            CredentialKind::Hardware => "Hardware wallet",
         }
     }
 
@@ -168,7 +175,7 @@ impl CredentialKind {
     /// Worth surfacing: a descriptor import cannot lose money to a bug in this
     /// software, and the other two can.
     pub fn carries_keys(self) -> bool {
-        !matches!(self, CredentialKind::Descriptor)
+        !matches!(self, CredentialKind::Descriptor | CredentialKind::Hardware)
     }
 
     /// Whether this credential derives many addresses or holds exactly one.

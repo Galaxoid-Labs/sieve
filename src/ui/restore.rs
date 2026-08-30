@@ -13,11 +13,22 @@ use zeroize::Zeroizing;
 use crate::wallet::accounts::{CredentialKind, ScriptType};
 use crate::wallet::{self, Paths, Summary};
 
-const KINDS: [CredentialKind; 4] = [
+/// Hardware first: it is the one people arrive here holding, and the one
+/// that needs the most help.
+const KINDS: [CredentialKind; 5] = [
+    CredentialKind::Hardware,
     CredentialKind::Mnemonic,
     CredentialKind::ExtendedKey,
     CredentialKind::Wif,
     CredentialKind::Descriptor,
+];
+
+/// The address kinds a device can be asked for, in the order worth offering.
+const ADDRESS_KINDS: [ScriptType; 4] = [
+    ScriptType::NativeSegwit,
+    ScriptType::Taproot,
+    ScriptType::NestedSegwit,
+    ScriptType::Legacy,
 ];
 
 /// Secret with a redacted `Debug`, so relm4's message tracing cannot print a
@@ -46,6 +57,10 @@ pub struct Submission {
 #[derive(Debug)]
 pub enum RestoreMsg {
     KindChanged(u32),
+    /// Look for devices on the USB ports.
+    LookForDevices,
+    DeviceChosen(u32),
+    AddressKindChosen(u32),
     BirthdayChanged(u32),
     NetworkChanged(u32),
     Submit(Box<Submission>),
@@ -60,7 +75,22 @@ pub enum RestoreOutput {
 
 #[derive(Debug)]
 pub enum RestoreCmd {
+    /// What a look for devices turned up.
+    Devices(Vec<crate::hardware::Found>),
+    /// A device answered with the descriptor of one of its accounts.
+    FromDevice(Result<String, String>),
     Finished(Result<(Paths, Summary), String>),
+}
+
+/// What the import needs once a device has answered.
+///
+/// Held between asking the device and the import itself, because the two are
+/// separate round trips and the form may have moved on in between.
+#[derive(Debug, Clone)]
+struct PendingImport {
+    network: bdk_wallet::bitcoin::Network,
+    birthday: crate::wallet::Checkpoint,
+    name: Option<String>,
 }
 
 pub struct Restore {
@@ -69,6 +99,18 @@ pub struct Restore {
     birthday_index: u32,
     busy: bool,
     error: Option<String>,
+    /// Devices found by the last look, and which one is chosen.
+    devices: Vec<crate::hardware::Found>,
+    device_index: u32,
+    /// Which addresses to ask a device for. A device holds every kind at
+    /// once; the wallet is one of them.
+    address_index: u32,
+    /// Whether a look for devices has happened at all, so "none found" and
+    /// "not looked yet" can say different things.
+    looked: bool,
+    scanning: bool,
+    /// Set while a device is being asked.
+    pending: Option<PendingImport>,
 }
 
 /// Networks offered, signet first so the safe option is the default.
@@ -77,6 +119,30 @@ fn networks() -> [bdk_wallet::bitcoin::Network; 2] {
 }
 
 impl Restore {
+    fn address_kind(&self) -> ScriptType {
+        ADDRESS_KINDS
+            .get(self.address_index as usize)
+            .copied()
+            .unwrap_or(ScriptType::NativeSegwit)
+    }
+
+    fn chosen_device(&self) -> Option<&crate::hardware::Found> {
+        self.devices.get(self.device_index as usize)
+    }
+
+    /// What the device group says under its title.
+    fn device_status(&self) -> String {
+        if self.scanning {
+            return "Looking…".into();
+        }
+        match (self.looked, self.devices.len()) {
+            (false, _) => "Plug the device in, unlock it, and press Look for devices.".into(),
+            (true, 0) => format!("Nothing found. {}", crate::hardware::udev_hint()),
+            (true, 1) => "Found one device.".into(),
+            (true, n) => format!("Found {n} devices."),
+        }
+    }
+
     fn is_mainnet(&self) -> bool {
         self.network == bdk_wallet::bitcoin::Network::Bitcoin
     }
@@ -87,6 +153,7 @@ impl Restore {
             CredentialKind::ExtendedKey => "Extended private key",
             CredentialKind::Wif => "Private key",
             CredentialKind::Descriptor => "Descriptor or xpub",
+            CredentialKind::Hardware => "Hardware wallet",
         }
     }
 
@@ -95,15 +162,20 @@ impl Restore {
             CredentialKind::Mnemonic => "The 12 or 24 words, separated by spaces",
             CredentialKind::ExtendedKey => "An xprv, tprv or vprv. No recovery phrase needed",
             CredentialKind::Wif => "A single private key in Wallet Import Format",
-            CredentialKind::Descriptor => "Watch-only, for a hardware wallet or another \
-                                            wallet's public keys. No password: Sieve holds \
-                                            no secret for it and cannot sign",
+            CredentialKind::Descriptor => "Paste an exported descriptor or extended \
+                                            public key. Watch-only: no password, and Sieve \
+                                            cannot sign",
+            CredentialKind::Hardware => "Plug the device in and unlock it. On a Ledger, open \
+                                         the Bitcoin app. Nothing secret crosses the cable: \
+                                         Sieve takes a public key and the device keeps the \
+                                         rest",
         }
     }
 
     /// What the import will actually watch.
     fn paths_summary(&self) -> String {
         match self.kind {
+            CredentialKind::Hardware => self.address_kind().label().to_string(),
             CredentialKind::Descriptor => "As described by the descriptor".into(),
             _ => ScriptType::ALL
                 .iter()
@@ -190,7 +262,62 @@ impl Component for Restore {
                     },
                 },
 
+                // Everything a device needs, and nothing a device does not.
                 adw::PreferencesGroup {
+                    #[watch]
+                    set_visible: model.kind == CredentialKind::Hardware,
+                    set_title: "Your device",
+                    #[watch]
+                    set_description: Some(&model.device_status()),
+
+                    #[name(device_row)]
+                    adw::ComboRow {
+                        set_title: "Device",
+                        #[watch]
+                        set_visible: !model.devices.is_empty(),
+                        #[watch]
+                        #[block_signal(device_chosen)]
+                        set_model: Some(&gtk::StringList::new(
+                            &model.devices.iter().map(|d| d.label.as_str()).collect::<Vec<_>>()
+                        )),
+                        connect_selected_notify[sender] => move |row| {
+                            sender.input(RestoreMsg::DeviceChosen(row.selected()));
+                        } @device_chosen,
+                    },
+
+                    adw::ComboRow {
+                        set_title: "Addresses",
+                        set_subtitle: "Which kind to watch. Native SegWit unless the device \
+                                       was set up as something else",
+                        set_model: Some(&gtk::StringList::new(
+                            &ADDRESS_KINDS.map(|s| s.label())
+                        )),
+                        connect_selected_notify[sender] => move |row| {
+                            sender.input(RestoreMsg::AddressKindChosen(row.selected()));
+                        },
+                    },
+
+                    adw::ActionRow {
+                        set_title: "Look for devices",
+                        set_subtitle: "Sieve reads a public key. The device keeps everything \
+                                       else, and signs for itself",
+                        set_subtitle_lines: 2,
+                        set_activatable: true,
+                        add_suffix = &gtk::Button {
+                            #[watch]
+                            set_label: if model.scanning { "Looking…" } else { "Look" },
+                            #[watch]
+                            set_sensitive: !model.scanning,
+                            set_valign: gtk::Align::Center,
+                            connect_clicked => RestoreMsg::LookForDevices,
+                        },
+                        connect_activated => RestoreMsg::LookForDevices,
+                    },
+                },
+
+                adw::PreferencesGroup {
+                    #[watch]
+                    set_visible: model.kind != CredentialKind::Hardware,
                     #[watch]
                     set_title: model.credential_title(),
                     #[watch]
@@ -358,11 +485,18 @@ impl Component for Restore {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let model = Restore {
-            kind: CredentialKind::Mnemonic,
+            // Hardware is first in the list, so it is what the form opens on.
+            kind: KINDS[0],
             network: bdk_wallet::bitcoin::Network::Signet,
             birthday_index: 1,
             busy: false,
             error: None,
+            devices: Vec::new(),
+            device_index: 0,
+            address_index: 0,
+            looked: false,
+            scanning: false,
+            pending: None,
         };
         let widgets = view_output!();
         ComponentParts { model, widgets }
@@ -370,6 +504,19 @@ impl Component for Restore {
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
+            RestoreMsg::LookForDevices => {
+                if self.scanning {
+                    return;
+                }
+                self.scanning = true;
+                self.error = None;
+                sender.oneshot_command(async move {
+                    RestoreCmd::Devices(crate::hardware::enumerate().await)
+                });
+            }
+            RestoreMsg::DeviceChosen(index) => self.device_index = index,
+            RestoreMsg::AddressKindChosen(index) => self.address_index = index,
+
             RestoreMsg::KindChanged(index) => {
                 if let Some(kind) = KINDS.get(index as usize) {
                     self.kind = *kind;
@@ -398,7 +545,18 @@ impl Component for Restore {
                         Some("Confirm you understand the risk before importing to Bitcoin.".into());
                     return;
                 }
-                if submission.credential.0.trim().is_empty() {
+                if submission.kind == CredentialKind::Hardware && self.chosen_device().is_none()
+                {
+                    self.error = Some(if self.looked {
+                        format!("No device found. {}", crate::hardware::udev_hint())
+                    } else {
+                        "Press Look for devices first.".into()
+                    });
+                    return;
+                }
+                if submission.kind != CredentialKind::Hardware
+                    && submission.credential.0.trim().is_empty()
+                {
                     // Judge the submission, not the model: they can disagree if
                     // a row changed after the last view update.
                     self.error = Some(match submission.kind {
@@ -406,6 +564,7 @@ impl Component for Restore {
                         CredentialKind::Wif => "Enter the private key.".into(),
                         CredentialKind::ExtendedKey => "Enter the extended key.".into(),
                         CredentialKind::Descriptor => "Enter the descriptor.".into(),
+                        CredentialKind::Hardware => unreachable!("handled above"),
                     });
                     return;
                 }
@@ -424,6 +583,30 @@ impl Component for Restore {
 
                 self.busy = true;
                 self.error = None;
+
+                // A device has to be asked before there is anything to import,
+                // and that means waiting on somebody to press a button on it.
+                if submission.kind == CredentialKind::Hardware {
+                    let Some(device) = self.chosen_device() else { return };
+                    let kind = device.kind;
+                    let script_type = self.address_kind();
+                    self.pending = Some(PendingImport {
+                        network,
+                        birthday,
+                        name: {
+                            let trimmed = submission.name.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                        },
+                    });
+                    sender.oneshot_command(async move {
+                        RestoreCmd::FromDevice(
+                            crate::hardware::account_descriptor(kind, script_type, network)
+                                .await
+                                .map_err(|e| e.to_string()),
+                        )
+                    });
+                    return;
+                }
 
                 // A new wallet directory, so importing never disturbs an
                 // existing wallet.
@@ -486,6 +669,9 @@ impl Component for Restore {
                             birthday,
                             name.clone(),
                         ),
+                        CredentialKind::Hardware => {
+                            unreachable!("a device is asked before this point")
+                        }
                     };
                     RestoreCmd::Finished(
                         result
@@ -503,7 +689,49 @@ impl Component for Restore {
         sender: ComponentSender<Self>,
         _root: &Self::Root,
     ) {
-        let RestoreCmd::Finished(result) = msg;
+        let result = match msg {
+            RestoreCmd::Devices(devices) => {
+                self.scanning = false;
+                self.looked = true;
+                self.device_index = 0;
+                self.devices = devices;
+                return;
+            }
+
+            RestoreCmd::FromDevice(Ok(descriptor)) => {
+                // The device answered; now it is an ordinary descriptor
+                // import, which is the whole point of the seam.
+                let Some(pending) = self.pending.take() else {
+                    self.busy = false;
+                    return;
+                };
+                let paths = Paths::for_wallet(&Paths::new_id());
+                let created = paths.clone();
+                sender.spawn_oneshot_command(move || {
+                    RestoreCmd::Finished(
+                        wallet::import_descriptor(
+                            &descriptor,
+                            &paths,
+                            pending.network,
+                            pending.birthday,
+                            pending.name,
+                        )
+                        .map(|summary| (created, summary))
+                        .map_err(|e| e.to_string()),
+                    )
+                });
+                return;
+            }
+
+            RestoreCmd::FromDevice(Err(message)) => {
+                self.busy = false;
+                self.pending = None;
+                self.error = Some(crate::ui::send::capitalise(&message));
+                return;
+            }
+
+            RestoreCmd::Finished(result) => result,
+        };
         self.busy = false;
         match result {
             Ok((paths, summary)) => {

@@ -94,11 +94,22 @@ segwit and so on. A bare key with no origin is **refused**, not guessed: the pat
 which addresses to look for, and a wrong guess produces a wallet that finds nothing and looks
 broken rather than wrong.
 
-The plan beyond this, following the same shape as ecash-splitter's `ecx-signer`: PSBT is the
-seam — BDK never talks to a device, its output is a PSBT and the device's input is a PSBT.
-Next is export/import of that PSBT over files, which covers every air-gapped device with no
-drivers at all; then `async-hwi` (pure Rust: Ledger, BitBox02, Coldcard, Jade, Specter) for USB;
-then animated QR. Whatever a device hands back is untrusted and re-verified before broadcast.
+`src/hardware.rs` owns the USB side, on `async-hwi` (pure Rust — no Python, no HWI install, no
+daemon). Importing asks a device for its master fingerprint and the extended public key at
+`m/purpose'/coin'/0'`, and assembles the same descriptor a person could have pasted: importing a
+hardware wallet and importing a descriptor land in the same place on purpose. A test asserts
+that what `hardware::descriptor` produces is what `watch::parse` reads, for all four script
+types — the two halves of that seam would otherwise only meet with a device on the desk.
+
+Each backend is enumerated separately and a failure in one is logged rather than returned: a
+machine with no serial ports must not report "no devices" because the Specter probe failed while
+a Ledger sits right there. On Linux a device is invisible without udev rules, which is the
+commonest reason for an empty list, so the interface says so instead of leaving a blank.
+
+Still to come, following ecash-splitter's `ecx-signer`: signing. PSBT is the seam — BDK never
+talks to a device, its output is a PSBT and the device's input is a PSBT. Export and import over
+files covers every air-gapped device with no drivers at all; `async-hwi`'s `sign_tx` covers USB.
+Whatever a device hands back is untrusted and re-verified before broadcast.
 
 ## Import model
 

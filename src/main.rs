@@ -3,6 +3,7 @@
 mod app;
 mod peers;
 mod fees;
+mod hardware;
 mod tor;
 mod price;
 mod settings;

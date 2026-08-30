@@ -47,6 +47,7 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-hwi = { version = "0.0.32", default-features = false, features = ["ledger", "coldcard", "specter"] }
 
 # Two unrelated hot paths make an unoptimised dependency tree unusable here:
 # Argon2 takes ~36s per unlock at opt-level 0, and matching BIP158 filters is
