@@ -57,6 +57,11 @@ pub struct App {
     tor_status: Option<String>,
     /// Whether that status is a failure, so it can be coloured like one.
     tor_failed: bool,
+    /// The status row and the switch, kept so bootstrap progress can be
+    /// written into them directly. Rebuilding the whole preferences page for
+    /// each percentage threw the reader back to the top of it.
+    tor_row: Option<adw::ActionRow>,
+    tor_switch: Option<(adw::SwitchRow, gtk::glib::SignalHandlerId)>,
     /// The proxy currently in use — the one Sieve found running, or the one it
     /// started. Nothing connects through Tor until this is set.
     tor_active: Option<crate::tor::Proxy>,
@@ -377,6 +382,8 @@ impl Component for App {
             chain_tip: None,
             tor_status: None,
             tor_failed: false,
+            tor_row: None,
+            tor_switch: None,
             tor_active: None,
             session: None,
             chooser,
@@ -800,6 +807,7 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetChain(Some(info)));
             }
             AppCmd::Tick => {
+                self.check_tor(&sender);
                 sender.input(AppMsg::RefreshChain);
                 self.schedule_tick(&sender);
             }
@@ -839,15 +847,19 @@ impl Component for App {
             AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
             AppCmd::TorProgress(message) => {
                 self.tor_status = Some(message);
-                self.rebuild_preferences(&sender);
+                self.refresh_tor_row();
             }
 
             AppCmd::TorReady(Ok(proxy)) => {
                 tracing::info!(%proxy, "Tor is ready");
                 self.tor_failed = false;
                 self.tor_active = Some(proxy);
-                self.tor_status = Some(format!("Connected through Tor at {proxy}"));
-                self.rebuild_preferences(&sender);
+                self.tor_status = Some(if crate::tor::daemon::is_ours() {
+                    format!("Connected through Tor at {proxy}, started by Sieve")
+                } else {
+                    format!("Connected through Tor at {proxy}")
+                });
+                self.refresh_tor_row();
                 self.restart_session(&sender);
             }
 
@@ -865,7 +877,7 @@ impl Component for App {
                 // so this lands over the switch that just moved.
                 self.prefs.add_toast(adw::Toast::new(&message));
                 self.tor_status = Some(message);
-                self.rebuild_preferences(&sender);
+                self.refresh_tor_row();
             }
 
             AppCmd::Estimated(Ok((rate, source))) => {
@@ -1025,6 +1037,84 @@ impl App {
         }
     }
 
+    /// Notice if the Tor we started has gone away.
+    ///
+    /// Without this the node keeps trying to reach peers through a proxy that
+    /// is not there — which it does as fast as the failures come back, at the
+    /// cost of a whole CPU. Learned the hard way.
+    fn check_tor(&mut self, sender: &ComponentSender<Self>) {
+        if !self.settings.tor || self.tor_active.is_none() {
+            return;
+        }
+        // A daemon we merely borrowed is not ours to poll or to restart.
+        if !crate::tor::daemon::is_ours() || crate::tor::daemon::ours_is_alive() {
+            return;
+        }
+
+        tracing::warn!("the Tor we started has exited; stopping the light client");
+        self.tor_active = None;
+        if let Some(session) = self.session.take() {
+            session.shutdown();
+            self.wallet.emit(WalletPageMsg::Reset);
+        }
+        self.tor_status = Some("Tor stopped. Starting it again…".into());
+        self.refresh_tor_row();
+        self.ensure_tor(sender);
+    }
+
+    /// Write the current Tor state into the rows that show it.
+    ///
+    /// In place, rather than rebuilding the preferences page: the page is
+    /// inside a scrolled window, and replacing it while someone is reading
+    /// the Connection group sends them back to the top of Display.
+    fn refresh_tor_row(&self) {
+        if let Some(row) = &self.tor_row {
+            row.set_subtitle(&self.tor_subtitle());
+            if self.tor_failed {
+                row.add_css_class("error");
+            } else {
+                row.remove_css_class("error");
+            }
+        }
+
+        // The switch may have moved by itself — a failure turns it back — and
+        // setting it must not look like someone flipping it.
+        if let Some((switch, handler)) = &self.tor_switch
+            && switch.is_active() != self.settings.tor
+        {
+            switch.block_signal(handler);
+            switch.set_active(self.settings.tor);
+            switch.unblock_signal(handler);
+        }
+
+        self.wallet.emit(WalletPageMsg::SetTor(self.tor_label()));
+    }
+
+    /// What the Connection row says underneath.
+    fn tor_subtitle(&self) -> String {
+        match self.tor_status.as_deref() {
+            Some(status) => status.to_string(),
+            // Only the filesystem is consulted here — the main thread must not
+            // go opening sockets to find out.
+            None if crate::tor::daemon::find_binary().is_some() => {
+                "Tor is on this machine. Sieve will start it when you switch this on.".into()
+            }
+            None => "No Tor found on this machine. Install it — on Arch, `sudo pacman -S tor` \
+                     — or use a packaged build of Sieve, which carries its own."
+                .into(),
+        }
+    }
+
+    /// How the network view describes the connection.
+    fn tor_label(&self) -> Option<String> {
+        let proxy = self.tor_proxy()?;
+        Some(if crate::tor::daemon::is_ours() {
+            format!("Through Tor, started by Sieve · {proxy}")
+        } else {
+            format!("Through Tor · {proxy}")
+        })
+    }
+
     /// Bring Tor up: use what is listening, or start one.
     ///
     /// Slow — a first bootstrap can take half a minute — so it reports as it
@@ -1032,7 +1122,7 @@ impl App {
     fn ensure_tor(&mut self, sender: &ComponentSender<Self>) {
         self.tor_failed = false;
         self.tor_status = Some("Starting Tor…".into());
-        self.rebuild_preferences(sender);
+        self.refresh_tor_row();
 
         let configured = self.configured_proxy();
         sender.command(move |out, shutdown| {
@@ -1243,12 +1333,13 @@ impl App {
              clear.",
         );
         tor.set_active(self.settings.tor);
-        {
+        let toggled = {
             let sender = sender.clone();
             tor.connect_active_notify(move |row| {
                 sender.input(AppMsg::SetTor(row.is_active()));
-            });
-        }
+            })
+        };
+        self.tor_switch = Some((tor.clone(), toggled));
         connection.add(&tor);
 
         // Always shown, because the useful case is the one where Tor is off:
@@ -1257,23 +1348,12 @@ impl App {
         {
             let status = adw::ActionRow::new();
             status.set_title("Proxy");
-            status.set_subtitle(match self.tor_status.as_deref() {
-                Some(status) => status,
-                // Only the filesystem is consulted here — the main thread must
-                // not go opening sockets to find out.
-                None if crate::tor::daemon::find_binary().is_some() => {
-                    "Tor is on this machine. Sieve will start it when you switch this on."
-                }
-                None => {
-                    "No Tor found on this machine. Install it — on Arch, \
-                     `sudo pacman -S tor` — or use a packaged build of Sieve, which \
-                     carries its own."
-                }
-            });
+            status.set_subtitle(&self.tor_subtitle());
             status.set_subtitle_lines(4);
             if self.tor_failed {
                 status.add_css_class("error");
             }
+            self.tor_row = Some(status.clone());
 
             let check = gtk::Button::with_label("Check");
             check.set_valign(gtk::Align::Center);

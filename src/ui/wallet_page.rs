@@ -298,6 +298,8 @@ pub struct WalletPage {
     stack: Option<adw::ViewStack>,
     /// The send form, which owns its own form/review/sent states.
     send: Controller<SendForm>,
+    /// How connections are being made, when they go through Tor.
+    tor: Option<String>,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -322,6 +324,8 @@ pub enum WalletPageMsg {
     Toast(String),
     SetChain(Option<crate::wallet::node::ChainInfo>),
     RefreshChain,
+    /// How connections are being made: `Some` when they go through Tor.
+    SetTor(Option<String>),
     /// From the send form, on its way to the app.
     PlanSend(Box<Draft>),
     SendNow { plan: Box<Plan>, password: Password },
@@ -492,6 +496,18 @@ impl WalletPage {
                 format!("{blocks} · estimated {change:+.1}%")
             }
             None => blocks,
+        }
+    }
+
+    /// What the Connection row says.
+    ///
+    /// Named plainly in both directions. "Direct" is the default and not a
+    /// fault, but a peer on the other end of a direct connection learns this
+    /// machine's address, and the row should not let that pass unsaid.
+    fn connection_route(&self) -> String {
+        match &self.tor {
+            Some(route) => route.clone(),
+            None => "Direct — the peers you connect to see your IP address".into(),
         }
     }
 
@@ -993,6 +1009,38 @@ impl Component for WalletPage {
                 add_titled_with_icon[Some("network"), "Network", "network-wireless-symbolic"] =
                 &adw::PreferencesPage {
 
+                    // First on the page, because it qualifies everything under
+                    // it: the same sync means something different depending on
+                    // whether the peers below can see where it came from.
+                    adw::PreferencesGroup {
+                        set_title: "Connection",
+
+                        adw::ActionRow {
+                            set_title: "Route",
+                            #[watch]
+                            set_subtitle: &model.connection_route(),
+                            set_subtitle_lines: 2,
+
+                            add_prefix = &gtk::Image {
+                                #[watch]
+                                set_icon_name: Some(if model.tor.is_some() {
+                                    "channel-secure-symbolic"
+                                } else {
+                                    "network-wireless-symbolic"
+                                }),
+                                // Accent when covered, plain when not: this is
+                                // a statement of fact, not a warning — going
+                                // direct is the default and not a fault.
+                                #[watch]
+                                set_css_classes: if model.tor.is_some() {
+                                    &["accent"]
+                                } else {
+                                    &["dim-label"]
+                                },
+                            },
+                        },
+                    },
+
                     adw::PreferencesGroup {
                         set_title: "Sync",
                         set_description: Some(
@@ -1205,6 +1253,7 @@ impl Component for WalletPage {
             settings: Settings::load(),
             stack: None,
             send,
+            tor: None,
             locked: true,
             price: None,
             toaster: Toaster::default(),
@@ -1307,6 +1356,8 @@ impl Component for WalletPage {
                     .emit(SendMsg::SetMinFee(chain.as_ref().and_then(|c| c.min_relay_fee)));
                 self.chain = chain;
             }
+            WalletPageMsg::SetTor(tor) => self.tor = tor,
+
             WalletPageMsg::SetPrice(price) => {
                 self.send.emit(SendMsg::SetPrice(price));
                 self.price = price;

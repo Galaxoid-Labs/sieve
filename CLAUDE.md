@@ -122,6 +122,13 @@ through the proxy and hands the results to the builder as configured peers. The 
 asks a seeder for nodes that serve compact filters. If nothing resolves and there are no
 remembered peers, `Session::start` fails rather than letting kyoto fall back to the resolver.
 
+**Two things that bit, and must not come back.** The watchdog that rescues a Tor which never
+finishes starting has to be told when to stand down — an earlier version simply slept and then
+killed, so every Tor Sieve started was shot exactly two minutes later. And when the proxy goes
+away, kyoto retries as fast as the failures return, which costs a whole CPU; `App::check_tor`
+runs on the periodic tick, stops the light client, and brings Tor back rather than letting it
+spin.
+
 **What Tor does not cover:** the mempool.space link opens the system browser, which is outside
 this process. And proxied connections lose BIP324 v2 encrypted transport, because kyoto
 disables it for them.

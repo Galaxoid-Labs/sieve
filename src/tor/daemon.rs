@@ -18,7 +18,8 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -159,15 +160,34 @@ pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
 
     // A watchdog, so a Tor that says nothing at all cannot hang the caller:
     // killing it closes the pipe and ends the read below.
+    //
+    // It has to be told when to stand down. An earlier version simply slept
+    // and then killed, which meant every Tor Sieve started was shot exactly
+    // two minutes later — after which kyoto hammered a dead SOCKS proxy at
+    // full tilt. The flag is the whole fix.
     let watched = child.id();
-    std::thread::spawn(move || {
-        std::thread::sleep(BOOTSTRAP_TIMEOUT);
-        #[cfg(unix)]
-        unsafe {
-            // Only ever our own child, and harmless if it has already gone.
-            libc::kill(watched as i32, libc::SIGTERM);
-        }
-    });
+    let ready = Arc::new(AtomicBool::new(false));
+    {
+        let ready = Arc::clone(&ready);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + BOOTSTRAP_TIMEOUT;
+            while Instant::now() < deadline {
+                if ready.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if ready.load(Ordering::SeqCst) {
+                return;
+            }
+            tracing::warn!("Tor did not finish starting in time; stopping it");
+            #[cfg(unix)]
+            unsafe {
+                // Only ever our own child, and harmless if it has already gone.
+                libc::kill(watched as i32, libc::SIGTERM);
+            }
+        });
+    }
 
     *CHILD.lock().unwrap() = Some(child);
 
@@ -197,6 +217,9 @@ pub fn ensure(mut progress: impl FnMut(String)) -> Result<Proxy> {
                     stop();
                     bail!("Tor finished starting without opening a SOCKS port");
                 };
+                // Before returning, so the watchdog stands down rather than
+                // killing a Tor that did exactly what was asked of it.
+                ready.store(true, Ordering::SeqCst);
                 tracing::info!(seconds = started.elapsed().as_secs(), "Tor is ready");
                 return Ok(Proxy::local(port));
             }
@@ -224,6 +247,29 @@ fn running() -> Option<Proxy> {
             None
         }
     }
+}
+
+/// Is the Tor we started still running?
+///
+/// `false` when it has exited, and when we never started one — a borrowed
+/// system daemon is not ours to have opinions about.
+pub fn ours_is_alive() -> bool {
+    let mut guard = CHILD.lock().unwrap();
+    match guard.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(None) => true,
+            _ => {
+                *guard = None;
+                false
+            }
+        },
+        None => false,
+    }
+}
+
+/// Whether Sieve started the Tor currently in use.
+pub fn is_ours() -> bool {
+    CHILD.lock().unwrap().is_some()
 }
 
 /// Stop the Tor we started. Does nothing to one we merely borrowed.
@@ -261,6 +307,10 @@ fn parse_bootstrap(line: &str) -> Option<u8> {
 mod tests {
     use super::*;
 
+    /// Both starting tests drive one global child and one environment
+    /// variable, and the test runner is threaded. They take turns.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
     #[test]
     fn the_socks_port_is_read_from_tors_notice() {
         let line = "Aug 29 20:14:02.000 [notice] Opened Socks listener connection \
@@ -289,11 +339,52 @@ mod tests {
         assert_eq!(parse_bootstrap("[notice] Opened Socks listener"), None);
     }
 
+    /// The watchdog exists to rescue a Tor that never starts. It must not
+    /// touch one that did: an earlier version killed every Tor two minutes
+    /// after launch, and the wallet then spun at full CPU against a proxy
+    /// that was no longer there.
+    #[test]
+    fn a_tor_that_started_is_not_killed_by_the_watchdog() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("sieve-watchdog-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("tor");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n\
+             echo '[notice] Opened Socks listener connection (ready) on 127.0.0.1:19052'\n\
+             echo '[notice] Bootstrapped 100% (done): Done'\n\
+             sleep 60\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // SAFETY: single-threaded test.
+        unsafe { std::env::set_var("SIEVE_TOR", &fake) };
+        ensure(|_| {}).unwrap();
+
+        // Still there a moment later, and still there after the watchdog has
+        // had every chance to poll.
+        assert!(ours_is_alive(), "Tor was gone as soon as it started");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(ours_is_alive(), "the watchdog killed a Tor that had started");
+
+        stop();
+        assert!(!ours_is_alive(), "stop left it running");
+        unsafe { std::env::remove_var("SIEVE_TOR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A stand-in for `tor` that logs what Tor logs, so the starting sequence
     /// is exercised without a Tor daemon: the port is read, progress is
     /// reported, and the proxy comes back pointing at what it announced.
     #[test]
     fn a_binary_that_behaves_like_tor_is_driven_to_ready() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("sieve-tor-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("tor");
