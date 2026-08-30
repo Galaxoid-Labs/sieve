@@ -9,4 +9,7 @@
     <file preprocess="xml-stripblanks" alias="sieve-receive-symbolic.svg">icons/hicolor/scalable/actions/sieve-receive-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="sieve-send-symbolic.svg">icons/hicolor/scalable/actions/sieve-send-symbolic.svg</file>
   </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/scalable/apps">
+    <file preprocess="xml-stripblanks" alias="bitcoin-logo.svg">icons/hicolor/scalable/apps/bitcoin-logo.svg</file>
+  </gresource>
 </gresources>

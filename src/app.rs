@@ -106,6 +106,7 @@ pub struct App {
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 
 const ICONS: &[&str] = &[
+    "bitcoin-logo",
     "channel-secure-symbolic",
     "document-open-recent-symbolic",
     "document-save-symbolic",

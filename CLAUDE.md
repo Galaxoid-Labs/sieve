@@ -272,6 +272,17 @@ watched. Show a fresh address per payer; never present one address as "the" wall
 The derivation-path list is a balance breakdown and must not show addresses: it duplicated
 the receive row and read as address reuse.
 
+## The Bitcoin logo
+
+`data/icons/hicolor/scalable/apps/bitcoin-logo.svg` is the logo itself, public domain — created
+by Satoshi Nakamoto and distributed as such by Wikimedia Commons (File:Bitcoin.svg). Vendored
+rather than fetched, so the build has no network in it, and drawn as it is meant to be drawn:
+the tilt and the proportions are the mark, and a font's ₿ is only an approximation. It carries
+its own colour, so no tint is applied to it.
+
+The balance card's watermark is still the glyph, deliberately — that one is tinted by network,
+and tinting a logo that is already orange would say nothing.
+
 ## Layout
 
 ```

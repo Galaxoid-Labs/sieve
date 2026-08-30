@@ -256,10 +256,14 @@ impl Component for Onboarding {
                             set_spacing: 6,
                             set_margin_all: 24,
 
-                            gtk::Label {
-                                add_css_class: "welcome-mark",
-                                set_label: "₿",
+                            // The logo itself, not the currency glyph: the
+                            // tilt and the proportions are the mark, and a
+                            // font's ₿ is only an approximation of them.
+                            gtk::Image {
+                                set_icon_name: Some("bitcoin-logo"),
+                                set_pixel_size: 148,
                                 set_halign: gtk::Align::Center,
+                                add_css_class: "welcome-mark",
                             },
 
                             gtk::Label {
@@ -279,7 +283,6 @@ impl Component for Onboarding {
 
                             gtk::Label {
                                 add_css_class: "welcome-note",
-                                add_css_class: "dim-label",
                                 set_label: "The blockchain is checked here, on this machine. \
                                             No server is ever told which addresses are yours.",
                                 set_justify: gtk::Justification::Center,
