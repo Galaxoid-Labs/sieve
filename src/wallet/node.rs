@@ -78,6 +78,11 @@ const QUIET_BEFORE_WAITING: Duration = Duration::from_secs(20);
 /// arrive in gaps that would look like a stall at the direct-connection
 /// figure.
 const QUIET_OVER_TOR: Duration = Duration::from_secs(60);
+/// How far past the requested start to look for the first header the node
+/// actually has. The node's chain begins just after its anchor, so this only
+/// has to cover an off-by-one — but a small window costs nothing.
+const LEADING_GAP: u32 = 64;
+
 /// How many headers to gather before writing them out. Twenty thousand is
 /// about a megabyte and a few seconds of walking — small enough that an
 /// interrupt costs little, large enough not to rewrite the file constantly.
@@ -704,16 +709,26 @@ impl Session {
         let started = std::time::Instant::now();
         let mut chunk = Vec::with_capacity(CHUNK);
         let mut written = 0usize;
+        let mut started_at: Option<u32> = None;
 
         for height in from..=tip.height {
             match self.requester.get_header(height).await {
-                Ok(Some(header)) => chunk.push(header),
+                Ok(Some(header)) => {
+                    started_at.get_or_insert(height);
+                    chunk.push(header)
+                }
                 // A gap means the node does not have what we thought it had.
                 // Keep what came before it: a shorter chain ending at the gap
                 // still links, and the loader checks that it does. Said out
                 // loud, because a silent stop here is indistinguishable from
                 // the whole feature never running — which is exactly how this
                 // went unnoticed through several attempts.
+                // Nothing here yet. Before the first header that is: the
+                // node has no genesis header, so a walk that begins at the
+                // birthday of a whole-chain wallet asks for height zero, gets
+                // nothing, and gives up — which is precisely what it did, three
+                // attempts running. Skip forward until the chain starts.
+                Ok(None) if started_at.is_none() && height < from + LEADING_GAP => continue,
                 Ok(None) => {
                     tracing::warn!(
                         height,

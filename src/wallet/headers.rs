@@ -48,10 +48,16 @@ pub fn load(network: Network) -> Option<Vec<IndexedHeader>> {
     // attacker with a file on your disk does not have to beat — they can hand
     // you a valid chain from somewhere else entirely.
     let first = headers.first()?;
-    let anchor = super::checkpoints(network)
-        .iter()
-        .find(|c| c.height == first.height)?;
-    if first.header.block_hash().to_string() != anchor.hash {
+    // Anchored either way round: the first header may *be* a checkpoint, or it
+    // may be the block straight after one — which is the ordinary case, since
+    // a node's chain begins just past its anchor and has no header for the
+    // anchor itself.
+    let anchored = super::checkpoints(network).iter().any(|c| {
+        (c.height == first.height && first.header.block_hash().to_string() == c.hash)
+            || (c.height + 1 == first.height
+                && first.header.prev_blockhash.to_string() == c.hash)
+    });
+    if !anchored {
         tracing::warn!(
             %network,
             height = first.height,
