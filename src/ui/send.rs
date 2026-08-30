@@ -806,7 +806,7 @@ fn shorten(text: &str) -> String {
 }
 
 /// Errors read better as sentences when they start like one.
-fn capitalise(message: &str) -> String {
+pub(crate) fn capitalise(message: &str) -> String {
     let mut chars = message.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),

@@ -181,6 +181,17 @@ pub struct Settings {
     /// payment is about to be sent, and roughly when.
     #[serde(default)]
     pub mempool_fees: bool,
+    /// Route every connection — peers, price, fee rates — through a Tor
+    /// SOCKS5 proxy.
+    ///
+    /// Off by default because it needs a Tor daemon this app does not ship.
+    /// When it is on and the proxy cannot be reached, Sieve refuses to
+    /// connect rather than quietly going out over the clear.
+    #[serde(default)]
+    pub tor: bool,
+    /// Where that proxy is, when it is not in the usual place.
+    #[serde(default)]
+    pub tor_proxy: Option<String>,
     /// The wallet opened last, so a restart returns to it.
     ///
     /// Without this, startup opens whichever wallet sorts first by name, which

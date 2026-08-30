@@ -68,13 +68,14 @@ pub fn endpoint(network: &str) -> Option<String> {
 /// Fetch the current recommendation.
 ///
 /// Blocking: call it from a command, never on the main thread.
-pub fn fetch(network: &str) -> Result<Recommended> {
+pub fn fetch(network: &str, proxy: Option<crate::tor::Proxy>) -> Result<Recommended> {
     let url = endpoint(network)
         .ok_or_else(|| anyhow!("mempool.space does not serve {network}"))?;
 
     let body = ureq::get(&url)
         .config()
         .timeout_global(Some(TIMEOUT))
+        .proxy(crate::tor::ureq_proxy(proxy)?)
         .build()
         .call()
         .context("could not reach mempool.space")?

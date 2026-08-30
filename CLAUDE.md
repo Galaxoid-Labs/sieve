@@ -82,10 +82,45 @@ Two axes, kept separate:
 Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
 one `bdk_kyoto` node drives them all via `build_with_wallets`.
 
+## Tor
+
+Off by default, and when it is on it covers everything: peer connections, the price lookup and
+the fee lookup all go through the same SOCKS5 proxy. `App::tor_proxy` is the only reader of the
+setting, so no call site can forget it.
+
+**A system daemon, not a bundled one.** Sieve expects Tor already running on the machine —
+`127.0.0.1:9050`, or Tor Browser's `9150` — which is what Bitcoin Core and Sparrow do, and it
+keeps the piece that must be kept current out of a wallet's release cycle. Embedding
+[arti](https://tpo.pages.torproject.net/core/doc/rust/arti_client/) is the alternative and is
+now production-ready for client use; it is recorded in ROADMAP as a later option for people
+with no daemon, along with its cost — a very large dependency tree, its own bootstrap, and a
+client that will terminate the process if the consensus says it is too old to be safe.
+
+**Proving the proxy is Tor.** Anything can listen on 9050. `RESOLVE` (0xF0) is Tor's extension
+to SOCKS5, not RFC 1928, so a plain SOCKS proxy answers `0x07 command not supported` and only
+Tor answers with an address. `tor::check` resolves `example.com` — deliberately not a Bitcoin
+seed, since this runs whenever preferences opens and should say nothing about what the app is
+for. Turning the switch on runs the check first, and a failure puts the switch back rather than
+leaving the app looking as though it is on Tor when it is not.
+
+**The DNS leak that had to be closed.** kyoto resolves DNS seeds itself when it has no peers to
+try, and that lookup is *not* proxied — reading bip157 0.6.3, `is_proxy` gates only BIP324 v2
+transport, nothing else. Since kyoto ignores `data_dir`, its peer database is empty on every
+launch, so the leak would fire every start. So `tor::resolve_seeds` resolves the same hostnames
+through the proxy and hands the results to the builder as configured peers. The `x49.` prefix
+asks a seeder for nodes that serve compact filters. If nothing resolves and there are no
+remembered peers, `Session::start` fails rather than letting kyoto fall back to the resolver.
+
+**What Tor does not cover:** the mempool.space link opens the system browser, which is outside
+this process. And proxied connections lose BIP324 v2 encrypted transport, because kyoto
+disables it for them.
+
 ## The non-Bitcoin connections
 
 Two, both opt-in and both disclosed in the row that enables them: a price from Bitfinex, and
-fee rates from mempool.space. Neither carries wallet data; both reveal this machine's IP, and
+fee rates from mempool.space. Both are routed through Tor when Tor is on — a wallet that
+tunnels its peers and then asks a price service over the clear is worse than one that never
+claimed to. Neither carries wallet data; both reveal this machine's IP, and
 the fee request additionally signals that a payment is imminent.
 
 Fetching a price from Bitfinex is the older of the two. It carries no wallet data, but it discloses this machine's IP and when the

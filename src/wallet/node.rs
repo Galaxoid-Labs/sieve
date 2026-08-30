@@ -135,7 +135,7 @@ impl Session {
     ///
     /// Must be called from inside the tokio runtime — the node is spawned onto
     /// it. Relm4's async commands satisfy that.
-    pub async fn start(paths: &Paths) -> Result<Self> {
+    pub async fn start(paths: &Paths, tor: Option<crate::tor::Proxy>) -> Result<Self> {
         let meta = Meta::load(paths).context("this wallet has no metadata file")?;
         let network = meta.network();
         let dir = paths.db.parent().unwrap_or(&paths.db).to_path_buf();
@@ -194,8 +194,44 @@ impl Session {
         let remembered = crate::peers::remembered(network);
         tracing::info!(count = remembered.len(), %network, "seeding with remembered peers");
         let mut builder = Builder::new(network);
+        let peers = remembered.len();
         for ip in remembered {
             builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
+        }
+
+        if let Some(proxy) = tor {
+            builder = builder.socks5_proxy(proxy.addr());
+            tracing::info!(%proxy, "routing peer connections through Tor");
+
+            // kyoto falls back to a DNS lookup when it runs out of peers to
+            // try, and that lookup is not proxied — it would go out over the
+            // clear from this machine while everything else went through Tor.
+            // Resolving the same seeds here, through the proxy, keeps the node
+            // supplied so it never reaches for the resolver.
+            if peers < REQUIRED_PEERS as usize {
+                let wanted = REQUIRED_PEERS as usize - peers;
+                let network_name = network.to_string();
+                let seeded = tokio::task::spawn_blocking(move || {
+                    crate::tor::resolve_seeds(proxy, &network_name, wanted)
+                })
+                .await
+                .unwrap_or_default();
+
+                if seeded.is_empty() && peers == 0 {
+                    // Without peers the node would resolve them itself, over
+                    // the clear. Refusing is the honest outcome: Tor was
+                    // asked for, and it could not be delivered.
+                    anyhow::bail!(
+                        "could not find any peers through Tor. Check that the proxy at \
+                         {proxy} is running, or turn Tor off in preferences."
+                    );
+                }
+
+                tracing::info!(count = seeded.len(), "seeded peers resolved through Tor");
+                for ip in seeded {
+                    builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
+                }
+            }
         }
 
         let client: LightClient<_, Multiple> = builder

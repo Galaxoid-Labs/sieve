@@ -32,10 +32,11 @@ impl Price {
 /// Fetch the last traded price.
 ///
 /// Blocking: call it from a command, never on the main thread.
-pub fn fetch() -> Result<Price> {
+pub fn fetch(proxy: Option<crate::tor::Proxy>) -> Result<Price> {
     let body = ureq::get(TICKER)
         .config()
         .timeout_global(Some(TIMEOUT))
+        .proxy(crate::tor::ureq_proxy(proxy)?)
         .build()
         .call()
         .context("could not reach the price service")?

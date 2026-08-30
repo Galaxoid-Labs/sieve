@@ -25,7 +25,10 @@ secrecy = "0.10"
 
 # The one outbound connection that is not Bitcoin p2p, and only when the
 # person turns it on. Blocking and small, with rustls rather than OpenSSL.
-ureq = "3"
+# `socks-proxy` so the two HTTP calls can be routed through Tor along with
+# everything else. A wallet that tunnels its peers and then asks a price
+# service over the clear is worse than one that never claimed to.
+ureq = { version = "3", features = ["socks-proxy"] }
 
 # QR rendering. Pure Rust, no C dependency, and nothing leaves the machine.
 qrcode = { version = "0.14", default-features = false }

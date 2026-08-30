@@ -94,8 +94,17 @@ its own through ordinary filter sync — no explorer, no server told which trans
 pending and replaced states.
 
 ### M6 — Privacy controls
-Tor via `socks5_proxy`, manual peer pinning with `only_configured_peers`, coin control,
-BIP-329 labels, and an audit that nothing but Bitcoin p2p leaves the machine.
+- [x] Tor for every outbound connection — peers, price, fees — through a system SOCKS5 proxy,
+      with the proxy verified as actually being Tor (the `RESOLVE` extension), and kyoto's
+      unproxied DNS seeding replaced by seeds resolved through Tor.
+- [ ] Bundled Tor via `arti`, for machines with no daemon. Production-ready for client use as
+      of 2026 and it can reach onion services, but it is a very large dependency tree with its
+      own bootstrap, and an arti client will terminate the process when the consensus says it
+      is too old. A packaging decision as much as a code one — revisit at M8 with Flatpak.
+- [ ] Onion peers: `peers.rs` stores `IpAddr`, so a remembered peer cannot be an onion
+      address. kyoto dials them happily; only our own memory of them is missing.
+- [ ] Manual peer pinning with `whitelist_only`, coin control, BIP-329 labels, and an audit
+      that nothing but Bitcoin p2p leaves the machine.
 
 ### M7 — Lock and key hygiene
 Idle auto-lock, lock on suspend via logind `PrepareForSleep`, opt-in Secret Service storage
