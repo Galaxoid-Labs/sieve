@@ -83,7 +83,11 @@ BIP-21 URIs, issued-address list with used/unused state.
       sending. A light client has no mempool and there is no fee API to ask.
 - [ ] A BIP-39 passphrase at signing time, for wallets imported with one. Refused clearly for
       now rather than silently failing to finalize.
+- [x] Unconfirmed coins excluded from selection.
 - [ ] Coin control and RBF.
+
+Exercised end to end on signet: built, signed, broadcast, shown as pending, and confirmed on
+its own through ordinary filter sync — no explorer, no server told which transaction to watch.
 
 ### M5 — Transaction history
 `adw::ActionRow` list, detail page on an `adw::NavigationView`, confirmation depth, fee paid,
