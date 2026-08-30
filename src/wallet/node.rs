@@ -49,7 +49,15 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// attempt died at the two second mark and the node never got past "waiting
 /// for peers". Replies are slower for the same reason.
 const TOR_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-const TOR_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Three minutes for a reply, over Tor.
+///
+/// Thirty was not enough and the way it failed was instructive: peers
+/// connected, sat for exactly thirty seconds, were dropped as unresponsive,
+/// and the whole thing began again — so filter headers, which are small and
+/// quick, flew through, and filters, which are a thousand times larger, never
+/// finished a single batch. A peer that is slow is not a peer that is gone,
+/// and through three relays slow is the normal case.
+const TOR_RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
 /// If the node says nothing for this long, tell the user so rather than
 /// leaving a spinner turning against a frozen label.
 const QUIET_BEFORE_WAITING: Duration = Duration::from_secs(20);
