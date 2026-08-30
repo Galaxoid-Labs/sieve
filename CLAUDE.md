@@ -227,22 +227,27 @@ not headers.
 
 ## Remembered peers
 
-**Only peers that advertise `NODE_COMPACT_FILTERS`, and only after a sync has landed.** Nothing
-else goes in the file.
+**Peers connected while filters are syncing, and only those.** That is proof rather than
+hearsay: kyoto drops any peer whose version message lacks `NODE_COMPACT_FILTERS | NODE_NETWORK`
+as soon as it is past the block-header phase (`node.rs`, the version handshake), so a peer still
+connected during the filter phase serves filters by construction. The service flags `peer_info`
+reports are absent for most connections and prove nothing either way — pinning on those alone
+meant pinning nothing.
 
-There was a fallback — when no peer advertised the flag, which is often, remember whatever was
-connected on the grounds that they were "present through a working sync". It cost a day to
-find. Those addresses are handed to the node *first* on the next start, they take the connection
-slots, and a peer that cannot serve a filter is worse than no peer at all to a wallet whose
-entire sync is filters. A scan would sit with seven connections and nothing to download from.
+Not gated on a finished sync. A recovery scan can run for an hour, and the peers doing that work
+are the ones worth having next time; waiting for the end meant learning nothing from a scan that
+was interrupted.
 
-An empty file is the better outcome: the seeds are asked for filter-serving nodes specifically
-(`x49`, `x849`), so a cold start finds the right kind. Remembering is an optimisation, and an
-optimisation that sabotages the thing it optimises is not worth keeping.
+The rule this replaced remembered whatever was connected whenever no flag could be confirmed.
+It cost a day to find: those addresses are handed to the node *first* on the next start, they
+take the connection slots, and a peer that cannot serve a filter is worse than no peer at all to
+a wallet whose entire sync is filters. A scan would sit with seven connections and nothing to
+download from.
 
-The file carries a version and a `serves_filters` claim. Lists written by the old format are
-not deleted — they are simply no longer believed, because a list nobody can vouch for is not a
-head start. Seeded peers are offered to the builder before remembered ones for the same reason.
+The file carries a version and a `serves_filters` claim, so lists written by that old rule are
+no longer believed — not deleted, since that is not this code's decision, simply not read.
+Seeded peers (asked for with the `x49`/`x849` service bits) are offered to the builder before
+remembered ones.
 
 Onion addresses are remembered alongside plain ones and only offered when Tor is on; dialling
 one directly spends an attempt on something that cannot work. `tor::onion` encodes and decodes

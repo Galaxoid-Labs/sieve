@@ -944,39 +944,25 @@ impl Session {
             info.peers = distinct_peers(peers);
         }
 
-        // Only remember peers that positively advertise compact filters, and
-        // only once a sync has landed.
+        // Remember the peers connected while filters are syncing.
         //
-        // There used to be a fallback: when no peer advertised the flag —
-        // which is most of the time, since kyoto reports no service flags for
-        // many connections — remember whatever was connected, on the grounds
-        // that they were present through a working sync. That was wrong, and
-        // the way it was wrong took a day to find. Those peers are handed to
-        // the node first on the next start, they take the connection slots,
-        // and a peer that cannot serve a filter is worse than no peer at all
-        // to a wallet whose whole sync is filters. It is how a scan ends up
-        // stuck with seven connections and nothing to download from.
+        // Every one of them serves compact filters, by construction rather
+        // than by hearsay: kyoto drops any peer whose version message lacks
+        // NODE_COMPACT_FILTERS | NODE_NETWORK as soon as it is past the
+        // block-header phase. So "still connected while filters are coming in"
+        // is proof, where the service flags `peer_info` reports are absent for
+        // most connections and prove nothing either way.
         //
-        // An empty file is a better outcome: the seeds are asked for
-        // filter-serving nodes specifically, so a cold start finds the right
-        // kind. Remembering is an optimisation, and an optimisation that
-        // sabotages the thing it is optimising is not worth keeping.
-        if self.synced.load(Ordering::Relaxed) && !info.peers.is_empty() {
-            let confirmed: Vec<String> = info
-                .peers
-                .iter()
-                .filter(|p| p.serves_filters == Some(true))
-                .map(|p| p.address.clone())
-                .collect();
-
-            tracing::debug!(
-                confirmed = confirmed.len(),
-                connected = info.peers.len(),
-                "remembering peers that serve filters"
-            );
-            if !confirmed.is_empty() {
-                crate::peers::remember(self.network, &confirmed);
-            }
+        // Not gated on a finished sync. A recovery scan can run for an hour,
+        // and the peers doing that work are exactly the ones worth having next
+        // time — waiting for the end meant learning nothing from a scan that
+        // was interrupted, which is how a wallet ends up with no pinned peers
+        // at all.
+        if self.scanning.load(Ordering::Relaxed) && !info.peers.is_empty() {
+            let addresses: Vec<String> =
+                info.peers.iter().map(|p| p.address.clone()).collect();
+            tracing::debug!(count = addresses.len(), "remembering filter-serving peers");
+            crate::peers::remember(self.network, &addresses);
         }
 
         // Eleven headers. Cached against the tip they describe: over Tor
