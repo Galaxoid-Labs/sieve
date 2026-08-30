@@ -274,11 +274,6 @@ impl Session {
             .filter(|address| tor.is_some() || !crate::tor::onion::looks_like_onion(address))
             .collect();
         let peers = usable.len();
-        for address in usable {
-            if let Some(peer) = trusted_peer(&address) {
-                builder = builder.add_peer(peer);
-            }
-        }
 
         if let Some(proxy) = tor {
             builder = builder
@@ -320,8 +315,18 @@ impl Session {
                 remembered = peers,
                 "seeded peers resolved through Tor"
             );
+            // Before the remembered ones. kyoto hands out configured peers in
+            // order, and these were asked for by service bits — they are the
+            // ones that can actually serve a filter.
             for ip in seeded {
                 builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
+            }
+        }
+
+        // Remembered peers last, after any seeded ones.
+        for address in usable {
+            if let Some(peer) = trusted_peer(&address) {
+                builder = builder.add_peer(peer);
             }
         }
 
@@ -939,15 +944,23 @@ impl Session {
             info.peers = distinct_peers(peers);
         }
 
-        // Only remember peers once a sync has actually landed. Before that the
-        // connected set includes peers the node is still evaluating and will
-        // drop for not serving filters, and seeding with those next time buys
-        // nothing.
+        // Only remember peers that positively advertise compact filters, and
+        // only once a sync has landed.
         //
-        // Prefer peers that positively advertise compact filters, but do not
-        // require it: kyoto reports no service flags for most connections, so
-        // demanding the flag would remember almost nobody. What is left is
-        // still peers that were present through a working sync.
+        // There used to be a fallback: when no peer advertised the flag —
+        // which is most of the time, since kyoto reports no service flags for
+        // many connections — remember whatever was connected, on the grounds
+        // that they were present through a working sync. That was wrong, and
+        // the way it was wrong took a day to find. Those peers are handed to
+        // the node first on the next start, they take the connection slots,
+        // and a peer that cannot serve a filter is worse than no peer at all
+        // to a wallet whose whole sync is filters. It is how a scan ends up
+        // stuck with seven connections and nothing to download from.
+        //
+        // An empty file is a better outcome: the seeds are asked for
+        // filter-serving nodes specifically, so a cold start finds the right
+        // kind. Remembering is an optimisation, and an optimisation that
+        // sabotages the thing it is optimising is not worth keeping.
         if self.synced.load(Ordering::Relaxed) && !info.peers.is_empty() {
             let confirmed: Vec<String> = info
                 .peers
@@ -956,12 +969,14 @@ impl Session {
                 .map(|p| p.address.clone())
                 .collect();
 
-            let addresses = if confirmed.is_empty() {
-                info.peers.iter().map(|p| p.address.clone()).collect()
-            } else {
-                confirmed
-            };
-            crate::peers::remember(self.network, &addresses);
+            tracing::debug!(
+                confirmed = confirmed.len(),
+                connected = info.peers.len(),
+                "remembering peers that serve filters"
+            );
+            if !confirmed.is_empty() {
+                crate::peers::remember(self.network, &confirmed);
+            }
         }
 
         // Eleven headers. Cached against the tip they describe: over Tor

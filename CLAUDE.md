@@ -227,90 +227,26 @@ not headers.
 
 ## Remembered peers
 
-Recorded only once a sync has landed, because before that the connected set includes peers
-the node is still evaluating and will drop for not serving filters. Peers that positively
-advertise `COMPACT_FILTERS` are preferred, but not required: kyoto reports no service flags
-for most connections, so demanding the flag would remember almost nobody.
+**Only peers that advertise `NODE_COMPACT_FILTERS`, and only after a sync has landed.** Nothing
+else goes in the file.
 
-So the list is "peers present through a working sync", not "peers known to serve filters".
-Do not describe it as the latter — the flags to prove that are usually absent.
+There was a fallback — when no peer advertised the flag, which is often, remember whatever was
+connected on the grounds that they were "present through a working sync". It cost a day to
+find. Those addresses are handed to the node *first* on the next start, they take the connection
+slots, and a peer that cannot serve a filter is worse than no peer at all to a wallet whose
+entire sync is filters. A scan would sit with seven connections and nothing to download from.
 
-Remembered peers are addresses that worked *once*, so they are a head start and never the whole
-supply: nodes go away, and a list of eight dead ones leaves the node with nothing to dial. Fresh
-seeds are resolved on every start when Tor is on, alongside whatever is remembered.
+An empty file is the better outcome: the seeds are asked for filter-serving nodes specifically
+(`x49`, `x849`), so a cold start finds the right kind. Remembering is an optimisation, and an
+optimisation that sabotages the thing it optimises is not worth keeping.
 
-Onion addresses are remembered alongside plain ones: a run over Tor connects to onion peers,
-and those are exactly the ones reachable the next time Tor is on. `tor::onion` encodes and
-decodes them, checksum included, so a corrupted entry is dropped rather than dialled.
+The file carries a version and a `serves_filters` claim. Lists written by the old format are
+not deleted — they are simply no longer believed, because a list nobody can vouch for is not a
+head start. Seeded peers are offered to the builder before remembered ones for the same reason.
 
-**Results outlive the wallet that asked for them.** Every command driven by a `Session` carries
-the `App::generation` it was started under, and anything from an older one is dropped. Without
-it a chain view, a peer list or a *balance* belonging to the wallet you just left lands on the
-one you just opened. Tor makes it easy to hit — reading the chain is a dozen round trips
-through circuits — but the race exists on any connection, and `Reset` alone cannot close it
-because the stale result arrives after the reset. `Reset` now also fires when a wallet is
-switched with no client running at all.
-
-**Two counts, two questions.** kyoto opens more than one connection to some peers, so
-"connections" and "peers" differ and neither is wrong. The status line says which it is
-showing. And the peer list is read with `Session::peers`, not `chain_info`: the latter waits on
-a block header, which during a header download is the slowest thing the node is doing, so the
-list used to stay empty until the sync finished — exactly when it stopped being interesting.
-
-## Sending
-
-Building a transaction is watch-only work: BDK needs public descriptors and UTXOs to choose
-coins and lay out outputs. So the form, the fee and the review all happen without a password,
-and the password is asked for once — in the confirmation dialog — and buys exactly one
-signature. The signing wallet is derived from the vault in `wallet::send::signer`, used, and
-dropped; nothing holds a key between transactions.
-
-`check_signer` compares the derived external descriptor against the account's before signing.
-A BIP-39 passphrase used at import and not given at signing derives a valid, different, empty
-wallet rather than an error, and the symptom without that check is a transaction that
-silently fails to finalize. Passphrase entry at signing time is not built: such a wallet gets
-a clear refusal, not a broken send.
-
-One transaction spends from one derivation path, because each path is its own BDK wallet with
-its own UTXOs. When more than one path holds coins, the form asks which.
-
-Unconfirmed coins are excluded from selection (`unconfirmed_outpoints` → `TxBuilder::unspendable`).
-Everything unconfirmed in this wallet is a payment Sieve broadcast itself — a filter client sees
-no one else's mempool — so spending it means building on a transaction that could still be
-dropped, taking the child with it. The available balance already counts only confirmed coins, so
-the two agree; when a build fails while something is pending, the error says why.
-
-Broadcast comes before recording locally — a transaction no peer accepted is not a
-transaction — and then the tx is applied to the wallet as unconfirmed so it appears in
-Activity immediately. Note that broadcasting tells the receiving peer this transaction is
-probably ours. That is inherent to sending, and the one thing filters cannot hide.
-
-Fees, in a client with no mempool, come from one of two places, and the field says which:
-
-- **The last block** (default). `Requester::average_fee_rate` downloads the block at the tip
-  and works the rate out from its coinbase. No disclosure at all, but it is an average — one
-  enormous fee drags it up — and it describes the block that just closed rather than the one
-  being bid for. Costs a block download, so it is fetched once per tip, only when the send
-  form is actually on screen, and cached in `App::fee_estimate`.
-- **mempool.space** (opt-in, `Settings::mempool_fees`). A better number bought with a worse
-  disclosure than the price lookup: asking for fee rates says a payment is about to be sent,
-  and roughly when. Off by default and stated plainly in the row that enables it.
-
-Either way the field is floored at `broadcast_min_feerate`, and a rate typed over the
-suggestion is never taken back by a later estimate.
-
-## Removing a wallet
-
-`wallet::remove` deletes the directory: vault, databases, metadata. It refuses anything that is
-not inside `wallets_root` and does not hold a vault or a metadata file — `remove_dir_all` asks
-no questions, and this is the last place a wrong path can be caught. Two tests hold that line.
-
-The dialog in front of it says the thing that actually matters: the coins stay on the chain,
-and the recovery phrase is what reaches them, so for a wallet nobody wrote down this file is
-the only way back. `adw::AlertDialog` with a destructive response, Cancel as the default so a
-stray Return key is safe, and — when the wallet holds coins — the name typed out before the
-button works. The session is stopped and the generation bumped before anything is deleted, so
-nothing is still reading the files as they go.
+Onion addresses are remembered alongside plain ones and only offered when Tor is on; dialling
+one directly spends an attempt on something that cannot work. `tor::onion` encodes and decodes
+them, checksum included, so a corrupted entry is dropped rather than dialled.
 
 ## Receiving
 

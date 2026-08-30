@@ -25,7 +25,25 @@ fn path(network: Network) -> PathBuf {
         .join(format!("{network}.json"))
 }
 
-/// Addresses last known to be part of a working sync on this network.
+/// What is written to the file, so its provenance travels with it.
+///
+/// The first format was a bare array of addresses, written by a version that
+/// remembered whatever happened to be connected — including peers that cannot
+/// serve compact filters, which are worse than useless to this wallet and
+/// crowd out the ones that can. Those files are not deleted; they are simply
+/// no longer believed. A list nobody can vouch for is not a head start.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Remembered {
+    version: u32,
+    /// Every address here advertised `NODE_COMPACT_FILTERS` while connected.
+    serves_filters: bool,
+    peers: Vec<String>,
+}
+
+/// The only format worth reading: addresses confirmed to serve filters.
+const FORMAT: u32 = 2;
+
+/// Addresses last known to serve compact filters on this network.
 ///
 /// Returned as written rather than parsed: an onion address is not an
 /// `IpAddr`, and the peers worth remembering from a run over Tor are precisely
@@ -34,8 +52,16 @@ pub fn remembered(network: Network) -> Vec<String> {
     let Ok(bytes) = std::fs::read(path(network)) else {
         return Vec::new();
     };
-    let stored: Vec<String> = serde_json::from_slice(&bytes).unwrap_or_default();
-    stored.into_iter().filter(|a| is_address(a)).collect()
+    let Ok(stored) = serde_json::from_slice::<Remembered>(&bytes) else {
+        // The old bare-array format, or something unreadable. Either way its
+        // contents cannot be vouched for.
+        tracing::debug!(%network, "ignoring a peer list from an older format");
+        return Vec::new();
+    };
+    if stored.version != FORMAT || !stored.serves_filters {
+        return Vec::new();
+    }
+    stored.peers.into_iter().filter(|a| is_address(a)).collect()
 }
 
 /// Something we could dial again: an IP, or an onion address whose checksum
@@ -48,9 +74,12 @@ fn is_address(text: &str) -> bool {
     text.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().is_ok()
 }
 
-/// Record the peers currently connected on this network.
+/// Record peers that serve compact filters on this network.
 ///
-/// Called after a sync lands, so these are addresses that were part of one.
+/// Called after a sync lands, with addresses that advertised
+/// `NODE_COMPACT_FILTERS` while connected. Nothing else belongs here: a peer
+/// that cannot serve a filter takes a connection slot from one that can, and
+/// this wallet's entire sync is filters.
 pub fn remember(network: Network, addresses: &[String]) {
     // Deduplicated: kyoto reports one entry per connection and several can
     // carry the same address, so a naive copy fills the list with one peer.
@@ -68,7 +97,8 @@ pub fn remember(network: Network, addresses: &[String]) {
         return;
     }
 
-    let Ok(bytes) = serde_json::to_vec_pretty(&keep) else { return };
+    let record = Remembered { version: FORMAT, serves_filters: true, peers: keep };
+    let Ok(bytes) = serde_json::to_vec_pretty(&record) else { return };
     if let Err(e) = crate::vault::write_atomic(&path(network), &bytes) {
         // Losing this costs a slower start, nothing more.
         tracing::debug!(%e, "could not remember peers");
@@ -130,6 +160,43 @@ mod tests {
             .filter(|a| seen.insert((*a).clone()))
             .collect();
         assert_eq!(kept.len(), 2, "{kept:?}");
+    }
+
+    /// The list is only as good as its provenance. A file written by the
+    /// version that remembered any connected peer cannot be told apart from
+    /// one written carefully, so it is not read at all.
+    #[test]
+    fn a_list_from_the_old_format_is_not_believed() {
+        let bare = serde_json::to_vec(&["1.2.3.4", REAL_ONION]).unwrap();
+        assert!(
+            serde_json::from_slice::<Remembered>(&bare).is_err(),
+            "the old bare array must not parse as a vouched list"
+        );
+
+        // And a well-formed file that does not claim filter-serving peers is
+        // ignored just the same.
+        let unvouched = serde_json::to_vec(&Remembered {
+            version: FORMAT,
+            serves_filters: false,
+            peers: vec!["1.2.3.4".into()],
+        })
+        .unwrap();
+        let parsed: Remembered = serde_json::from_slice(&unvouched).unwrap();
+        assert!(!parsed.serves_filters);
+    }
+
+    #[test]
+    fn what_is_written_can_be_read_back() {
+        let record = Remembered {
+            version: FORMAT,
+            serves_filters: true,
+            peers: vec!["1.2.3.4".into(), REAL_ONION.into()],
+        };
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let read: Remembered = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(read.version, FORMAT);
+        assert!(read.serves_filters);
+        assert_eq!(read.peers.len(), 2);
     }
 
     #[test]
