@@ -21,6 +21,8 @@ pub enum WalletPageOutput {
     Unlock,
     /// Reveal a new address on this path.
     NewAddress(crate::wallet::accounts::ScriptType),
+    /// The send form came into view and wants a fee rate to start from.
+    EstimateFee,
     /// Build a transaction, watch-only, and hand back what it would cost.
     PlanSend(Box<Draft>),
     /// Sign the reviewed transaction and broadcast it.
@@ -323,7 +325,10 @@ pub enum WalletPageMsg {
     /// From the send form, on its way to the app.
     PlanSend(Box<Draft>),
     SendNow { plan: Box<Plan>, password: Password },
+    /// The send form is on screen and wants a fee rate to start from.
+    EstimateFee,
     /// From the app, on its way back to the send form.
+    FeeSuggestion(f64, String),
     Planned(Box<Result<Plan, String>>),
     Sent(Box<Result<String, String>>),
     /// Choose which derivation path to receive on.
@@ -1232,6 +1237,17 @@ impl Component for WalletPage {
         // are made once the whole tree exists.
         model.stack = Some(widgets.view_stack.clone());
         widgets.send_slot.append(model.send.widget());
+
+        // Both fee sources cost something — a block download or a disclosure —
+        // so neither happens until the form is actually on screen.
+        widgets.view_stack.connect_visible_child_name_notify({
+            let sender = sender.clone();
+            move |stack| {
+                if stack.visible_child_name().as_deref() == Some("send") {
+                    sender.input(WalletPageMsg::EstimateFee);
+                }
+            }
+        });
         widgets.view_switcher.set_stack(Some(&widgets.view_stack));
         widgets.switcher_bar.set_stack(Some(&widgets.view_stack));
 
@@ -1360,6 +1376,12 @@ impl Component for WalletPage {
             }
             WalletPageMsg::SendNow { plan, password } => {
                 let _ = sender.output(WalletPageOutput::Send { plan, password });
+            }
+            WalletPageMsg::EstimateFee => {
+                let _ = sender.output(WalletPageOutput::EstimateFee);
+            }
+            WalletPageMsg::FeeSuggestion(rate, source) => {
+                self.send.emit(SendMsg::Suggest { rate, source });
             }
             WalletPageMsg::Planned(result) => self.send.emit(SendMsg::Planned(result)),
             WalletPageMsg::Sent(result) => {

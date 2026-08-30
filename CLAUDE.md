@@ -82,10 +82,13 @@ Two axes, kept separate:
 Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
 one `bdk_kyoto` node drives them all via `build_with_wallets`.
 
-## The one non-Bitcoin connection
+## The non-Bitcoin connections
 
-Fetching a price from Bitfinex is the only outbound request Sieve makes that is not Bitcoin
-peer-to-peer. It carries no wallet data, but it discloses this machine's IP and when the
+Two, both opt-in and both disclosed in the row that enables them: a price from Bitfinex, and
+fee rates from mempool.space. Neither carries wallet data; both reveal this machine's IP, and
+the fee request additionally signals that a payment is imminent.
+
+Fetching a price from Bitfinex is the older of the two. It carries no wallet data, but it discloses this machine's IP and when the
 wallet was opened, so it is off by default, stated plainly in its preference row, and never
 made on a test network. If any other outbound call is ever added, it gets the same treatment:
 opt-in, disclosed, and justified in the row that enables it.
@@ -144,9 +147,19 @@ transaction — and then the tx is applied to the wallet as unconfirmed so it ap
 Activity immediately. Note that broadcasting tells the receiving peer this transaction is
 probably ours. That is inherent to sending, and the one thing filters cannot hide.
 
-There is no fee oracle: a filter client has no mempool. The fee field is sat/vB, floored at
-what the connected peers say they will relay (`broadcast_min_feerate`). kyoto also offers
-`average_fee_rate(block)`, which costs a full block download; not used yet.
+Fees, in a client with no mempool, come from one of two places, and the field says which:
+
+- **The last block** (default). `Requester::average_fee_rate` downloads the block at the tip
+  and works the rate out from its coinbase. No disclosure at all, but it is an average — one
+  enormous fee drags it up — and it describes the block that just closed rather than the one
+  being bid for. Costs a block download, so it is fetched once per tip, only when the send
+  form is actually on screen, and cached in `App::fee_estimate`.
+- **mempool.space** (opt-in, `Settings::mempool_fees`). A better number bought with a worse
+  disclosure than the price lookup: asking for fee rates says a payment is about to be sent,
+  and roughly when. Off by default and stated plainly in the row that enables it.
+
+Either way the field is floored at `broadcast_min_feerate`, and a rate typed over the
+suggestion is never taken back by a later estimate.
 
 ## Receiving
 

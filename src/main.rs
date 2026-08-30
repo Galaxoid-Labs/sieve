@@ -2,6 +2,7 @@
 
 mod app;
 mod peers;
+mod fees;
 mod price;
 mod settings;
 mod ui;

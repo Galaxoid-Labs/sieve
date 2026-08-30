@@ -40,6 +40,10 @@ pub enum SendMsg {
     SetPrice(Option<crate::price::Price>),
     /// The lowest rate the connected peers said they would relay, in sat/vB.
     SetMinFee(Option<f64>),
+    /// A rate to start from, and where it came from.
+    Suggest { rate: f64, source: String },
+    /// The fee field was changed.
+    FeeEdited,
     SelectFrom(u32),
     ToggleMax(bool),
     /// The amount field was typed in.
@@ -77,6 +81,11 @@ pub struct SendForm {
     from: Option<ScriptType>,
     max: bool,
     min_fee: Option<f64>,
+    /// Where the number in the fee field came from, said under it.
+    fee_source: Option<String>,
+    /// The last rate Sieve put there itself. A value that no longer matches it
+    /// was chosen by a person, and is not overwritten by a later estimate.
+    suggested: Option<f64>,
     error: Option<String>,
     busy: bool,
     /// The reviewed transaction, held between the dialog opening and the
@@ -144,12 +153,17 @@ impl SendForm {
         self.min_fee.unwrap_or(1.0).max(1.0)
     }
 
+    /// The line under the fee field: where the number came from, and what
+    /// the floor is. Never just a unit — a fee with no provenance is a number
+    /// someone has to guess about.
     fn fee_hint(&self) -> String {
-        match self.min_fee {
-            Some(rate) => format!(
-                "Satoshis per virtual byte. Connected peers relay from {rate:.1}."
-            ),
+        let floor = match self.min_fee {
+            Some(rate) => format!("Peers relay from {rate:.1} sat/vB"),
             None => "Satoshis per virtual byte".into(),
+        };
+        match &self.fee_source {
+            Some(source) => format!("{source} · {floor}"),
+            None => floor,
         }
     }
 
@@ -396,6 +410,9 @@ impl Component for SendForm {
                                 set_digits: 1,
                                 #[watch]
                                 set_sensitive: !model.busy,
+                                connect_value_notify[sender] => move |_| {
+                                    sender.input(SendMsg::FeeEdited);
+                                },
                             },
                         },
 
@@ -438,6 +455,8 @@ impl Component for SendForm {
             from: None,
             max: false,
             min_fee: None,
+            fee_source: None,
+            suggested: None,
             error: None,
             busy: false,
             plan: None,
@@ -495,6 +514,33 @@ impl Component for SendForm {
                 let floor = self.fee_floor();
                 if widgets.fee_row.value() < floor {
                     widgets.fee_row.set_value(floor);
+                }
+            }
+
+            SendMsg::Suggest { rate, source } => {
+                self.fee_source = Some(source);
+                let rate = rate.max(self.fee_floor());
+
+                // Only fills a field nobody has chosen for themselves.
+                let current = widgets.fee_row.value();
+                let untouched = self
+                    .suggested
+                    .map(|last| (current - last).abs() < 0.05)
+                    .unwrap_or(current == DEFAULT_FEE_RATE);
+                if untouched {
+                    let rate = (rate * 10.0).round() / 10.0;
+                    widgets.fee_row.set_value(rate);
+                    self.suggested = Some(rate);
+                }
+            }
+
+            SendMsg::FeeEdited => {
+                // A rate typed over the suggestion is the person's own, and
+                // the next estimate must not take it back.
+                if let Some(last) = self.suggested
+                    && (widgets.fee_row.value() - last).abs() >= 0.05
+                {
+                    self.suggested = None;
                 }
             }
 
@@ -651,6 +697,7 @@ impl Component for SendForm {
             SendMsg::Reset => {
                 self.sent = None;
                 self.sent_detail = None;
+                self.suggested = Some(widgets.fee_row.value());
                 self.error = None;
                 self.plan = None;
                 self.max = false;

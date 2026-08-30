@@ -172,6 +172,15 @@ pub struct Settings {
     pub show_fiat: bool,
     #[serde(default)]
     pub appearance: Appearance,
+    /// Ask mempool.space what fees are going for, instead of reading the last
+    /// block ourselves.
+    ///
+    /// Off by default. The local estimate costs a block download and tells
+    /// nobody anything; this one is a better number bought with a disclosure
+    /// that is worse than the price lookup — a request for fee rates says a
+    /// payment is about to be sent, and roughly when.
+    #[serde(default)]
+    pub mempool_fees: bool,
     /// The wallet opened last, so a restart returns to it.
     ///
     /// Without this, startup opens whichever wallet sorts first by name, which

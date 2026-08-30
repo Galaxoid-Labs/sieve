@@ -78,9 +78,9 @@ BIP-21 URIs, issued-address list with used/unused state.
 - [x] Signing from the vault, checked against the account's descriptor first.
 - [x] Broadcast via `Requester::submit_package`, then recorded locally as unconfirmed.
 - [x] Drain the wallet ("Max"), where the fee comes out of the amount.
-- [ ] Fee suggestion from `average_fee_rate`. Costs a full block download, which is why it is
-      not simply on: the field is floored at what peers will relay and left to the person
-      sending. A light client has no mempool and there is no fee API to ask.
+- [x] Fee suggestion from `average_fee_rate`, fetched once per tip when the send form comes
+      into view, with the block it came from named under the field.
+- [x] Optional fee rates from mempool.space, off by default, disclosed where it is switched on.
 - [ ] A BIP-39 passphrase at signing time, for wallets imported with one. Refused clearly for
       now rather than silently failing to finalize.
 - [x] Unconfirmed coins excluded from selection.

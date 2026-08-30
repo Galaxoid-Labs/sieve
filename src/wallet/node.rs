@@ -366,6 +366,36 @@ impl Session {
         })
     }
 
+    /// What the last block actually paid, in sat/vB.
+    ///
+    /// The only fee estimate available without asking anyone: kyoto downloads
+    /// the block at the tip and works the rate out from its coinbase — total
+    /// output minus subsidy, over weight. No server is told a payment is
+    /// coming, which is the whole point.
+    ///
+    /// It is an average, so a single enormous fee drags it up, and it
+    /// describes the block that just closed rather than the one being bid for.
+    /// Good enough to fill a field with; not good enough to hide where it came
+    /// from, which is why the caller says.
+    ///
+    /// Costs a block download — up to four megabytes on mainnet — so callers
+    /// should ask once per tip, not once per keystroke.
+    pub async fn average_fee_at_tip(&self) -> Result<(u32, f64)> {
+        let tip = self
+            .requester
+            .chain_tip()
+            .await
+            .map_err(|e| anyhow!("could not read the chain tip: {e}"))?;
+
+        let rate = self
+            .requester
+            .average_fee_rate(tip.hash)
+            .await
+            .map_err(|e| anyhow!("could not fetch the last block: {e}"))?;
+
+        Ok((tip.height, rate.to_sat_per_kwu() as f64 / 250.0))
+    }
+
     /// Sign a plan with the key from the vault and hand it to the network.
     ///
     /// The secret arrives already decrypted and leaves nothing behind: the

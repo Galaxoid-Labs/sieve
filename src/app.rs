@@ -46,6 +46,13 @@ pub struct App {
     unlock_dialog: adw::Dialog,
     /// The wallet currently open, if any.
     active: Option<Paths>,
+    /// The last locally computed fee estimate: height, sat/vB, and where it
+    /// came from. Kept so switching to Send twice does not download the same
+    /// block twice.
+    fee_estimate: Option<(u32, f64, String)>,
+    /// The height the chain view last reported, which is what makes the
+    /// estimate stale.
+    chain_tip: Option<u32>,
     session: Option<Arc<Session>>,
     chooser: Controller<Chooser>,
     onboarding: Controller<Onboarding>,
@@ -102,6 +109,11 @@ pub enum AppMsg {
     SetAppearance(crate::settings::Appearance),
     RenameWallet { paths: Paths, name: String },
     SetShowFiat(bool),
+    SetMempoolFees(bool),
+    /// Fill in a fee rate for a payment about to be made. Asked for when the
+    /// send form comes into view, because both sources cost something: one a
+    /// block download, the other a disclosure.
+    EstimateFee,
     /// Slide the wallet list in over preferences.
     ShowWallets,
     /// Slide the recovery-phrase screen in over preferences.
@@ -147,6 +159,8 @@ pub enum AppCmd {
     Sent(Result<(String, Summary), String>),
     Tick,
     Priced(Result<crate::price::Price, String>),
+    /// A fee rate in sat/vB, and where it came from.
+    Estimated(Result<(f64, String), String>),
 }
 
 #[relm4::component(pub)]
@@ -229,6 +243,7 @@ impl Component for App {
                 crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                     AppMsg::RevealAddress(script_type)
                 }
+                crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
                 crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
                     AppMsg::PlanSend(draft)
                 }
@@ -343,6 +358,8 @@ impl Component for App {
             settings,
             unlock_dialog: unlock_dialog.clone(),
             active: None,
+            fee_estimate: None,
+            chain_tip: None,
             session: None,
             chooser,
             onboarding,
@@ -445,6 +462,63 @@ impl Component for App {
                 self.settings.save();
                 self.wallet.emit(WalletPageMsg::SetDenomination(self.settings.denomination));
                 self.rebuild_preferences(&sender);
+            }
+
+            AppMsg::SetMempoolFees(on) => {
+                self.settings.mempool_fees = on;
+                self.settings.save();
+                // The source changed, so the number on screen is from the
+                // other one.
+                self.fee_estimate = None;
+                sender.input(AppMsg::EstimateFee);
+                self.rebuild_preferences(&sender);
+            }
+
+            AppMsg::EstimateFee => {
+                let network = self
+                    .active
+                    .as_ref()
+                    .and_then(wallet::Meta::load)
+                    .map(|m| m.network)
+                    .unwrap_or_else(|| "bitcoin".into());
+
+                if self.settings.mempool_fees {
+                    // Cached by nothing: the point of asking is a current
+                    // number, and the request is cheap in bandwidth.
+                    sender.oneshot_command(async move {
+                        let fetched = tokio::task::spawn_blocking(move || {
+                            crate::fees::fetch(&network).map_err(|e| e.to_string())
+                        })
+                        .await;
+                        AppCmd::Estimated(match fetched {
+                            Ok(Ok(rates)) => Ok((rates.suggested(), rates.summary())),
+                            Ok(Err(message)) => Err(message),
+                            Err(e) => Err(format!("could not ask mempool.space: {e}")),
+                        })
+                    });
+                    return;
+                }
+
+                let Some(session) = self.session.clone() else { return };
+                // One block download per tip, not one per visit.
+                if let Some((height, rate, source)) = &self.fee_estimate
+                    && self.chain_tip == Some(*height)
+                {
+                    let (rate, source) = (*rate, source.clone());
+                    self.wallet.emit(WalletPageMsg::FeeSuggestion(rate, source));
+                    return;
+                }
+                sender.oneshot_command(async move {
+                    AppCmd::Estimated(
+                        session
+                            .average_fee_at_tip()
+                            .await
+                            .map(|(height, rate)| {
+                                (rate, format!("Average of block {height}"))
+                            })
+                            .map_err(|e| e.to_string()),
+                    )
+                });
             }
 
             AppMsg::SetShowFiat(show) => {
@@ -674,7 +748,11 @@ impl Component for App {
                 tracing::error!(%message, "could not start the light client");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
-            AppCmd::Chain(Ok(info)) => self.wallet.emit(WalletPageMsg::SetChain(Some(info))),
+            AppCmd::Chain(Ok(info)) => {
+                // What makes a block-derived fee estimate stale.
+                self.chain_tip = Some(info.tip_height);
+                self.wallet.emit(WalletPageMsg::SetChain(Some(info)));
+            }
             AppCmd::Tick => {
                 sender.input(AppMsg::RefreshChain);
                 self.schedule_tick(&sender);
@@ -713,6 +791,17 @@ impl Component for App {
                 self.await_warning(&sender);
             }
             AppCmd::Warning(None) => tracing::warn!("the node stopped emitting warnings"),
+            AppCmd::Estimated(Ok((rate, source))) => {
+                if let Some(height) = self.chain_tip {
+                    self.fee_estimate = Some((height, rate, source.clone()));
+                }
+                self.wallet.emit(WalletPageMsg::FeeSuggestion(rate, source));
+            }
+            AppCmd::Estimated(Err(message)) => {
+                // No suggestion is a fine outcome: the field keeps its floor
+                // and whatever was typed into it.
+                tracing::warn!(%message, "could not estimate a fee rate");
+            }
             AppCmd::Planned(result) => {
                 self.wallet.emit(WalletPageMsg::Planned(Box::new(result)));
             }
@@ -945,6 +1034,30 @@ impl App {
         display.add(&appearance);
 
         page.add(&display);
+
+        let sending = adw::PreferencesGroup::new();
+        sending.set_title("Fees");
+        sending.set_description(Some(
+            "By default Sieve reads the average fee from the last block it downloaded, \
+             which tells nobody anything.",
+        ));
+
+        let mempool = adw::SwitchRow::new();
+        mempool.set_title("Fee rates from mempool.space");
+        mempool.set_subtitle(
+            "A better estimate, bought with a disclosure. It sends no wallet data, but asking \
+             for fee rates tells the server your IP address and that you are about to send a \
+             payment.",
+        );
+        mempool.set_active(self.settings.mempool_fees);
+        {
+            let sender = sender.clone();
+            mempool.connect_active_notify(move |row| {
+                sender.input(AppMsg::SetMempoolFees(row.is_active()));
+            });
+        }
+        sending.add(&mempool);
+        page.add(&sending);
 
         let this = adw::PreferencesGroup::new();
         this.set_title("This wallet");
