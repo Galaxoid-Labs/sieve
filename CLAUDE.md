@@ -228,6 +228,10 @@ for most connections, so demanding the flag would remember almost nobody.
 So the list is "peers present through a working sync", not "peers known to serve filters".
 Do not describe it as the latter — the flags to prove that are usually absent.
 
+Remembered peers are addresses that worked *once*, so they are a head start and never the whole
+supply: nodes go away, and a list of eight dead ones leaves the node with nothing to dial. Fresh
+seeds are resolved on every start when Tor is on, alongside whatever is remembered.
+
 Onion addresses are remembered alongside plain ones: a run over Tor connects to onion peers,
 and those are exactly the ones reachable the next time Tor is on. `tor::onion` encodes and
 decodes them, checksum included, so a corrupted entry is dropped rather than dialled.

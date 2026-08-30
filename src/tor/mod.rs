@@ -238,8 +238,10 @@ pub fn seeds(network: &str) -> Vec<String> {
 
 /// Resolve enough seeds through Tor to start a node with.
 ///
-/// Stops early: a handful of addresses is plenty, and each lookup is a
-/// round trip through three relays.
+/// Tor's `RESOLVE` returns one address per lookup, where an ordinary DNS query
+/// would return a dozen — so this asks several seeders rather than one, and
+/// takes what each gives. Every lookup is a round trip through three relays,
+/// which is why it stops as soon as it has enough.
 pub fn resolve_seeds(proxy: Proxy, network: &str, wanted: usize) -> Vec<IpAddr> {
     let mut found = Vec::new();
     for host in seeds(network) {

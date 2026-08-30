@@ -251,29 +251,36 @@ impl Session {
             // clear from this machine while everything else went through Tor.
             // Resolving the same seeds here, through the proxy, keeps the node
             // supplied so it never reaches for the resolver.
-            if peers < REQUIRED_PEERS as usize {
-                let wanted = REQUIRED_PEERS as usize - peers;
-                let network_name = network.to_string();
-                let seeded = tokio::task::spawn_blocking(move || {
-                    crate::tor::resolve_seeds(proxy, &network_name, wanted)
-                })
-                .await
-                .unwrap_or_default();
+            //
+            // Always, not only when the remembered list is short. Remembered
+            // peers are addresses that worked *once*: nodes go away, and a
+            // list of eight dead ones leaves the node with nothing to dial and
+            // no way to find anything else. Fresh seeds every start keep the
+            // pool alive, and cost a handful of RESOLVE round trips.
+            let network_name = network.to_string();
+            let seeded = tokio::task::spawn_blocking(move || {
+                crate::tor::resolve_seeds(proxy, &network_name, REQUIRED_PEERS as usize)
+            })
+            .await
+            .unwrap_or_default();
 
-                if seeded.is_empty() && peers == 0 {
-                    // Without peers the node would resolve them itself, over
-                    // the clear. Refusing is the honest outcome: Tor was
-                    // asked for, and it could not be delivered.
-                    anyhow::bail!(
-                        "could not find any peers through Tor. Check that the proxy at \
-                         {proxy} is running, or turn Tor off in preferences."
-                    );
-                }
+            if seeded.is_empty() && peers == 0 {
+                // Without peers the node would resolve them itself, over the
+                // clear. Refusing is the honest outcome: Tor was asked for,
+                // and it could not be delivered.
+                anyhow::bail!(
+                    "could not find any peers through Tor. Check that the proxy at \
+                     {proxy} is running, or turn Tor off in preferences."
+                );
+            }
 
-                tracing::info!(count = seeded.len(), "seeded peers resolved through Tor");
-                for ip in seeded {
-                    builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
-                }
+            tracing::info!(
+                count = seeded.len(),
+                remembered = peers,
+                "seeded peers resolved through Tor"
+            );
+            for ip in seeded {
+                builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
             }
         }
 
