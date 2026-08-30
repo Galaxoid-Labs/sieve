@@ -85,6 +85,33 @@ pub const MAINNET_CHECKPOINTS: &[Checkpoint] = &[
         hash: "0000000000000000000687bca986194dc2c1f949318629b44bb54ec0a94d8244",
         when: "November 2021 — taproot activation",
     },
+    // Older than taproot, for wallets that are. A hardware wallet set up in
+    // 2018 has coins no later checkpoint can find, and an import that starts
+    // after the money arrived shows an empty wallet — which reads as lost
+    // rather than as the wrong starting point.
+    //
+    // The cost is stated where they are chosen: each of these is another
+    // hundred thousand blocks of filters, and filters are the download.
+    Checkpoint {
+        height: 700_000,
+        hash: "0000000000000000000590fc0f3eba193a278534220b2b37e9849e1a770ca959",
+        when: "September 2021",
+    },
+    Checkpoint {
+        height: 600_000,
+        hash: "00000000000000000007316856900e76b4f7a9139cfbfba89842c8d196cd5f91",
+        when: "October 2019",
+    },
+    Checkpoint {
+        height: 500_000,
+        hash: "00000000000000000024fb37364cbf81fd49cc2d51c09c75c35433c3a1945d04",
+        when: "December 2017",
+    },
+    Checkpoint {
+        height: 400_000,
+        hash: "000000000000000004ec466ce4732fe6f1ed1cddc2ed4b328fff5224276e3f6f",
+        when: "February 2016",
+    },
 ];
 
 /// Signet checkpoints, newest first.
@@ -866,8 +893,19 @@ mod tests {
         assert_eq!(exact.height, 900_000);
 
         // Below every checkpoint, fall back to the floor rather than panicking.
+        // The floor is the oldest checkpoint offered, not taproot activation:
+        // a wallet imported from a device set up in 2018 has coins that no
+        // later starting point can find, and taproot's floor belongs to the
+        // taproot *account* rather than to the wallet.
         let floor = checkpoint_at_or_before(Network::Bitcoin, 1);
-        assert_eq!(floor.height, 709_632, "taproot activation is the BIP86 floor");
+        assert_eq!(floor.height, 400_000);
+
+        // And the list stays in order, newest first, or the search above
+        // returns the wrong one.
+        let heights: Vec<u32> = checkpoints(Network::Bitcoin).iter().map(|c| c.height).collect();
+        let mut sorted = heights.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(heights, sorted, "checkpoints must be newest first");
     }
 
     #[test]
