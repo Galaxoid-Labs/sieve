@@ -27,6 +27,7 @@ use zeroize::Zeroizing;
 
 pub mod accounts;
 pub mod send;
+pub mod watch;
 pub mod node;
 
 use crate::vault;
@@ -168,8 +169,12 @@ impl Paths {
     /// First run is "no vault", not "no database" — the databases can be
     /// rebuilt from the seed, so their absence is recoverable and the vault's
     /// is not.
+    /// Whether this directory holds a wallet.
+    ///
+    /// A vault *or* metadata: a watch-only wallet has no vault, because it has
+    /// no secret to seal.
     pub fn is_initialised(&self) -> bool {
-        self.vault.exists()
+        self.vault.exists() || self.meta.exists()
     }
 }
 
@@ -278,6 +283,12 @@ pub struct Meta {
     /// What the person called it. Absent for wallets created before naming.
     #[serde(default)]
     pub name: Option<String>,
+    /// No keys here: the descriptors are public and there is no vault.
+    ///
+    /// Such a wallet opens without a password — there is nothing to decrypt —
+    /// and cannot sign. Signing is the device's job, through a PSBT.
+    #[serde(default)]
+    pub watch_only: bool,
 }
 
 /// Sieve's first metadata format: a birthday and nothing else.
@@ -310,7 +321,18 @@ impl Meta {
             birthday_hash: birthday.hash.to_owned(),
             script_types,
             primary,
+            watch_only: false,
         }
+    }
+
+    /// The same, for a wallet whose keys live somewhere else.
+    pub fn watch_only(
+        network: Network,
+        birthday: Checkpoint,
+        script_type: accounts::ScriptType,
+        name: Option<String>,
+    ) -> Self {
+        Self { watch_only: true, ..Self::new(network, birthday, vec![script_type], script_type, name) }
     }
 
     /// A name to show, falling back to something stable rather than blank.
@@ -342,6 +364,9 @@ impl Meta {
             birthday_hash: legacy.hash,
             script_types: default_script_types(),
             primary: default_primary(),
+            // That format predates watch-only wallets, so it can only be one
+            // with a vault.
+            watch_only: false,
         };
         let _ = upgraded.save(paths);
         Some(upgraded)
@@ -1117,6 +1142,57 @@ fn split_outputs(
     }
 
     Outputs { ours, theirs }
+}
+
+/// Import a watch-only wallet from a descriptor or an extended public key.
+///
+/// No password, because there is nothing to protect: the descriptors are
+/// public, and no vault is written. What this wallet cannot do is sign — that
+/// belongs to whatever holds the key, over a PSBT.
+pub fn import_descriptor(
+    text: &str,
+    paths: &Paths,
+    network: Network,
+    birthday: Checkpoint,
+    name: Option<String>,
+) -> Result<Summary> {
+    let descriptors = watch::parse(text)?;
+
+    let dir = data_dir(paths);
+    std::fs::create_dir_all(dir)?;
+    let db = dir.join(descriptors.script_type.db_file());
+    let mut account = accounts::Account::create_watching(
+        &descriptors.external,
+        &descriptors.internal,
+        descriptors.script_type,
+        &db,
+        network,
+    )?;
+    account.persist()?;
+
+    Meta::watch_only(network, birthday, descriptors.script_type, name).save(paths)?;
+
+    let mut portfolio =
+        accounts::Portfolio { accounts: vec![account], primary: descriptors.script_type };
+    Summary::from_portfolio(&mut portfolio)
+}
+
+/// Open a wallet that has no vault.
+///
+/// The counterpart to `unlock` for watch-only wallets: there is no password to
+/// check and nothing to decrypt, so this only loads what is already public.
+pub fn open_watch_only(paths: &Paths) -> Result<Summary> {
+    let meta = Meta::load(paths).context("this wallet has no metadata file")?;
+    let mut portfolio = accounts::Portfolio::load(
+        data_dir(paths),
+        &meta.script_types,
+        meta.primary,
+        meta.network(),
+    )?;
+    if portfolio.is_empty() {
+        anyhow::bail!("this wallet's databases are missing, and it has no key to rebuild them");
+    }
+    Summary::from_portfolio(&mut portfolio)
 }
 
 /// Delete a wallet from this computer.

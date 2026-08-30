@@ -205,6 +205,8 @@ pub enum AppCmd {
     Sent(Result<(String, Summary), String>),
     Tick,
     Priced(Result<crate::price::Price, String>),
+    /// A watch-only wallet, opened without a password.
+    Opened(Result<(Paths, Summary), String>),
     /// Who is connected, without waiting for the chain.
     Peers { generation: u64, peers: Vec<crate::wallet::node::PeerInfo> },
     /// A fee rate in sat/vB, and where it came from.
@@ -834,13 +836,30 @@ impl Component for App {
                 self.settings.last_wallet = Some(id.clone());
                 self.settings.save();
 
-                self.unlock.emit(UnlockMsg::Open { paths, name: name.clone() });
                 self.unlocked = false;
                 self.wallet.emit(WalletPageMsg::SetLocked(true));
-                self.wallet.emit(WalletPageMsg::SetName(name));
-
-                // Chosen from the list, so close preferences before asking.
+                self.wallet.emit(WalletPageMsg::SetName(name.clone()));
                 self.close_prefs();
+
+                // A watch-only wallet has no vault and therefore no password:
+                // there is nothing to decrypt and nothing a password would
+                // protect. Asking for one would be theatre.
+                if wallet::Meta::load(&paths).is_some_and(|m| m.watch_only) {
+                    let opening = paths.clone();
+                    sender.oneshot_command(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            wallet::open_watch_only(&opening)
+                                .map(|summary| (opening, summary))
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                        AppCmd::Opened(result)
+                    });
+                    return;
+                }
+
+                self.unlock.emit(UnlockMsg::Open { paths, name });
                 sender.input(AppMsg::PromptUnlock);
             }
 
@@ -864,9 +883,12 @@ impl Component for App {
                     self.wallet.emit(WalletPageMsg::Reset);
                 }
 
+                let watch_only =
+                    wallet::Meta::load(&paths).is_some_and(|m| m.watch_only);
                 self.active = Some(paths.clone());
                 self.balance_sats = Some(summary.balance_sats);
                 self.unlocked = true;
+                self.wallet.emit(WalletPageMsg::SetWatchOnly(watch_only));
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetLocked(false));
                 self.chooser.emit(ChooserMsg::Refresh);
@@ -1050,6 +1072,14 @@ impl Component for App {
             AppCmd::Warning { notice: None, .. } => {
                 tracing::warn!("the node stopped emitting warnings")
             }
+            AppCmd::Opened(Ok((paths, summary))) => {
+                sender.input(AppMsg::Ready { paths, summary });
+            }
+            AppCmd::Opened(Err(message)) => {
+                tracing::error!(%message, "could not open the watch-only wallet");
+                self.wallet.emit(WalletPageMsg::Failed(message));
+            }
+
             AppCmd::Peers { generation, peers } if self.current(generation) => {
                 self.wallet.emit(WalletPageMsg::SetPeers(peers))
             }
@@ -1737,14 +1767,21 @@ impl App {
         if self.active.is_some() {
             let phrase = adw::ActionRow::new();
             phrase.set_title("Recovery phrase");
-            phrase.set_subtitle(if self.unlocked {
-                "Show the words again to write them down"
-            } else {
-                "Unlock this wallet to show the words"
+            let watch_only = self
+                .active
+                .as_ref()
+                .and_then(wallet::Meta::load)
+                .is_some_and(|m| m.watch_only);
+            phrase.set_subtitle(match (watch_only, self.unlocked) {
+                // Nothing was ever sealed here, so there is nothing to open.
+                (true, _) => "This wallet holds no keys — its recovery phrase lives                               wherever the keys do",
+                (false, true) => "Show the words again to write them down",
+                (false, false) => "Unlock this wallet to show the words",
             });
             phrase.set_subtitle_lines(2);
-            phrase.set_activatable(self.unlocked);
-            phrase.set_sensitive(self.unlocked);
+            let can_reveal = self.unlocked && !watch_only;
+            phrase.set_activatable(can_reveal);
+            phrase.set_sensitive(can_reveal);
             phrase.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
             {
                 let sender = sender.clone();

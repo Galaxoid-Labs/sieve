@@ -275,6 +275,32 @@ impl Account {
         Ok(Account { script_type, wallet, conn })
     }
 
+    /// Create a wallet from public descriptors — the hardware-wallet case.
+    ///
+    /// `create_single` would take only one descriptor, leaving change on the
+    /// receive chain; a device's wallet has both, so both are given.
+    pub fn create_watching(
+        external: &str,
+        internal: &str,
+        script_type: ScriptType,
+        db: &Path,
+        network: Network,
+    ) -> Result<Self> {
+        if let Some(parent) = db.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut conn = Connection::open(db)?;
+        restrict(db)?;
+
+        let wallet = Wallet::create(external.to_owned(), internal.to_owned())
+            .network(network)
+            .lookahead(IMPORT_LOOKAHEAD)
+            .create_wallet(&mut conn)
+            .map_err(|e| anyhow!("could not read that descriptor: {e}"))?;
+
+        Ok(Account { script_type, wallet, conn })
+    }
+
     /// Reopen a wallet watch-only. No key material is involved: the database
     /// holds public descriptors, which is all that browsing needs.
     pub fn load(script_type: ScriptType, db: &Path, network: Network) -> Result<Option<Self>> {

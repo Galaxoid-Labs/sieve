@@ -392,6 +392,8 @@ pub enum WalletPageMsg {
     SetTor(Option<String>),
     /// The connected peers, arriving faster than the chain view can.
     SetPeers(Vec<crate::wallet::node::PeerInfo>),
+    /// This wallet holds no keys: the device that does is what signs.
+    SetWatchOnly(bool),
     /// Tor is on and could not be started, so nothing is connecting.
     TorProblem(Option<String>),
     RetryTor,
@@ -1584,6 +1586,10 @@ impl Component for WalletPage {
                 self.chain = chain;
             }
             WalletPageMsg::SetTor(tor) => self.tor = tor,
+
+            WalletPageMsg::SetWatchOnly(watch_only) => {
+                self.send.emit(SendMsg::SetWatchOnly(watch_only));
+            }
 
             WalletPageMsg::TorProblem(problem) => self.tor_problem = problem,
             WalletPageMsg::RetryTor => {

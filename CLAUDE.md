@@ -79,6 +79,27 @@ These are not preferences. Violating one is a bug, not a style difference.
 6. **Argon2 never runs on the main thread.** `sender.spawn_oneshot_command(...)`. A blocked frame
    clock is a visible stall.
 
+## Watch-only wallets, and where hardware signers fit
+
+A wallet whose keys live on a device has no vault: the descriptors are public, so there is
+nothing to seal and no password to ask for. `Meta::watch_only` records it, `Paths::is_initialised`
+accepts metadata without a vault, and `open_watch_only` is the counterpart to `unlock` for a
+wallet with no secret. **"Unlocked" and "holds keys" are now separate questions** — code that
+assumes the first implies the second is wrong.
+
+`wallet::watch::parse` turns what a device exports into the pair of descriptors BDK wants. It
+takes a multipath descriptor (`…/<0;1>/*`), a single-path one ending `/0/*`, or a bare extended
+key with its origin, and infers the script type from the purpose in that origin — 84h is native
+segwit and so on. A bare key with no origin is **refused**, not guessed: the path is what says
+which addresses to look for, and a wrong guess produces a wallet that finds nothing and looks
+broken rather than wrong.
+
+The plan beyond this, following the same shape as ecash-splitter's `ecx-signer`: PSBT is the
+seam — BDK never talks to a device, its output is a PSBT and the device's input is a PSBT.
+Next is export/import of that PSBT over files, which covers every air-gapped device with no
+drivers at all; then `async-hwi` (pure Rust: Ledger, BitBox02, Coldcard, Jade, Specter) for USB;
+then animated QR. Whatever a device hands back is untrusted and re-verified before broadcast.
+
 ## Import model
 
 Two axes, kept separate:

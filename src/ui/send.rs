@@ -42,6 +42,8 @@ pub enum SendMsg {
     SetMinFee(Option<f64>),
     /// A rate to start from, and where it came from.
     Suggest { rate: f64, source: String },
+    /// This wallet holds no keys here.
+    SetWatchOnly(bool),
     /// The fee field was changed.
     FeeEdited,
     SelectFrom(u32),
@@ -81,6 +83,8 @@ pub struct SendForm {
     from: Option<ScriptType>,
     max: bool,
     min_fee: Option<f64>,
+    /// No keys in this wallet: it can build a payment but not sign one.
+    watch_only: bool,
     /// Where the number in the fee field came from, said under it.
     fee_source: Option<String>,
     /// The last rate Sieve put there itself. A value that no longer matches it
@@ -252,7 +256,24 @@ impl Component for SendForm {
                              appear here once they are in a block."
                         ),
                         #[watch]
-                        set_visible: !model.has_funds() && model.sent.is_none(),
+                        set_visible: !model.watch_only
+                            && !model.has_funds()
+                            && model.sent.is_none(),
+                    },
+
+                    // A watch-only wallet can work out a payment down to the
+                    // last satoshi and still not sign it. Saying so here beats
+                    // a form that fails at the last step.
+                    adw::StatusPage {
+                        set_icon_name: Some("channel-secure-symbolic"),
+                        set_title: "Signing happens elsewhere",
+                        set_description: Some(
+                            "This wallet holds no keys — only the public descriptors that \
+                             find its coins. Whatever holds the key signs for it, over a \
+                             PSBT."
+                        ),
+                        #[watch]
+                        set_visible: model.watch_only,
                     },
 
                     // Sent.
@@ -330,7 +351,9 @@ impl Component for SendForm {
                         set_orientation: gtk::Orientation::Vertical,
                         set_spacing: 18,
                         #[watch]
-                        set_visible: model.has_funds() && model.sent.is_none(),
+                        set_visible: !model.watch_only
+                            && model.has_funds()
+                            && model.sent.is_none(),
 
                         adw::PreferencesGroup {
                             #[watch]
@@ -455,6 +478,7 @@ impl Component for SendForm {
             from: None,
             max: false,
             min_fee: None,
+            watch_only: false,
             fee_source: None,
             suggested: None,
             error: None,
@@ -516,6 +540,8 @@ impl Component for SendForm {
                     widgets.fee_row.set_value(floor);
                 }
             }
+
+            SendMsg::SetWatchOnly(watch_only) => self.watch_only = watch_only,
 
             SendMsg::Suggest { rate, source } => {
                 self.fee_source = Some(source);

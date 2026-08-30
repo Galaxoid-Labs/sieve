@@ -95,7 +95,9 @@ impl Restore {
             CredentialKind::Mnemonic => "The 12 or 24 words, separated by spaces",
             CredentialKind::ExtendedKey => "An xprv, tprv or vprv. No recovery phrase needed",
             CredentialKind::Wif => "A single private key in Wallet Import Format",
-            CredentialKind::Descriptor => "Watch-only. Sieve will never hold a key for this wallet",
+            CredentialKind::Descriptor => "Watch-only, for a hardware wallet or another \
+                                            wallet's public keys. No password: Sieve holds \
+                                            no secret for it and cannot sign",
         }
     }
 
@@ -276,6 +278,10 @@ impl Component for Restore {
                 },
 
                 adw::PreferencesGroup {
+                    // A watch-only wallet holds no secret, so a password would
+                    // lock a door with nothing behind it.
+                    #[watch]
+                    set_visible: model.kind.carries_keys(),
                     set_title: "Choose a password for this wallet",
                     set_description: Some(
                         "New — you are choosing it now. It locks this wallet on this \
@@ -403,13 +409,15 @@ impl Component for Restore {
                     });
                     return;
                 }
-                if submission.password.0.len() < 8 {
-                    self.error = Some("Use a password of at least 8 characters.".into());
-                    return;
-                }
-                if *submission.password.0 != *submission.confirm.0 {
-                    self.error = Some("The two passwords do not match.".into());
-                    return;
+                if submission.kind.carries_keys() {
+                    if submission.password.0.len() < 8 {
+                        self.error = Some("Use a password of at least 8 characters.".into());
+                        return;
+                    }
+                    if *submission.password.0 != *submission.confirm.0 {
+                        self.error = Some("The two passwords do not match.".into());
+                        return;
+                    }
                 }
 
                 let birthday = self.birthday_for(submission.birthday_index);
@@ -469,9 +477,15 @@ impl Component for Restore {
                             ScriptType::NativeSegwit,
                             name.clone(),
                         ),
-                        CredentialKind::Descriptor => Err(anyhow::anyhow!(
-                            "Descriptor import is not wired up yet."
-                        )),
+                        // No password, no vault: the keys are somewhere
+                        // else, which is the point.
+                        CredentialKind::Descriptor => wallet::import_descriptor(
+                            &credential,
+                            &paths,
+                            network,
+                            birthday,
+                            name.clone(),
+                        ),
                     };
                     RestoreCmd::Finished(
                         result

@@ -50,7 +50,8 @@ as AAD), atomic writes, process hardening, six vault tests.
       only place the phrase exists. The row is insensitive until the wallet is unlocked, and
       the words are dropped when preferences closes. A wallet imported from a key shows that
       key, with copy saying so, rather than appearing broken.
-- [ ] Descriptor / xpub watch-only import
+- [x] Descriptor / xpub watch-only import — no vault, no password, and the send tab says
+      plainly that signing happens wherever the keys are.
 - [ ] Signer worker owning the decrypted descriptor, one message at a time
 
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never
