@@ -100,6 +100,9 @@ pub struct Restore {
     scanning: bool,
     /// Set while a device is being asked.
     pending: Option<PendingImport>,
+    /// Backing model for the birthday picker, mutated in place when the
+    /// network changes. Rebuilding it would reset the selection.
+    birthday_model: gtk::StringList,
 }
 
 /// Networks offered, signet first so the safe option is the default.
@@ -171,10 +174,7 @@ impl Restore {
     /// Index 0 is the most recent checkpoint, and the last choice is always the
     /// floor, so "I don't know" is always available and always correct.
     fn birthday_for(&self, index: u32) -> wallet::Checkpoint {
-        let all = wallet::checkpoints(self.network);
-        all.get(index as usize)
-            .copied()
-            .unwrap_or_else(|| *all.last().expect("a floor checkpoint exists"))
+        birthday_for(self.network, index)
     }
 
     /// What the chosen birthday actually resolves to, so the consequence of the
@@ -187,18 +187,19 @@ impl Restore {
         format!("{} — from block {}", checkpoint.when, checkpoint.height)
     }
 
+    /// Put the current network's choices into the picker's model.
+    ///
+    /// In place: the list is spliced rather than replaced, because replacing it
+    /// resets the selection and the selection is what gets imported.
+    fn fill_birthdays(&self) {
+        let choices = self.birthday_choices();
+        let refs: Vec<&str> = choices.iter().map(String::as_str).collect();
+        self.birthday_model.splice(0, self.birthday_model.n_items(), &refs);
+    }
+
     /// The choices offered, straight from the checkpoints they select.
     fn birthday_choices(&self) -> Vec<String> {
-        wallet::checkpoints(self.network)
-            .iter()
-            .map(|c| {
-                if c.height == 0 {
-                    c.when.to_string()
-                } else {
-                    format!("{} or later", c.when)
-                }
-            })
-            .collect()
+        birthday_choices(self.network)
     }
 }
 
@@ -366,25 +367,23 @@ impl Component for Restore {
                     #[name(birthday_row)]
                     adw::ComboRow {
                         set_title: "Earliest possible payment",
-                        // Built from the checkpoints themselves. These used to
-                        // be a hand-written list of phrases sitting alongside
-                        // the checkpoint table, and adding a checkpoint moved
-                        // every choice below it by one: "I don't know" quietly
-                        // became taproot activation, and a wallet older than
-                        // that would have found nothing with no way to tell.
-                        // One list now, so they cannot drift apart again.
-                        #[watch]
-                        #[block_signal(birthday_chosen)]
-                        set_model: Some(&gtk::StringList::new(
-                            &model.birthday_choices()
-                                .iter()
-                                .map(String::as_str)
-                                .collect::<Vec<_>>()
-                        )),
+                        // The choices come from the checkpoints they select —
+                        // they used to be a hand-written list matched by
+                        // position, and adding a checkpoint moved every choice
+                        // below it by one.
+                        //
+                        // Held and mutated rather than rebuilt under #[watch]:
+                        // replacing a ComboRow's model resets its selection to
+                        // the first item, and the submission reads the row. So
+                        // a rebuilt model silently discarded the chosen
+                        // birthday and imported from the most recent
+                        // checkpoint — a wallet that scans nothing and says it
+                        // is up to date.
+                        set_model: Some(&model.birthday_model),
                         set_selected: 1,
                         connect_selected_notify[sender] => move |row| {
                             sender.input(RestoreMsg::BirthdayChanged(row.selected()));
-                        } @birthday_chosen,
+                        },
                     },
 
                     adw::ActionRow {
@@ -475,7 +474,7 @@ impl Component for Restore {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let model = Restore {
+        let mut model = Restore {
             // Hardware is first in the list, so it is what the form opens on.
             kind: KINDS[0],
             network: bdk_wallet::bitcoin::Network::Signet,
@@ -487,7 +486,9 @@ impl Component for Restore {
             looked: false,
             scanning: false,
             pending: None,
+            birthday_model: gtk::StringList::new(&[]),
         };
+        model.fill_birthdays();
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
@@ -517,7 +518,18 @@ impl Component for Restore {
                 self.error = None;
             }
             RestoreMsg::NetworkChanged(index) => {
+                // Networks have different checkpoints, so the choices change
+                // with them — and an index into the old list means nothing in
+                // the new one.
                 self.network = networks()[(index as usize).min(1)];
+                self.fill_birthdays();
+                // The chosen index may not exist in the new list — signet has
+                // two checkpoints where mainnet has seven — and an index past
+                // the end would quietly become the last one.
+                let choices = self.birthday_model.n_items();
+                if self.birthday_index >= choices {
+                    self.birthday_index = choices.saturating_sub(1);
+                }
                 self.error = None;
             }
             RestoreMsg::Cancel => {
@@ -568,7 +580,18 @@ impl Component for Restore {
                     }
                 }
 
-                let birthday = self.birthday_for(submission.birthday_index);
+                // From the model, not the submitted widget value. A
+                // ComboRow's selection is reset by anything that replaces its
+                // model, and a birthday silently reset to "most recent" gives
+                // a wallet that scans nothing and calls itself up to date.
+                // The model only changes when somebody chooses.
+                let birthday = self.birthday_for(self.birthday_index);
+                tracing::info!(
+                    choice = self.birthday_index,
+                    height = birthday.height,
+                    when = birthday.when,
+                    "importing with this birthday"
+                );
 
                 self.busy = true;
                 self.error = None;
@@ -733,6 +756,31 @@ impl Component for Restore {
     }
 }
 
+/// Which checkpoint a choice selects.
+///
+/// Free functions, so what is offered and what it means can be checked without
+/// building a form full of widgets — that correspondence has been wrong twice.
+fn birthday_for(network: bdk_wallet::bitcoin::Network, index: u32) -> wallet::Checkpoint {
+    let all = wallet::checkpoints(network);
+    all.get(index as usize)
+        .copied()
+        .unwrap_or_else(|| *all.last().expect("a floor checkpoint exists"))
+}
+
+/// The choices offered for a network, in the order its checkpoints are in.
+fn birthday_choices(network: bdk_wallet::bitcoin::Network) -> Vec<String> {
+    wallet::checkpoints(network)
+        .iter()
+        .map(|c| {
+            if c.height == 0 {
+                c.when.to_string()
+            } else {
+                format!("{} or later", c.when)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,20 +797,7 @@ mod tests {
             bdk_wallet::bitcoin::Network::Bitcoin,
             bdk_wallet::bitcoin::Network::Signet,
         ] {
-            let form = Restore {
-                kind: CredentialKind::Hardware,
-                network,
-                birthday_index: 0,
-                busy: false,
-                error: None,
-                devices: Vec::new(),
-                device_index: 0,
-                looked: false,
-                scanning: false,
-                pending: None,
-            };
-
-            let choices = form.birthday_choices();
+            let choices = birthday_choices(network);
             let checkpoints = wallet::checkpoints(network);
             assert_eq!(
                 choices.len(),
@@ -772,7 +807,7 @@ mod tests {
 
             for (index, checkpoint) in checkpoints.iter().enumerate() {
                 assert_eq!(
-                    form.birthday_for(index as u32).height,
+                    birthday_for(network, index as u32).height,
                     checkpoint.height,
                     "{network}: choice {index} selects the wrong checkpoint"
                 );
@@ -781,7 +816,7 @@ mod tests {
             // And the last choice is the whole chain, which is what "I don't
             // know" has to mean.
             let last = choices.len() as u32 - 1;
-            assert_eq!(form.birthday_for(last).height, 0, "{network}");
+            assert_eq!(birthday_for(network, last).height, 0, "{network}");
         }
     }
 }

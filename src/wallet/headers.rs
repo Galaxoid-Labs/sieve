@@ -70,7 +70,48 @@ pub fn load(network: Network) -> Option<Vec<IndexedHeader>> {
 }
 
 /// Write what a node has learned, for the next wallet and the next start.
+///
+/// **The stored range only ever widens.** A wallet whose birthday is recent
+/// knows the chain from there; one imported from an old device knows it from
+/// far earlier. If the recent wallet simply wrote what it had, it would throw
+/// away the older wallet's range, and that wallet would refetch its whole
+/// history on the next start — the file is shared, so the narrowest wallet
+/// would keep spoiling it for the widest.
 pub fn save(network: Network, headers: &[IndexedHeader]) -> std::io::Result<()> {
+    let Some(first) = headers.first() else { return Ok(()) };
+
+    // Keep whichever range reaches back further, extended to whichever tip is
+    // higher. The two are contiguous by construction — the same chain — so a
+    // wider start and a newer end can simply be joined.
+    let existing = load(network);
+    let combined: Vec<IndexedHeader> = match existing {
+        Some(stored)
+            if stored.first().is_some_and(|s| s.height < first.height) =>
+        {
+            let last_stored = stored.last().map(|h| h.height).unwrap_or(0);
+            let mut merged = stored;
+            // Only the part of the new chain that the stored one does not
+            // already cover, and only if it joins on.
+            merged.extend(
+                headers
+                    .iter()
+                    .filter(|h| h.height > last_stored)
+                    .cloned(),
+            );
+            let contiguous = merged
+                .windows(2)
+                .all(|w| w[1].height == w[0].height + 1);
+            if !contiguous {
+                tracing::debug!(%network, "stored and new headers do not join; keeping the wider");
+                merged.truncate(
+                    merged.iter().position(|h| h.height > last_stored).unwrap_or(merged.len()),
+                );
+            }
+            merged
+        }
+        _ => headers.to_vec(),
+    };
+    let headers = &combined[..];
     let Some(first) = headers.first() else { return Ok(()) };
 
     let dir = super::chain_dir(network);
