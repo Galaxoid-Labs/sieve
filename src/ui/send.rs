@@ -52,6 +52,8 @@ pub enum SendMsg {
     Sent(Box<Result<String, String>>),
     /// Back to an empty form.
     Reset,
+    CopyTxid,
+    OpenExplorer,
 }
 
 #[derive(Debug)]
@@ -60,6 +62,9 @@ pub enum SendOutput {
     Plan(Box<Draft>),
     /// Sign and broadcast the plan already reviewed.
     Send { plan: Box<Plan>, password: Password },
+    /// Something worth saying once and not keeping. The toast overlay belongs
+    /// to the wallet page, which wraps this one.
+    Toast(String),
 }
 
 pub struct SendForm {
@@ -78,6 +83,8 @@ pub struct SendForm {
     /// password arriving. Public data — the signature is what needs a secret.
     plan: Option<Plan>,
     sent: Option<String>,
+    /// What the payment was, in words, kept for the screen that follows it.
+    sent_detail: Option<String>,
     from_model: gtk::StringList,
     from_labels: Vec<String>,
     /// Kept so the form can be emptied after a payment goes out.
@@ -154,6 +161,18 @@ impl SendForm {
             .then(|| format!("≈ ${:.2}", price.value_of(sats)))
     }
 
+    /// The transaction, shortened. The whole thing is 64 characters of hex
+    /// that nobody reads across; what it is for is recognising the row and
+    /// copying it, and Copy hands over all of it.
+    fn short_txid(&self) -> String {
+        self.sent.as_deref().map(shorten).unwrap_or_default()
+    }
+
+    fn explorer(&self) -> Option<String> {
+        let txid = self.sent.as_deref()?;
+        crate::ui::wallet_page::explorer_url(&self.network, txid)
+    }
+
     fn network(&self) -> bdk_wallet::bitcoin::Network {
         self.network
             .parse()
@@ -224,20 +243,71 @@ impl Component for SendForm {
 
                     // Sent.
                     adw::StatusPage {
-                        set_icon_name: Some("channel-secure-symbolic"),
+                        set_icon_name: Some("object-select-symbolic"),
                         set_title: "Payment sent",
                         #[watch]
                         set_visible: model.sent.is_some(),
+                        // What was sent, rather than the transaction id — that
+                        // is below, where it can be copied.
                         #[watch]
-                        set_description: model.sent.as_deref(),
+                        set_description: model.sent_detail.as_deref(),
 
                         #[wrap(Some)]
-                        set_child = &gtk::Button {
-                            set_label: "Done",
-                            set_halign: gtk::Align::Center,
-                            add_css_class: "pill",
-                            add_css_class: "suggested-action",
-                            connect_clicked => SendMsg::Reset,
+                        set_child = &gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 24,
+
+                            adw::PreferencesGroup {
+                                // Said plainly: a filter wallet has no mempool
+                                // to watch, so "sent" means handed to a peer,
+                                // and confirmation arrives with a block.
+                                set_description: Some(
+                                    "It will show as confirmed in Activity once it is in \
+                                     a block."
+                                ),
+
+                                adw::ActionRow {
+                                    set_title: "Transaction",
+                                    add_css_class: "property",
+                                    #[watch]
+                                    set_subtitle: &model.short_txid(),
+
+                                    add_suffix = &gtk::Button {
+                                        set_icon_name: "edit-copy-symbolic",
+                                        set_tooltip_text: Some("Copy the transaction id"),
+                                        set_valign: gtk::Align::Center,
+                                        add_css_class: "flat",
+                                        connect_clicked => SendMsg::CopyTxid,
+                                    },
+                                },
+
+                                #[name(explorer_row)]
+                                adw::ActionRow {
+                                    set_title: "View on mempool.space",
+                                    // The same disclosure the transaction
+                                    // detail makes: this names the transaction
+                                    // to someone else's server.
+                                    set_subtitle:
+                                        "Opens your browser, and tells the explorer you \
+                                         looked at this transaction",
+                                    set_subtitle_lines: 2,
+                                    set_activatable: true,
+                                    #[watch]
+                                    set_visible: model.explorer().is_some(),
+                                    add_suffix = &gtk::Image {
+                                        set_icon_name: Some("web-browser-symbolic"),
+                                    },
+                                    connect_activated => SendMsg::OpenExplorer,
+                                },
+                            },
+
+                            gtk::Button {
+                                set_label: "Done",
+                                set_halign: gtk::Align::Center,
+                                add_css_class: "pill",
+                                add_css_class: "suggested-action",
+                                connect_clicked => SendMsg::Reset,
+                            },
                         },
                     },
 
@@ -372,6 +442,7 @@ impl Component for SendForm {
             busy: false,
             plan: None,
             sent: None,
+            sent_detail: None,
             from_model: gtk::StringList::new(&[]),
             from_labels: Vec::new(),
             to_row: None,
@@ -534,6 +605,13 @@ impl Component for SendForm {
 
             SendMsg::Confirm(password) => {
                 let Some(plan) = self.plan.take() else { return };
+                self.sent_detail = Some(format!(
+                    "{} to {}",
+                    self.settings
+                        .denomination
+                        .format(plan.spend.to_sat(), &self.network),
+                    shorten(&plan.to),
+                ));
                 self.busy = true;
                 let _ = sender.output(SendOutput::Send {
                     plan: Box::new(plan),
@@ -552,8 +630,27 @@ impl Component for SendForm {
                 }
             }
 
+            SendMsg::CopyTxid => {
+                if let (Some(txid), Some(display)) =
+                    (self.sent.clone(), gtk::gdk::Display::default())
+                {
+                    display.clipboard().set_text(&txid);
+                    let _ = sender.output(SendOutput::Toast("Transaction id copied".into()));
+                }
+            }
+
+            SendMsg::OpenExplorer => {
+                if let Some(url) = self.explorer() {
+                    let sender = sender.clone();
+                    crate::ui::browser::open(&url, root, move |message| {
+                        let _ = sender.output(SendOutput::Toast(message));
+                    });
+                }
+            }
+
             SendMsg::Reset => {
                 self.sent = None;
+                self.sent_detail = None;
                 self.error = None;
                 self.plan = None;
                 self.max = false;
@@ -646,6 +743,21 @@ fn is_amount_character(c: char) -> bool {
     c.is_ascii_digit() || matches!(c, '.' | ',' | ' ' | '_' | '\'')
 }
 
+/// Enough of a long identifier to recognise it by, from both ends.
+///
+/// Both ends, not the first sixteen characters: an address or a transaction id
+/// is checked against another screen, and the differences that matter are as
+/// likely to be at the end.
+fn shorten(text: &str) -> String {
+    let count = text.chars().count();
+    if count <= 20 {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(10).collect();
+    let tail: String = text.chars().skip(count - 8).collect();
+    format!("{head}…{tail}")
+}
+
 /// Errors read better as sentences when they start like one.
 fn capitalise(message: &str) -> String {
     let mut chars = message.chars();
@@ -689,6 +801,17 @@ mod tests {
         for rejected in ['a', 'B', '-', '+', '/', 'e'] {
             assert!(!super::is_amount_character(rejected), "{rejected}");
         }
+    }
+
+    #[test]
+    fn long_identifiers_keep_both_ends() {
+        let txid = "f98553279c60cd0252082d71b7fdcb573ea3a47391dccbce0ffa001f589b19b1";
+        let short = super::shorten(txid);
+        assert!(short.starts_with("f98553279c"), "{short}");
+        assert!(short.ends_with("589b19b1"), "{short}");
+        assert!(short.chars().count() < 24, "{short}");
+        // Short enough to read whole, so it is left alone.
+        assert_eq!(super::shorten("abc"), "abc");
     }
 
     #[test]

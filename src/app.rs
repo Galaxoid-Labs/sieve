@@ -73,6 +73,7 @@ const ICONS: &[&str] = &[
     "go-previous-symbolic",
     "list-add-symbolic",
     "network-idle-symbolic",
+    "object-select-symbolic",
     "network-offline-symbolic",
     "network-wireless-symbolic",
     "open-menu-symbolic",

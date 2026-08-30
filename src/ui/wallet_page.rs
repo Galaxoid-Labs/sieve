@@ -89,6 +89,8 @@ pub struct TxRow {
     /// What that amount is worth now, if a price is on hand.
     fiat: Option<String>,
     incoming: bool,
+    /// Broadcast but not in a block yet.
+    pending: bool,
 }
 
 #[derive(Debug)]
@@ -116,6 +118,10 @@ impl FactoryComponent for TxRow {
                 } else {
                     "sieve-send-symbolic"
                 }),
+                // Accent, not warning: a payment waiting for a block is in
+                // progress, not in trouble. It recolours itself with the
+                // theme, which a hardcoded colour would not.
+                set_css_classes: if self.pending { &["accent"] } else { &[] },
             },
 
             add_suffix = &gtk::Box {
@@ -129,7 +135,12 @@ impl FactoryComponent for TxRow {
                     // has to be part of it rather than added separately.
                     // Direction carries the colour, so a glance at the column
                     // reads without parsing the sign.
-                    set_css_classes: if self.incoming {
+                    // Pending money is not settled money, so an incoming
+                    // one does not get the confident green until it is in a
+                    // block — the same rule coin selection now follows.
+                    set_css_classes: if self.pending {
+                        &["numeric", "heading", "dim-label"]
+                    } else if self.incoming {
                         &["numeric", "heading", "success"]
                     } else {
                         &["numeric", "heading", "dim-label"]
@@ -187,6 +198,7 @@ impl FactoryComponent for TxRow {
                 denomination.format(magnitude, &network)
             ),
             incoming,
+            pending: tx.height.is_none(),
             fiat: price.map(|p| format!("≈ ${:.2}", p.value_of(magnitude))),
             txid: tx.txid,
         }
@@ -1180,6 +1192,7 @@ impl Component for WalletPage {
             |out| match out {
                 SendOutput::Plan(draft) => WalletPageMsg::PlanSend(draft),
                 SendOutput::Send { plan, password } => WalletPageMsg::SendNow { plan, password },
+                SendOutput::Toast(message) => WalletPageMsg::Toast(message),
             },
         );
 
@@ -1530,39 +1543,12 @@ impl WalletPage {
         let launcher_parent = root.clone();
         let sender = sender.clone();
         explorer.connect_activated(move |_| {
-            let window = launcher_parent.root().and_downcast::<gtk::Window>();
             let sender = sender.clone();
-            let url = url.clone();
-            gtk::UriLauncher::new(&url).launch(
-                window.as_ref(),
-                None::<&gtk::gio::Cancellable>,
-                move |result| {
-                    if let Err(e) = result {
-                        // UriLauncher goes through the OpenURI portal, which is
-                        // right under a sandbox and the only thing that works
-                        // there — but it needs a portal backend answering, and
-                        // plenty of desktops have none. Fall back to the
-                        // handler every desktop does have.
-                        tracing::warn!(%e, "portal could not open the browser; trying xdg-open");
-                        match std::process::Command::new("xdg-open").arg(&url).spawn() {
-                            Ok(_) => return,
-                            Err(e) => {
-                                tracing::warn!(%e, "xdg-open failed too");
-                            }
-                        }
-
-                        // Nothing could open it, so hand over the link rather
-                        // than doing nothing visible at all.
-                        if let Some(display) = gtk::gdk::Display::default() {
-                            display.clipboard().set_text(&url);
-                        }
-                        sender.input(WalletPageMsg::Toast(
-                            "Could not open your browser — link copied".into(),
-                        ));
-                    }
-                },
-            );
+            crate::ui::browser::open(&url, &launcher_parent, move |message| {
+                sender.input(WalletPageMsg::Toast(message));
+            });
         });
+
         elsewhere.add(&explorer);
         page.add(&elsewhere);
         }
@@ -1607,7 +1593,7 @@ impl WalletPage {
 /// mempool.space serves mainnet at the root and test networks under a prefix.
 /// Getting this wrong sends someone to a page that says the transaction does
 /// not exist, which reads as "your wallet is lying" rather than "wrong site".
-fn explorer_url(network: &str, txid: &str) -> Option<String> {
+pub(crate) fn explorer_url(network: &str, txid: &str) -> Option<String> {
     match network {
         "bitcoin" => Some(format!("https://mempool.space/tx/{txid}")),
         // The test networks mempool.space actually serves.
