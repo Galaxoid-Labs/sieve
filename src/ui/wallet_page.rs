@@ -601,14 +601,28 @@ impl WalletPage {
             return label;
         };
         // From the birthday, or from wherever this wallet has already reached.
+        // The wallet's own height does not move during a scan — BDK's
+        // checkpoint advances when updates are applied, not while filters are
+        // coming in — so this is the size of the job, not what is left of it.
         let from = self
             .summary
             .as_ref()
             .map(|s| s.tip.max(birthday))
             .unwrap_or(birthday);
-        match chain.tip_height.saturating_sub(from) {
-            0 => label,
-            blocks => format!("{label} · {} blocks to check", thousands(blocks)),
+        let total = chain.tip_height.saturating_sub(from);
+        if total == 0 {
+            return label;
+        }
+
+        // What remains, taken from the progress fraction, so the number moves
+        // with the percentage beside it. A static total under a climbing
+        // percentage reads as a stuck counter.
+        match self.progress.fraction() {
+            Some(fraction) if fraction > 0.0 => {
+                let left = (total as f64 * (1.0 - fraction)).round() as u32;
+                format!("{label} · about {} blocks left", thousands(left))
+            }
+            _ => format!("{label} · {} blocks of history to check", thousands(total)),
         }
     }
 
