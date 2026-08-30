@@ -104,6 +104,10 @@ pub struct App {
 /// in the theme ships silently. Add to this list when adding an icon.
 /// How often the peer list may be re-read while connections are churning.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often to ask again when the node has gone quiet. Twenty seconds was
+/// long enough that peers which had joined minutes ago were still missing from
+/// the list.
+const TICK: std::time::Duration = std::time::Duration::from_secs(8);
 
 const ICONS: &[&str] = &[
     "bitcoin-logo",
@@ -889,6 +893,11 @@ impl Component for App {
                 self.balance_sats = Some(summary.balance_sats);
                 self.unlocked = true;
                 self.wallet.emit(WalletPageMsg::SetWatchOnly(watch_only));
+                if let Some(meta) = wallet::Meta::load(&paths) {
+                    // So the sync status can say how big the job is, rather
+                    // than only how far through it is.
+                    self.wallet.emit(WalletPageMsg::SetBirthday(meta.birthday_height));
+                }
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetLocked(false));
                 self.chooser.emit(ChooserMsg::Refresh);
@@ -1011,6 +1020,12 @@ impl Component for App {
             }
             AppCmd::Tick => {
                 self.check_tor(&sender);
+                // The peers separately from the chain. kyoto stops warning
+                // about connections once it has enough, so between the last
+                // warning and the next tick nothing was asking who is
+                // connected — and reading the chain, which used to be the only
+                // thing that asked, waits on a header.
+                self.read_peers(&sender);
                 sender.input(AppMsg::RefreshChain);
                 self.schedule_tick(&sender);
             }
@@ -1048,21 +1063,7 @@ impl Component for App {
                         // download is the slowest thing the node is doing. That
                         // is why the list used to stay empty until the sync had
                         // finished — precisely when it stopped being useful.
-                        // Throttled. This warning fires continuously while
-                        // the node is below its target, and rebuilding the
-                        // peer list on each one pegged the main thread with
-                        // widget churn.
-                        let due = self
-                            .peers_read
-                            .map(|last| last.elapsed() >= PEER_REFRESH)
-                            .unwrap_or(true);
-                        if due && let Some(session) = self.session.clone() {
-                            self.peers_read = Some(std::time::Instant::now());
-                            let generation = self.generation;
-                            sender.oneshot_command(async move {
-                                AppCmd::Peers { generation, peers: session.peers().await }
-                            });
-                        }
+                        self.read_peers(&sender);
                     }
                     Notice::Problem(message) => self.wallet.emit(WalletPageMsg::Note(message)),
                     Notice::Ignorable => {}
@@ -1248,7 +1249,7 @@ impl App {
             return;
         }
         sender.oneshot_command(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            tokio::time::sleep(TICK).await;
             AppCmd::Tick
         });
     }
@@ -1299,6 +1300,27 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Ask the node who is connected.
+    ///
+    /// Throttled: the connection warning fires continuously while the node is
+    /// below its target, and rebuilding the peer list on each one pegged the
+    /// main thread with widget churn.
+    fn read_peers(&mut self, sender: &ComponentSender<Self>) {
+        let due = self
+            .peers_read
+            .map(|last| last.elapsed() >= PEER_REFRESH)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        let Some(session) = self.session.clone() else { return };
+        self.peers_read = Some(std::time::Instant::now());
+        let generation = self.generation;
+        sender.oneshot_command(async move {
+            AppCmd::Peers { generation, peers: session.peers().await }
+        });
     }
 
     /// Notice if the Tor we started has gone away.

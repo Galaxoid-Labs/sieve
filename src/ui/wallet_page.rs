@@ -355,6 +355,9 @@ pub struct WalletPage {
     send: Controller<SendForm>,
     /// How connections are being made, when they go through Tor.
     tor: Option<String>,
+    /// The height this wallet scans from. What makes a sync long or short, and
+    /// the difference between "slow" and "working".
+    birthday: Option<u32>,
     /// Why nothing is connecting, when Tor is on and could not be started.
     tor_problem: Option<String>,
     /// The addresses currently in the list, so it is only rebuilt when they
@@ -392,6 +395,8 @@ pub enum WalletPageMsg {
     SetTor(Option<String>),
     /// The connected peers, arriving faster than the chain view can.
     SetPeers(Vec<crate::wallet::node::PeerInfo>),
+    /// The height this wallet scans from.
+    SetBirthday(u32),
     /// This wallet holds no keys: the device that does is what signs.
     SetWatchOnly(bool),
     /// Tor is on and could not be started, so nothing is connecting.
@@ -577,6 +582,33 @@ impl WalletPage {
                 format!("{blocks} · estimated {change:+.1}%")
             }
             None => blocks,
+        }
+    }
+
+    /// The sync status, with the size of the job it is working through.
+    ///
+    /// A percentage alone does not say whether this is a minute or an hour. A
+    /// wallet imported with an old birthday has a quarter of a million blocks
+    /// of filters to check, and knowing that is the difference between a slow
+    /// wallet and a broken one.
+    fn progress_label(&self) -> String {
+        let label = self.progress.label();
+        if !self.syncing() {
+            return label;
+        }
+
+        let (Some(birthday), Some(chain)) = (self.birthday, self.chain.as_ref()) else {
+            return label;
+        };
+        // From the birthday, or from wherever this wallet has already reached.
+        let from = self
+            .summary
+            .as_ref()
+            .map(|s| s.tip.max(birthday))
+            .unwrap_or(birthday);
+        match chain.tip_height.saturating_sub(from) {
+            0 => label,
+            blocks => format!("{label} · {} blocks to check", thousands(blocks)),
         }
     }
 
@@ -844,7 +876,7 @@ impl Component for WalletPage {
                 #[watch]
                 set_revealed: model.syncing() && !model.locked && model.tor_problem.is_none(),
                 #[watch]
-                set_title: &model.progress.label(),
+                set_title: &model.progress_label(),
             },
 
             // Tor was asked for and could not be had. Nothing is connecting,
@@ -1257,8 +1289,9 @@ impl Component for WalletPage {
 
                         adw::ActionRow {
                             set_title: "Status",
+                            set_subtitle_lines: 2,
                             #[watch]
-                            set_subtitle: &model.progress.label(),
+                            set_subtitle: &model.progress_label(),
 
                             add_suffix = &gtk::Spinner {
                                 set_valign: gtk::Align::Center,
@@ -1485,6 +1518,7 @@ impl Component for WalletPage {
             stack: None,
             send,
             tor: None,
+            birthday: None,
             tor_problem: None,
             peer_addresses: Vec::new(),
             distinct_peers: 0,
@@ -1597,6 +1631,8 @@ impl Component for WalletPage {
             }
             WalletPageMsg::SetTor(tor) => self.tor = tor,
 
+            WalletPageMsg::SetBirthday(height) => self.birthday = Some(height),
+
             WalletPageMsg::SetWatchOnly(watch_only) => {
                 self.send.emit(SendMsg::SetWatchOnly(watch_only));
             }
@@ -1663,6 +1699,7 @@ impl Component for WalletPage {
                 self.summary = None;
                 self.progress = Progress::Connecting;
                 self.peers = None;
+                self.birthday = None;
                 self.distinct_peers = 0;
                 self.peer_addresses.clear();
                 self.note = None;
