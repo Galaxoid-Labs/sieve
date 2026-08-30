@@ -346,6 +346,27 @@ impl Session {
             }
         }
 
+        // On a direct connection, seed from DNS ourselves rather than
+        // leaving it to the node.
+        //
+        // Handing kyoto a single remembered peer and letting it find the rest
+        // produced eight connections to one machine — every filter coming from
+        // one place, which is slow and is the opposite of what a
+        // filter-matching wallet is for. Its own DNS fallback only runs when
+        // its address book is empty, and one configured peer is enough to keep
+        // it from ever getting there.
+        //
+        // An ordinary DNS query answers with a couple of dozen addresses at
+        // once, where Tor's RESOLVE gives one, so this is cheap and it is
+        // where the diversity comes from.
+        if tor.is_none() {
+            let resolved = resolve_seeds_directly(network, REQUIRED_PEERS as usize * 3).await;
+            tracing::info!(count = resolved.len(), %network, "seeded peers from DNS");
+            for ip in resolved {
+                builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
+            }
+        }
+
         // Remembered peers last, after any seeded ones.
         for address in usable {
             if let Some(peer) = trusted_peer(&address) {
@@ -899,6 +920,44 @@ pub struct PeerInfo {
 }
 
 /// A peer address as a person would write it, rather than as Rust prints it.
+/// Ask the ordinary resolver for peers that serve compact filters.
+///
+/// The same hostnames and service-bit prefixes the Tor path uses — `x49` is
+/// `NODE_NETWORK | NODE_COMPACT_FILTERS` — but over plain DNS, where one query
+/// returns every address the seeder has rather than the single one Tor's
+/// RESOLVE gives back.
+async fn resolve_seeds_directly(
+    network: bdk_wallet::bitcoin::Network,
+    wanted: usize,
+) -> Vec<std::net::IpAddr> {
+    let port = match network {
+        bdk_wallet::bitcoin::Network::Bitcoin => 8333,
+        bdk_wallet::bitcoin::Network::Signet => 38333,
+        bdk_wallet::bitcoin::Network::Testnet => 18333,
+        _ => return Vec::new(),
+    };
+
+    let mut found: Vec<std::net::IpAddr> = Vec::new();
+    for host in crate::tor::seeds(&network.to_string()) {
+        if found.len() >= wanted {
+            break;
+        }
+        match tokio::net::lookup_host((host.as_str(), port)).await {
+            Ok(addresses) => {
+                for address in addresses {
+                    let ip = address.ip();
+                    if !found.contains(&ip) {
+                        found.push(ip);
+                    }
+                }
+            }
+            Err(e) => tracing::debug!(%host, %e, "a seed did not resolve"),
+        }
+    }
+    found.truncate(wanted);
+    found
+}
+
 /// One entry per machine, from kyoto's one entry per connection.
 fn distinct_peers(
     peers: Vec<(bdk_wallet::bitcoin::p2p::address::AddrV2, bdk_wallet::bitcoin::p2p::ServiceFlags)>,

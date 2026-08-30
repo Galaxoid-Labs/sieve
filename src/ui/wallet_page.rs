@@ -1697,8 +1697,11 @@ impl Component for WalletPage {
             WalletPageMsg::SetChain(chain) => {
                 if let Some(info) = &chain {
                     self.distinct_peers = info.peers.len();
-                    let addresses: Vec<String> =
-                        info.peers.iter().map(|peer| peer.address.clone()).collect();
+                    let addresses: Vec<String> = info
+                        .peers
+                        .iter()
+                        .map(|peer| format!("{}/{:?}", peer.address, peer.serves_filters))
+                        .collect();
                     if addresses != self.peer_addresses {
                         self.peer_addresses = addresses;
                         let mut guard = self.peers_list.guard();
@@ -1732,8 +1735,16 @@ impl Component for WalletPage {
                 // rows of widgets and building them again for an identical
                 // list is work the main thread cannot afford at the rate
                 // connection warnings arrive.
-                let addresses: Vec<String> =
-                    peers.iter().map(|peer| peer.address.clone()).collect();
+                //
+                // What a peer *serves* is part of that set, not just where it
+                // is. A peer's flags are unknown when it first connects and
+                // arrive later; comparing addresses alone left the row saying
+                // "has not said what it serves" about a peer that had since
+                // said exactly that.
+                let addresses: Vec<String> = peers
+                    .iter()
+                    .map(|peer| format!("{}/{:?}", peer.address, peer.serves_filters))
+                    .collect();
                 if addresses == self.peer_addresses {
                     return;
                 }
