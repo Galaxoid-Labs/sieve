@@ -686,7 +686,48 @@ pub struct ChainInfo {
     pub peers: Vec<PeerInfo>,
     /// Lowest fee rate the connected peers will relay, in sat/vB.
     pub min_relay_fee: Option<f64>,
+    /// The median of the last eleven block timestamps.
+    ///
+    /// Not a curiosity: this is the clock consensus actually uses. Timelocks
+    /// and BIP-113 are measured against it, and it can be well behind the
+    /// tip's own timestamp.
+    pub median_time_past: Option<u64>,
 }
+
+/// The block subsidy at a height, in satoshis.
+///
+/// Halves every 210,000 blocks and reaches zero after 33 of them, which is why
+/// this shifts rather than divides — a shift past the width is not defined the
+/// way the schedule is.
+pub fn subsidy_sats(height: u32) -> u64 {
+    let epoch = height / HALVING_INTERVAL;
+    if epoch >= 33 { 0 } else { 50 * 100_000_000 >> epoch }
+}
+
+/// The height of the next halving after this one.
+pub fn next_halving(height: u32) -> u32 {
+    (height / HALVING_INTERVAL + 1) * HALVING_INTERVAL
+}
+
+/// Everything the schedule has issued up to and including this height.
+///
+/// The schedule, not the chain: a few miners have claimed less than they were
+/// owed, so the real figure is slightly lower. Said as "by the schedule"
+/// wherever it is shown.
+pub fn issued_sats(height: u32) -> u64 {
+    let mut issued = 0u64;
+    let epoch = height / HALVING_INTERVAL;
+    for past in 0..epoch {
+        issued += HALVING_INTERVAL as u64 * subsidy_sats(past * HALVING_INTERVAL);
+    }
+    // Blocks are counted from zero, so the current epoch has one more than the
+    // remainder suggests.
+    let into_epoch = (height % HALVING_INTERVAL) as u64 + 1;
+    issued + into_epoch * subsidy_sats(height)
+}
+
+/// Blocks between halvings.
+pub const HALVING_INTERVAL: u32 = 210_000;
 
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
@@ -837,10 +878,71 @@ impl Session {
             crate::peers::remember(self.network, &addresses);
         }
 
+        // Eleven headers, which the node already holds in memory.
+        let mut recent = Vec::with_capacity(11);
+        for back in 0..11u32 {
+            let Some(height) = tip.height.checked_sub(back) else { break };
+            match self.requester.get_header(height).await {
+                Ok(Some(header)) => recent.push(header.header.time as u64),
+                _ => break,
+            }
+        }
+        if recent.len() == 11 {
+            recent.sort_unstable();
+            info.median_time_past = Some(recent[5]);
+        }
+
         if let Ok(rate) = self.requester.broadcast_min_feerate().await {
             info.min_relay_fee = Some(rate.to_sat_per_kwu() as f64 / 250.0);
         }
 
         Ok(info)
+    }
+}
+
+#[cfg(test)]
+mod issuance_tests {
+    use super::*;
+
+    /// Checked against the schedule everyone knows, because a wrong subsidy
+    /// would put a wrong halving date and a wrong supply figure on screen.
+    #[test]
+    fn the_subsidy_halves_on_schedule() {
+        assert_eq!(subsidy_sats(0), 50 * 100_000_000);
+        assert_eq!(subsidy_sats(209_999), 50 * 100_000_000);
+        assert_eq!(subsidy_sats(210_000), 25 * 100_000_000);
+        assert_eq!(subsidy_sats(420_000), 1_250_000_000);
+        assert_eq!(subsidy_sats(630_000), 625_000_000);
+        assert_eq!(subsidy_sats(840_000), 312_500_000, "the 2024 halving");
+        assert_eq!(subsidy_sats(1_050_000), 156_250_000);
+        // The schedule ends rather than going negative or wrapping.
+        assert_eq!(subsidy_sats(33 * HALVING_INTERVAL), 0);
+        assert_eq!(subsidy_sats(u32::MAX), 0);
+    }
+
+    #[test]
+    fn the_next_halving_is_the_next_multiple() {
+        assert_eq!(next_halving(0), 210_000);
+        assert_eq!(next_halving(839_999), 840_000);
+        assert_eq!(next_halving(840_000), 1_050_000);
+        assert_eq!(next_halving(964_726), 1_050_000);
+    }
+
+    #[test]
+    fn issuance_matches_the_known_figures() {
+        // The first halving: 210,000 blocks at 50, counting the genesis block.
+        assert_eq!(issued_sats(209_999), 210_000 * 50 * 100_000_000);
+
+        // Never more than the cap, at any height, ever.
+        assert!(issued_sats(u32::MAX) < 21_000_000 * 100_000_000);
+        assert!(issued_sats(33 * HALVING_INTERVAL) < 21_000_000 * 100_000_000);
+
+        // The 2024 halving left the schedule at 19,687,500 exactly.
+        assert_eq!(issued_sats(839_999), 1_968_750_000_000_000);
+
+        // And a little over twenty million by the height this was written
+        // against — the twenty-million mark falls in 2026, not before it.
+        let issued = issued_sats(964_726) as f64 / 100_000_000.0;
+        assert!((20_000_000.0..20_200_000.0).contains(&issued), "{issued}");
     }
 }

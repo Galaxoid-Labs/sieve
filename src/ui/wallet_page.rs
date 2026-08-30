@@ -286,6 +286,15 @@ fn format_relative(seen_at: Option<u64>) -> String {
 }
 
 /// A date, or nothing if the node never told us when.
+/// "40 minutes", "2 hours" — a gap, not a moment.
+fn short_duration(seconds: u64) -> String {
+    match seconds {
+        0..=90 => format!("{seconds} seconds"),
+        91..=5_400 => format!("{} minutes", seconds / 60),
+        _ => format!("{} hours", seconds / 3_600),
+    }
+}
+
 fn format_when(seen_at: Option<u64>) -> String {
     let Some(seconds) = seen_at else { return "Confirmed".into() };
     gtk::glib::DateTime::from_unix_local(seconds as i64)
@@ -554,6 +563,71 @@ impl WalletPage {
             Some(route) => route.clone(),
             None => "Direct — the peers you connect to see your IP address".into(),
         }
+    }
+
+    /// The clock consensus uses, which is not the tip's own timestamp.
+    fn median_time(&self) -> String {
+        let Some(chain) = &self.chain else { return "Not yet known".into() };
+        let Some(median) = chain.median_time_past else { return "Not yet known".into() };
+        let when = gtk::glib::DateTime::from_unix_local(median as i64)
+            .and_then(|d| d.format("%H:%M, %e %b"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "Not yet known".into());
+        match chain.tip_time {
+            // The gap is the interesting part: timelocks are measured against
+            // the median, so it being behind the tip is normal and worth
+            // seeing.
+            Some(tip) if tip > median => {
+                format!("{when} — {} behind the tip", short_duration(tip - median))
+            }
+            _ => when,
+        }
+    }
+
+    fn subsidy(&self) -> String {
+        let Some(chain) = &self.chain else { return "Not yet known".into() };
+        let Some(summary) = &self.summary else { return "Not yet known".into() };
+        let sats = crate::wallet::node::subsidy_sats(chain.tip_height);
+        format!(
+            "{} for each block mined",
+            self.settings.denomination.format(sats, &summary.network)
+        )
+    }
+
+    fn next_halving(&self) -> String {
+        let Some(chain) = &self.chain else { return "Not yet known".into() };
+        let at = crate::wallet::node::next_halving(chain.tip_height);
+        let remaining = at.saturating_sub(chain.tip_height);
+
+        // Estimated from the pace this wallet has actually measured, not from
+        // the ten-minute target, so the guess moves with the network.
+        let interval = chain.mean_interval.unwrap_or(600.0);
+        let seconds = remaining as f64 * interval;
+        let when = gtk::glib::DateTime::now_local()
+            .and_then(|now| now.add_seconds(seconds))
+            .and_then(|then| then.format("%b %Y"))
+            .map(|s| s.trim().to_string())
+            .ok();
+
+        match when {
+            Some(when) => format!(
+                "Block {} — {} blocks away, around {when}",
+                thousands(at),
+                thousands(remaining)
+            ),
+            None => format!("Block {} — {} blocks away", thousands(at), thousands(remaining)),
+        }
+    }
+
+    fn issued(&self) -> String {
+        let Some(chain) = &self.chain else { return "Not yet known".into() };
+        let Some(summary) = &self.summary else { return "Not yet known".into() };
+        let sats = crate::wallet::node::issued_sats(chain.tip_height);
+        let share = sats as f64 / (21_000_000.0 * 100_000_000.0) * 100.0;
+        format!(
+            "{} by the schedule — {share:.1}% of the 21 million",
+            self.settings.denomination.format(sats, &summary.network)
+        )
     }
 
     fn min_relay_fee(&self) -> String {
@@ -1200,6 +1274,13 @@ impl Component for WalletPage {
                             #[watch]
                             set_subtitle: &model.block_pace(),
                         },
+
+                        adw::ActionRow {
+                            set_title: "Median time",
+                            set_subtitle_lines: 2,
+                            #[watch]
+                            set_subtitle: &model.median_time(),
+                        },
                     },
 
                     adw::PreferencesGroup {
@@ -1231,6 +1312,32 @@ impl Component for WalletPage {
                             set_title: "Next adjustment",
                             #[watch]
                             set_subtitle: &model.retarget(),
+                        },
+                    },
+
+                    // Everything here is worked out from the height this
+                    // wallet has verified for itself. No server was asked.
+                    adw::PreferencesGroup {
+                        set_title: "Issuance",
+
+                        adw::ActionRow {
+                            set_title: "Block subsidy",
+                            #[watch]
+                            set_subtitle: &model.subsidy(),
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Next halving",
+                            #[watch]
+                            set_subtitle: &model.next_halving(),
+                            set_subtitle_lines: 2,
+                        },
+
+                        adw::ActionRow {
+                            set_title: "Coins issued",
+                            #[watch]
+                            set_subtitle: &model.issued(),
+                            set_subtitle_lines: 2,
                         },
                     },
 
