@@ -55,6 +55,8 @@ pub struct App {
     chain_tip: Option<u32>,
     /// What the last proxy check found, shown under the Tor switch.
     tor_status: Option<String>,
+    /// Whether that status is a failure, so it can be coloured like one.
+    tor_failed: bool,
     /// The proxy currently in use — the one Sieve found running, or the one it
     /// started. Nothing connects through Tor until this is set.
     tor_active: Option<crate::tor::Proxy>,
@@ -374,6 +376,7 @@ impl Component for App {
             fee_estimate: None,
             chain_tip: None,
             tor_status: None,
+            tor_failed: false,
             tor_active: None,
             session: None,
             chooser,
@@ -841,6 +844,7 @@ impl Component for App {
 
             AppCmd::TorReady(Ok(proxy)) => {
                 tracing::info!(%proxy, "Tor is ready");
+                self.tor_failed = false;
                 self.tor_active = Some(proxy);
                 self.tor_status = Some(format!("Connected through Tor at {proxy}"));
                 self.rebuild_preferences(&sender);
@@ -854,7 +858,13 @@ impl Component for App {
                 self.tor_active = None;
                 self.settings.tor = false;
                 self.settings.save();
-                self.tor_status = Some(crate::ui::send::capitalise(&message));
+                self.tor_failed = true;
+                let message = crate::ui::send::capitalise(&message);
+                // A switch that flips itself back and says nothing is a bug
+                // report waiting to happen. The dialog carries its own toasts,
+                // so this lands over the switch that just moved.
+                self.prefs.add_toast(adw::Toast::new(&message));
+                self.tor_status = Some(message);
                 self.rebuild_preferences(&sender);
             }
 
@@ -1020,6 +1030,7 @@ impl App {
     /// Slow — a first bootstrap can take half a minute — so it reports as it
     /// goes rather than leaving a switch mid-flip with nothing to show.
     fn ensure_tor(&mut self, sender: &ComponentSender<Self>) {
+        self.tor_failed = false;
         self.tor_status = Some("Starting Tor…".into());
         self.rebuild_preferences(sender);
 
@@ -1240,14 +1251,29 @@ impl App {
         }
         connection.add(&tor);
 
-        // Only worth showing once there is something to say about it.
-        if self.settings.tor || self.tor_status.is_some() {
+        // Always shown, because the useful case is the one where Tor is off:
+        // saying up front that there is no Tor on this machine beats letting
+        // the switch flip back and leaving someone to guess why.
+        {
             let status = adw::ActionRow::new();
             status.set_title("Proxy");
-            status.set_subtitle(
-                self.tor_status.as_deref().unwrap_or("Not checked yet"),
-            );
-            status.set_subtitle_lines(3);
+            status.set_subtitle(match self.tor_status.as_deref() {
+                Some(status) => status,
+                // Only the filesystem is consulted here — the main thread must
+                // not go opening sockets to find out.
+                None if crate::tor::daemon::find_binary().is_some() => {
+                    "Tor is on this machine. Sieve will start it when you switch this on."
+                }
+                None => {
+                    "No Tor found on this machine. Install it — on Arch, \
+                     `sudo pacman -S tor` — or use a packaged build of Sieve, which \
+                     carries its own."
+                }
+            });
+            status.set_subtitle_lines(4);
+            if self.tor_failed {
+                status.add_css_class("error");
+            }
 
             let check = gtk::Button::with_label("Check");
             check.set_valign(gtk::Align::Center);
