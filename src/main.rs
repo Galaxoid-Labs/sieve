@@ -86,18 +86,24 @@ fn main() {
          .mark-signet { color: alpha(#e01b24, 0.20); } \
          .mark-testnet { color: alpha(#33d17a, 0.20); } \
          .welcome-mark { \
-           font-size: 96px; \
+           font-size: 132px; \
            font-weight: 800; \
            color: #f7931a; \
-           text-shadow: 0 2px 24px alpha(#f7931a, 0.35); \
-           margin-bottom: 6px; \
+           text-shadow: 0 2px 28px alpha(#f7931a, 0.35); \
+           /* Tilted the way the logo is: the mark is a slanted B, and \
+              upright it reads as a currency sign in a sentence. */ \
+           transform: rotate(14deg); \
+           margin-bottom: 10px; \
          } \
          .welcome-name { \
            font-size: 34px; \
            font-weight: 800; \
            letter-spacing: 1px; \
          } \
-         .welcome-line { font-size: 1.05em; }",
+         .welcome-line { font-size: 1.05em; } \
+         /* Under the tagline, and quieter than it: same words at the same \
+            weight would make the reader choose between two claims. */ \
+         .welcome-note { font-size: 0.9em; opacity: 0.75; }",
     );
 
     // Sieve's own icons, compiled into the binary. Adwaita has no plain

@@ -270,7 +270,6 @@ impl Component for Onboarding {
 
                             gtk::Label {
                                 add_css_class: "welcome-line",
-                                add_css_class: "dim-label",
                                 set_label: "A privacy-focused Bitcoin wallet,\nbuilt on compact block filters",
                                 set_justify: gtk::Justification::Center,
                                 set_halign: gtk::Align::Center,
@@ -279,6 +278,7 @@ impl Component for Onboarding {
                             },
 
                             gtk::Label {
+                                add_css_class: "welcome-note",
                                 add_css_class: "dim-label",
                                 set_label: "The blockchain is checked here, on this machine. \
                                             No server is ever told which addresses are yours.",
