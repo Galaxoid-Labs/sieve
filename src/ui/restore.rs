@@ -181,7 +181,24 @@ impl Restore {
     /// choice is visible before importing.
     fn birthday_label(&self, index: u32) -> String {
         let checkpoint = self.birthday_for(index);
+        if checkpoint.height == 0 {
+            return format!("{} — every block since 2009", checkpoint.when);
+        }
         format!("{} — from block {}", checkpoint.when, checkpoint.height)
+    }
+
+    /// The choices offered, straight from the checkpoints they select.
+    fn birthday_choices(&self) -> Vec<String> {
+        wallet::checkpoints(self.network)
+            .iter()
+            .map(|c| {
+                if c.height == 0 {
+                    c.when.to_string()
+                } else {
+                    format!("{} or later", c.when)
+                }
+            })
+            .collect()
     }
 }
 
@@ -349,20 +366,25 @@ impl Component for Restore {
                     #[name(birthday_row)]
                     adw::ComboRow {
                         set_title: "Earliest possible payment",
-                        // Fixed choices, so selecting the network never resets
-                        // this and this never resets anything else.
-                        set_model: Some(&gtk::StringList::new(&[
-                            "Recently",
-                            "Within about a year",
-                            "One to two years ago",
-                            "Two to three years ago",
-                            "Three or more years ago",
-                            "I don't know",
-                        ])),
+                        // Built from the checkpoints themselves. These used to
+                        // be a hand-written list of phrases sitting alongside
+                        // the checkpoint table, and adding a checkpoint moved
+                        // every choice below it by one: "I don't know" quietly
+                        // became taproot activation, and a wallet older than
+                        // that would have found nothing with no way to tell.
+                        // One list now, so they cannot drift apart again.
+                        #[watch]
+                        #[block_signal(birthday_chosen)]
+                        set_model: Some(&gtk::StringList::new(
+                            &model.birthday_choices()
+                                .iter()
+                                .map(String::as_str)
+                                .collect::<Vec<_>>()
+                        )),
                         set_selected: 1,
                         connect_selected_notify[sender] => move |row| {
                             sender.input(RestoreMsg::BirthdayChanged(row.selected()));
-                        },
+                        } @birthday_chosen,
                     },
 
                     adw::ActionRow {
@@ -707,6 +729,59 @@ impl Component for Restore {
                 let _ = sender.output(RestoreOutput::Imported { paths, summary });
             }
             Err(message) => self.error = Some(message),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The choices and the checkpoints they select are one list, not two.
+    ///
+    /// They used to be two: a hand-written set of phrases beside the checkpoint
+    /// table. Adding a checkpoint shifted every choice below it, so "I don't
+    /// know" silently became taproot activation and a wallet older than that
+    /// found nothing — with the screen reporting exactly what was asked for.
+    #[test]
+    fn every_choice_selects_the_checkpoint_it_names() {
+        for network in [
+            bdk_wallet::bitcoin::Network::Bitcoin,
+            bdk_wallet::bitcoin::Network::Signet,
+        ] {
+            let form = Restore {
+                kind: CredentialKind::Hardware,
+                network,
+                birthday_index: 0,
+                busy: false,
+                error: None,
+                devices: Vec::new(),
+                device_index: 0,
+                looked: false,
+                scanning: false,
+                pending: None,
+            };
+
+            let choices = form.birthday_choices();
+            let checkpoints = wallet::checkpoints(network);
+            assert_eq!(
+                choices.len(),
+                checkpoints.len(),
+                "{network}: a choice for every checkpoint and no more"
+            );
+
+            for (index, checkpoint) in checkpoints.iter().enumerate() {
+                assert_eq!(
+                    form.birthday_for(index as u32).height,
+                    checkpoint.height,
+                    "{network}: choice {index} selects the wrong checkpoint"
+                );
+            }
+
+            // And the last choice is the whole chain, which is what "I don't
+            // know" has to mean.
+            let last = choices.len() as u32 - 1;
+            assert_eq!(form.birthday_for(last).height, 0, "{network}");
         }
     }
 }
