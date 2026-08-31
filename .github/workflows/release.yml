@@ -19,7 +19,7 @@ jobs:
     container: archlinux:base-devel
     steps:
       - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl systemd-libs
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: The tag, the manifest and the PKGBUILD must agree
         run: |
           manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -46,13 +46,26 @@ jobs:
   # job's purpose is not an artefact: it is proving the PKGBUILD still works
   # before it is pushed, because a broken one is broken for everybody who
   # tries until somebody notices.
+  # Two architectures everywhere below. `ubuntu-24.04-arm` is a native arm64
+  # runner: cross-compiling a GTK application means an arm64 sysroot with every
+  # development package in it, and emulation means hours per build, so native
+  # is the only one of the three that is simply arithmetic.
+  #
+  # Those runners are free for public repositories and need a paid plan for
+  # private ones. A private repository on the free plan will queue the arm jobs
+  # until they time out rather than failing quickly, which is worth knowing
+  # before a release is waited on.
+  # x86_64 only, and deliberately: Arch publishes no official aarch64 image
+  # (Arch Linux ARM is a separate project), and this job's purpose is to prove
+  # the PKGBUILD still builds and installs — the AUR compiles it on the user's
+  # own machine, whatever that machine is.
   arch:
     needs: check
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
       - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl systemd-libs namcap sudo
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: makepkg refuses to run as root, so it gets a user
         run: |
           useradd -m builder
@@ -74,7 +87,7 @@ jobs:
           udevadm verify /usr/lib/udev/rules.d/51-sieve-hardware.rules
       - name: What a reviewer would say about it
         run: namcap packaging/aur/*.pkg.tar.zst || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: arch-package
           path: packaging/aur/*.pkg.tar.zst
@@ -85,9 +98,17 @@ jobs:
   deb:
     needs: check
     runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         image: ['debian:trixie', 'ubuntu:24.04']
+        runner: ['ubuntu-latest', 'ubuntu-24.04-arm']
+        # Matches on `runner`, so it labels the four combinations above rather
+        # than adding to them.
+        include:
+          - { runner: 'ubuntu-latest', arch: amd64 }
+          - { runner: 'ubuntu-24.04-arm', arch: arm64 }
     container: ${{ matrix.image }}
     steps:
       - run: |
@@ -95,30 +116,37 @@ jobs:
           apt-get install -y curl build-essential pkg-config libgtk-4-dev \
             libadwaita-1-dev libsqlite3-dev libssl-dev libudev-dev
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           . "$HOME/.cargo/env"
           cargo install cargo-deb --locked
           cargo deb --locked
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: deb-${{ strategy.job-index }}
+          name: deb-${{ matrix.arch }}-${{ strategy.job-index }}
           path: target/debian/*.deb
 
   rpm:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # No other dimension, so each entry is a combination in its own right.
+        include:
+          - { runner: 'ubuntu-latest', arch: x86_64 }
+          - { runner: 'ubuntu-24.04-arm', arch: aarch64 }
     container: fedora:41
     steps:
       - run: dnf install -y cargo rust gtk4-devel libadwaita-devel sqlite-devel openssl-devel systemd-devel
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           cargo install cargo-generate-rpm --locked
           cargo build --release --locked
           cargo generate-rpm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: rpm
+          name: rpm-${{ matrix.arch }}
           path: target/generate-rpm/*.rpm
 
   publish:
@@ -132,7 +160,7 @@ jobs:
       SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
       SIGNING_KEY_PASSPHRASE: ${{ secrets.SIGNING_KEY_PASSPHRASE }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: artifacts }
       - name: One signature, over the checksums
         run: |
@@ -162,7 +190,7 @@ jobs:
         if: env.SIGNING_KEY == ''
         run: echo "::warning::No SIGNING_KEY set — publishing without a signature"
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           # `SHA256SUMS.asc` only exists when the step above ran, and a missing
           # file is not an error to this action.

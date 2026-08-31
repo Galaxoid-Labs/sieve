@@ -7,6 +7,61 @@ description = "A privacy-focused Bitcoin wallet for Linux"
 license = "MIT"
 repository = "https://github.com/Galaxoid-Labs/sieve"
 
+# What `cargo deb` and `cargo generate-rpm` build from. Without these both
+# tools produce a package containing the binary and nothing else: no launcher
+# entry, no icon, no udev rules — which installs cleanly and leaves somebody
+# with a wallet they cannot start from their desktop and a hardware signer
+# their user cannot see.
+
+[package.metadata.deb]
+maintainer = "Galaxoid Labs <jacob@galaxoidlabs.com>"
+license-file = ["LICENSE", "0"]
+section = "utils"
+priority = "optional"
+extended-description = """
+Sieve syncs by downloading BIP157/158 compact block filters and matching them
+locally, so no server is told which addresses belong to you. Every outbound
+connection can be routed through Tor."""
+# dpkg-shlibdeps reads the binary, which is the only list that cannot drift
+# from what it actually links — as a hand-written one already had.
+depends = "$auto"
+assets = [
+    ["target/release/sieve", "usr/bin/", "755"],
+    ["data/com.galaxoidlabs.Sieve.desktop", "usr/share/applications/", "644"],
+    ["data/icons/hicolor/16x16/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["data/icons/hicolor/24x24/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
+    ["data/icons/hicolor/32x32/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["data/icons/hicolor/48x48/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["data/icons/hicolor/64x64/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["data/icons/hicolor/128x128/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["data/icons/hicolor/256x256/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["data/icons/hicolor/512x512/apps/com.galaxoidlabs.Sieve.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    # Without this a hardware signer is visible only to root.
+    ["packaging/udev/51-sieve-hardware.rules", "usr/lib/udev/rules.d/", "644"],
+    ["README.md", "usr/share/doc/sieve/", "644"],
+    ["SECURITY.md", "usr/share/doc/sieve/", "644"],
+]
+
+[package.metadata.generate-rpm]
+# rpm's own find-requires reads the binary, as dpkg-shlibdeps does above.
+auto-req = "auto"
+assets = [
+    { source = "target/release/sieve", dest = "/usr/bin/sieve", mode = "755" },
+    { source = "data/com.galaxoidlabs.Sieve.desktop", dest = "/usr/share/applications/com.galaxoidlabs.Sieve.desktop", mode = "644" },
+    { source = "data/icons/hicolor/16x16/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/16x16/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "data/icons/hicolor/24x24/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/24x24/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "data/icons/hicolor/32x32/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/32x32/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "data/icons/hicolor/48x48/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/48x48/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "data/icons/hicolor/64x64/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/64x64/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "data/icons/hicolor/128x128/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/128x128/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "data/icons/hicolor/256x256/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/256x256/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "data/icons/hicolor/512x512/apps/com.galaxoidlabs.Sieve.png", dest = "/usr/share/icons/hicolor/512x512/apps/com.galaxoidlabs.Sieve.png", mode = "644" },
+    { source = "packaging/udev/51-sieve-hardware.rules", dest = "/usr/lib/udev/rules.d/51-sieve-hardware.rules", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/sieve/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/sieve/README.md", mode = "644", doc = true },
+    { source = "SECURITY.md", dest = "/usr/share/doc/sieve/SECURITY.md", mode = "644", doc = true },
+]
+
 [dependencies]
 # UI. `libadwaita` makes RelmApp build an adw::Application; `gnome_46` pins
 # libadwaita 1.5 as the baseline (see CLAUDE.md before raising it).

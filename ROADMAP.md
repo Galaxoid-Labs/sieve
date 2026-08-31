@@ -428,8 +428,19 @@ and the order of work.
       want of a remote.
 - [ ] Install the icon and desktop entry properly: the gresource is for the app's own use and
       does nothing for the desktop's icon theme.
-- [ ] `cargo-deb` and `cargo-generate-rpm` metadata, built in containers of the oldest target
-      of each family.
+- [x] `cargo-deb` and `cargo-generate-rpm` metadata. Without it both tools produced a package
+      holding the binary and nothing else — no launcher entry, no icon, no udev rules — which
+      installs cleanly and leaves somebody with a wallet they cannot start and a signer their
+      user cannot see. Dependencies come from `dpkg-shlibdeps` and rpm's `find-requires`
+      rather than a hand-written list, which is the only list that cannot drift from what the
+      binary links; a hand-written one already had.
+- [x] Both architectures. `.deb` for x86_64 and aarch64 across Debian and Ubuntu, `.rpm` for
+      both, on native arm runners — cross-compiling a GTK application means an arm64 sysroot
+      with every development package in it, and emulation means hours. The Arch job stays
+      x86_64: there is no official Arch aarch64 image, and that job exists to prove the
+      PKGBUILD builds rather than to ship a binary.
+- [ ] Built in containers of the oldest supported release of each family, which is what the
+      version floor is checked against.
 - [ ] Verify the libadwaita 1.5 floor against real containers. Ubuntu 22.04 and Debian 12 are
       expected to fail it, and there is no fix short of lowering the baseline.
 - [ ] Make the signing key: a primary kept offline and a signing subkey in repository

@@ -20,7 +20,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # GTK 4 and libadwaita are needed to *compile*, not only to run: the
       # bindings link against them. Ubuntu's libadwaita is well above the 1.5
@@ -38,7 +38,7 @@ jobs:
 
       # Keyed on the lock file, so a dependency change is the only thing that
       # pays for a cold build.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -59,7 +59,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
