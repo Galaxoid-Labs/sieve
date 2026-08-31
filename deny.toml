@@ -1,0 +1,53 @@
+# Policy for `cargo deny check`: what may be depended on, and from where.
+#
+# Sieve links three hundred crates it did not write, in a program that handles
+# money. This file is the standing decision about that, so a new dependency is
+# a choice somebody makes rather than something that arrives with a `cargo add`.
+
+[advisories]
+# Anything RustSec knows about fails the check. Yanked crates too: a yank is
+# usually the author saying "not this one".
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive only, with two deliberate exceptions noted below. Anything not on
+# this list stops the build and gets read before it is added.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "MITNFA",
+    "CDLA-Permissive-2.0",
+    # Weak, file-level copyleft: it reaches modified MPL files and not the
+    # program that links them. Sieve modifies neither.
+    #   option-ext  0.2.0   (a dependency of `directories`)
+    #   serialport  4.10.0  (how async-hwi talks to a Specter)
+    "MPL-2.0",
+]
+# Several crates offer a choice that includes a licence Sieve will not take —
+# `unescaper` is "MIT OR GPL-3.0-only", `r-efi` includes LGPL. Taking the
+# permissive half is the point of a disjunction, and this says so explicitly
+# rather than by accident.
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of the same crate is usually harmless and occasionally means
+# two copies of a cryptographic implementation, which is worth seeing.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Everything comes from crates.io today, and this keeps it that way: a git
+# dependency is a supply chain with no index, no yank mechanism and no
+# advisory database behind it.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

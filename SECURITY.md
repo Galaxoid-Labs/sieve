@@ -135,12 +135,44 @@ more people can read than the wallet file.
 - **The balance at `debug`.** The most sensitive number the app holds that is
   not a key. Now a transaction count.
 
-## Known gaps
+## The dependencies
 
-- **No dependency audit.** 309 crates, and neither `cargo-audit` nor
-  `cargo-deny` is installed or run in CI. This is the largest unexamined
-  surface in the project and the cheapest to start examining.
+310 crates, audited with `cargo-audit` and governed by `deny.toml`. Both were
+run for the first time in the same pass that produced this document.
+
+**`cargo audit`: no vulnerabilities.** 310 crates against 1,226 RustSec
+advisories, no warnings, nothing yanked.
+
+**`cargo deny check`: advisories ok, bans ok, licenses ok, sources ok.**
+
+`deny.toml` is the standing decision rather than a rubber stamp, and three
+parts of it are worth reading:
+
+- **Every dependency comes from crates.io.** No git dependencies, no alternate
+  registries — checked, and now enforced. A git dependency is a supply chain
+  with no index, no yank mechanism and no advisory database behind it.
+- **Permissive licences only**, listed by name. Two MPL-2.0 crates are allowed
+  deliberately (`option-ext`, and `serialport` — how a Specter is spoken to);
+  MPL's copyleft reaches modified MPL files and not the program linking them,
+  and Sieve modifies neither. `unescaper` offers "MIT OR GPL-3.0-only" and
+  Sieve takes the MIT half, which is what a disjunction is for. A licence not
+  on the list stops the check and gets read.
+- **Duplicate versions warn rather than fail**, because the warning is the
+  point. Today it reports four versions of `bitcoin_hashes` (0.13, 0.14, 0.15,
+  0.20) and two of `rand_core` (0.6, 0.10), pulled in by different parts of
+  the Bitcoin stack. Four copies of a hashing implementation is not a
+  vulnerability, and it is exactly the shape of thing worth seeing rather than
+  hiding — which is why the setting is `warn` and not `allow`.
+
+Neither tool runs in CI yet, because there is no CI yet; `PACKAGING.md` puts
+both in the release workflow, where a tag that fails an audit should not
+produce packages.
+
+## Known gaps
 - **No reproducible build**, so a binary cannot be checked against this source.
+- **The audit is a snapshot.** It passed on the day this was written; an
+  advisory published tomorrow makes it stale, which is the argument for
+  running it on every release rather than reading this paragraph.
 - **No review by anybody else.** The vault format and the signing path are the
   two places where that matters most.
 - **`unsafe`** appears in two files: `main.rs` (three libc calls for
