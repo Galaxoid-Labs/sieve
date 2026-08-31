@@ -365,6 +365,12 @@ pub enum AppMsg {
         cancel: bool,
     },
     /// Write every label out as a BIP-329 file, or read one in.
+    /// Show this wallet's public descriptors, and offer to save them.
+    ShowDescriptors,
+    SaveDescriptors,
+    /// Say something over the preferences dialog, which is where the actions
+    /// that raise it are.
+    PrefsToast(String),
     ExportLabels,
     ImportLabels,
     LabelFile {
@@ -1083,6 +1089,137 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetLabels(Box::new(labels)));
             }
 
+            AppMsg::ShowDescriptors => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                let pairs = match wallet::descriptors(&paths) {
+                    Ok(pairs) => pairs,
+                    Err(e) => {
+                        self.prefs
+                            .add_toast(adw::Toast::new(&format!("Cannot read them: {e}")));
+                        return;
+                    }
+                };
+
+                let dialog = adw::AlertDialog::new(
+                    Some("Wallet descriptors"),
+                    Some(
+                        "The public half of this wallet. These name every address it will \
+                         ever use and cannot spend from any of them, so they are safe to \
+                         keep anywhere the recovery phrase is not.\n\nBoth lines of a path \
+                         are needed: a wallet restored from the receiving one alone would \
+                         not see its own change.",
+                    ),
+                );
+                dialog.add_response("close", "Close");
+                dialog.add_response("save", "Save…");
+                dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("close"));
+                dialog.set_close_response("close");
+
+                let list = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                for pair in &pairs {
+                    let group = adw::PreferencesGroup::new();
+                    group.set_title(pair.script_type.label());
+                    for (title, descriptor) in
+                        [("Receiving", &pair.receiving), ("Change", &pair.change)]
+                    {
+                        let row = adw::ActionRow::new();
+                        row.set_title(title);
+                        row.set_use_markup(true);
+                        row.set_subtitle(&format!(
+                            "<tt>{}</tt>",
+                            gtk::glib::markup_escape_text(descriptor)
+                        ));
+                        row.set_subtitle_lines(6);
+                        row.add_css_class("full-contrast");
+
+                        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+                        copy.set_valign(gtk::Align::Center);
+                        copy.add_css_class("flat");
+                        copy.set_tooltip_text(Some("Copy this descriptor"));
+                        {
+                            let descriptor = descriptor.clone();
+                            let sender = sender.clone();
+                            copy.connect_clicked(move |button| {
+                                button.display().clipboard().set_text(&descriptor);
+                                sender.input(AppMsg::PrefsToast("Descriptor copied".into()));
+                            });
+                        }
+                        row.add_suffix(&copy);
+                        group.add(&row);
+                    }
+                    list.append(&group);
+                }
+
+                let scroller = gtk::ScrolledWindow::new();
+                scroller.set_child(Some(&list));
+                scroller.set_propagate_natural_height(true);
+                scroller.set_max_content_height(420);
+                dialog.set_extra_child(Some(&scroller));
+
+                {
+                    let sender = sender.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response == "save" {
+                            sender.input(AppMsg::SaveDescriptors);
+                        }
+                    });
+                }
+                if let Some(window) = self.nav.root() {
+                    dialog.present(Some(&window));
+                }
+            }
+
+            AppMsg::SaveDescriptors => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                let Some(window) = self.nav.root().and_downcast::<gtk::Window>() else {
+                    return;
+                };
+                let pairs = match wallet::descriptors(&paths) {
+                    Ok(pairs) => pairs,
+                    Err(e) => {
+                        self.prefs
+                            .add_toast(adw::Toast::new(&format!("Cannot read them: {e}")));
+                        return;
+                    }
+                };
+
+                // The descriptors and nothing else. Anything wrapped around
+                // them would be a format somebody has to learn; these paste
+                // into Bitcoin Core, Sparrow or anything else that reads
+                // BIP-380, which is all of them.
+                let mut text = String::new();
+                for pair in &pairs {
+                    text.push_str(&format!("{}\n", pair.receiving));
+                    text.push_str(&format!("{}\n", pair.change));
+                }
+
+                let dialog = gtk::FileDialog::builder()
+                    .title("Save descriptors")
+                    .modal(true)
+                    .build();
+                dialog.set_initial_name(Some("descriptors.txt"));
+
+                let sender = sender.clone();
+                dialog.save(Some(&window), gtk::gio::Cancellable::NONE, move |file| {
+                    if let Ok(file) = file
+                        && let Some(path) = file.path()
+                    {
+                        sender.input(match std::fs::write(&path, &text) {
+                            Ok(()) => AppMsg::PrefsToast(format!(
+                                "Saved {} descriptors",
+                                text.lines().count()
+                            )),
+                            Err(e) => AppMsg::PrefsToast(format!("Could not save: {e}")),
+                        });
+                    }
+                });
+            }
+
             AppMsg::ExportLabels | AppMsg::ImportLabels => {
                 let importing = matches!(msg, AppMsg::ImportLabels);
                 let Some(window) = self.nav.root().and_downcast::<gtk::Window>() else {
@@ -1141,6 +1278,10 @@ impl Component for App {
                         crate::ui::send::capitalise(&e.to_string())
                     }
                 };
+                self.prefs.add_toast(adw::Toast::new(&message));
+            }
+
+            AppMsg::PrefsToast(message) => {
                 self.prefs.add_toast(adw::Toast::new(&message));
             }
 
@@ -3095,6 +3236,26 @@ impl App {
                 phrase.connect_activated(move |_| sender.input(AppMsg::ShowRecoveryPhrase));
             }
             this.add(&phrase);
+
+            // The other half of a backup, and the half that risks nothing. A
+            // descriptor names every address this wallet will ever have and
+            // cannot spend from any of them — which is why this row, unlike
+            // the one above it, is available on a watch-only wallet and while
+            // locked.
+            let descriptors = adw::ActionRow::new();
+            descriptors.set_title("Wallet descriptors");
+            descriptors.set_subtitle(
+                "The public half: enough to recreate this wallet watch-only anywhere, and \
+                 not enough to spend from it",
+            );
+            descriptors.set_subtitle_lines(3);
+            descriptors.set_activatable(true);
+            descriptors.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            {
+                let sender = sender.clone();
+                descriptors.connect_activated(move |_| sender.input(AppMsg::ShowDescriptors));
+            }
+            this.add(&descriptors);
 
             // A wallet with no keys still has a balance and a history, and
             // until now nothing shut them: opening Sieve showed everything.

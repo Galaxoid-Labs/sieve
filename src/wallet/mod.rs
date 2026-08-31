@@ -1147,6 +1147,70 @@ pub fn import_wif(
     Summary::from_portfolio(&mut portfolio)
 }
 
+/// The public descriptors this wallet watches, one pair per derivation path.
+///
+/// The backup that risks nothing: a descriptor names every address the wallet
+/// will ever have and cannot spend from any of them. With one of these a
+/// wallet can be recreated watch-only anywhere, and with the recovery phrase
+/// as well it can be recreated outright — without the guessing that a phrase
+/// alone requires about which script types and which account were used.
+///
+/// No password, and no vault: these are read from the databases, which hold
+/// public descriptors and nothing secret. A watch-only wallet exports them
+/// exactly as a full one does.
+///
+/// Written in BIP-380's form, with its checksum, because that is what every
+/// other wallet already reads. There is no Sieve format here to learn.
+pub fn descriptors(paths: &Paths) -> Result<Vec<DescriptorPair>> {
+    let meta = Meta::load(paths).context("this wallet has no metadata file")?;
+    let portfolio = accounts::Portfolio::load(
+        data_dir(paths),
+        &meta.script_types,
+        meta.primary,
+        meta.network(),
+    )?;
+
+    let with_checksum = |descriptor: String| -> String {
+        match bdk_wallet::descriptor::checksum::calc_checksum(&descriptor) {
+            Ok(sum) => format!("{descriptor}#{sum}"),
+            // A descriptor without its checksum is still a descriptor, and
+            // most things that read one will compute it themselves.
+            Err(_) => descriptor,
+        }
+    };
+
+    Ok(portfolio
+        .accounts
+        .iter()
+        .map(|account| DescriptorPair {
+            script_type: account.script_type,
+            receiving: with_checksum(
+                account
+                    .wallet
+                    .public_descriptor(bdk_wallet::KeychainKind::External)
+                    .to_string(),
+            ),
+            change: with_checksum(
+                account
+                    .wallet
+                    .public_descriptor(bdk_wallet::KeychainKind::Internal)
+                    .to_string(),
+            ),
+        })
+        .collect())
+}
+
+/// One derivation path's pair of public descriptors.
+#[derive(Debug, Clone)]
+pub struct DescriptorPair {
+    pub script_type: accounts::ScriptType,
+    /// The addresses handed out.
+    pub receiving: String,
+    /// The addresses change comes back to. Both are needed: a wallet restored
+    /// from the first alone would not see its own change.
+    pub change: String,
+}
+
 /// Verify the password against the vault, then load every path watch-only.
 ///
 /// The secret is decrypted only to prove the password is right; the wallets
