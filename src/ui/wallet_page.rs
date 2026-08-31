@@ -1541,6 +1541,11 @@ impl Component for WalletPage {
                             #[name(search_bar)]
                             gtk::SearchBar {
                                 set_margin_top: 6,
+                                // GTK dresses a search bar for docking under a
+                                // header bar: a filled box with a line along
+                                // the bottom. In the middle of a page that
+                                // reads as a stray rectangle around the field.
+                                add_css_class: "bare-search",
 
                                 #[wrap(Some)]
                                 #[name(search_entry)]

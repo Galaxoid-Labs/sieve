@@ -114,7 +114,16 @@ const GLOBAL_CSS: &str = ".qr-ground { background-color: #ffffff; border-radius:
      .welcome-note { font-size: 0.85em; font-style: italic; opacity: 0.45; } \
      /* Adwaita dims every row subtitle, which is right everywhere except \
         where the subtitle carries the number a decision turns on. */ \
-     .full-contrast .subtitle { opacity: 1; }";
+     .full-contrast .subtitle { opacity: 1; } \
+     /* A search bar in page content, without the chrome GTK gives one that \
+        docks under a header bar: `searchbar > revealer > box` in Adwaita \
+        carries a background colour and a bottom border, and together they \
+        draw a box around a field that needs none. */ \
+     .bare-search > revealer > box { \
+       background: none; \
+       border-width: 0; \
+       padding: 0; \
+     }";
 
 fn main() {
     if answered_on_the_command_line() {
