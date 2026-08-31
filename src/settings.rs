@@ -322,6 +322,12 @@ mod tests {
         assert!(Denomination::Btc.parse("lots").is_err());
         assert!(Denomination::Btc.parse("21000001").is_err());
         assert!(Denomination::Sats.parse("2100000000000001").is_err());
+
+        // Big enough that whole * 100_000_000 leaves u64 before the supply
+        // cap below it is ever reached. A wrap here would turn an impossible
+        // amount into a plausible one.
+        assert!(Denomination::Btc.parse("184467440738").is_err());
+        assert!(Denomination::Btc.parse("18446744073709551616").is_err());
     }
 
     #[test]
@@ -379,5 +385,19 @@ mod tests {
     fn toggling_twice_returns() {
         assert_eq!(Denomination::Sats.toggled().toggled(), Denomination::Sats);
         assert_eq!(Denomination::Btc.toggled(), Denomination::Sats);
+
+        // And it has to change what is on screen, which is the whole reason
+        // the balance is pressable. A toggle between two names for the same
+        // number would satisfy the lines above and nothing else.
+        let sats = Denomination::Sats.format(53_713, "bitcoin");
+        let btc = Denomination::Sats.toggled().format(53_713, "bitcoin");
+        assert_ne!(sats, btc, "toggling must change what the balance reads");
+        assert_eq!(
+            Denomination::Sats
+                .toggled()
+                .toggled()
+                .format(53_713, "bitcoin"),
+            sats
+        );
     }
 }

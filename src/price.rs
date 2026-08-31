@@ -138,8 +138,6 @@ mod tests {
         assert_eq!(Price { usd: 78_500.0 }.sats_for(-5.0), None);
     }
 
-    use super::*;
-
     #[test]
     fn dollars_are_grouped() {
         assert_eq!(usd(0.0), "0.00");

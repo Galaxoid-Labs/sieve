@@ -1107,6 +1107,48 @@ impl std::fmt::Debug for Session {
 mod tests {
     use super::*;
 
+    /// A checkpoint the resume can start from, or refuse to.
+    fn meta_scanned(to: Option<u32>, hash: Option<&str>) -> Meta {
+        let mut meta = Meta::new(
+            bdk_wallet::bitcoin::Network::Signet,
+            crate::wallet::checkpoints(bdk_wallet::bitcoin::Network::Signet)[0],
+            vec![crate::wallet::accounts::ScriptType::Taproot],
+            crate::wallet::accounts::ScriptType::Taproot,
+            None,
+            false,
+        );
+        meta.scanned_to = to;
+        meta.scanned_hash = hash.map(str::to_owned);
+        meta
+    }
+
+    #[test]
+    fn a_scan_resumes_only_from_a_point_it_can_prove() {
+        // This is where the next scan starts, and the node will not take a
+        // height without the hash that belongs to it. Every way of being
+        // unsure has to come back as "start at the birthday": a scan that
+        // begins too late skips blocks, and skipped blocks are money this
+        // wallet never learns about.
+        let birthday = crate::wallet::checkpoints(bdk_wallet::bitcoin::Network::Signet)[0].height;
+        let real = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6";
+
+        // Nothing recorded yet.
+        assert!(resume_point(&meta_scanned(None, Some(real))).is_none());
+        // A height with no hash to go with it.
+        assert!(resume_point(&meta_scanned(Some(birthday + 5_000), None)).is_none());
+        // A hash that is not one.
+        assert!(resume_point(&meta_scanned(Some(birthday + 5_000), Some("nonsense"))).is_none());
+        // At or behind the birthday, which is where a scan would start anyway.
+        assert!(resume_point(&meta_scanned(Some(birthday), Some(real))).is_none());
+        assert!(resume_point(&meta_scanned(Some(birthday - 1), Some(real))).is_none());
+
+        // And a real one, which is the only case that resumes.
+        let ahead = meta_scanned(Some(birthday + 5_000), Some(real));
+        let (height, hash) = resume_point(&ahead).expect("a proven point must be used");
+        assert_eq!(height, birthday + 5_000);
+        assert_eq!(hash.to_string(), real);
+    }
+
     #[test]
     fn heights_are_grouped() {
         assert_eq!(thousands(0), "0");

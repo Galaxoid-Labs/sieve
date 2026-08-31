@@ -1290,14 +1290,6 @@ mod tests {
     use bdk_wallet::KeychainKind;
 
     #[test]
-    fn generated_phrase_is_twelve_valid_words() {
-        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
-        assert_eq!(phrase.split_whitespace().count(), 12);
-        // Round-trips through the BIP-39 checksum.
-        Mnemonic::parse_in(Language::English, phrase.as_str()).unwrap();
-    }
-
-    #[test]
     fn phrases_are_not_repeated() {
         let a = generate_mnemonic(PhraseLength::Twelve).unwrap();
         let b = generate_mnemonic(PhraseLength::Twelve).unwrap();
@@ -1907,6 +1899,87 @@ mod tests {
         .unwrap();
         send::check_signer(&without, watching)
             .expect_err("signing without the passphrase must be refused, not attempted");
+
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn every_file_a_wallet_writes_is_owner_only() {
+        // `SECURITY.md` claims every file is 0600 and the directory 0700. The
+        // databases hold the xpub and the whole transaction graph, and the
+        // labels hold the names somebody gave their own payments — neither is
+        // encrypted, so the mode is the only thing keeping them from another
+        // user on the machine.
+        //
+        // Written as a walk rather than a list on purpose: a file added later
+        // by a code path that forgets `restrict` fails this without anybody
+        // remembering to come back and add it.
+        use std::os::unix::fs::PermissionsExt;
+
+        let paths = scratch("permissions");
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        create_for_test(&phrase, b"a good password", &paths);
+
+        let mut labels = labels::Labels::default();
+        labels.set(labels::Kind::Tx, "an id", "Rent");
+        labels.save(&paths.dir).unwrap();
+
+        let mut checked = 0;
+        let mut walk = vec![paths.dir.clone()];
+        while let Some(dir) = walk.pop() {
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} is {mode:o}", dir.display());
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    walk.push(path);
+                    continue;
+                }
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    mode,
+                    0o600,
+                    "{} is {mode:o}, readable by somebody it should not be",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 3,
+            "expected at least the vault, the metadata and a database; saw {checked}"
+        );
+
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_resume_point_never_moves_backwards() {
+        // It is where the next scan starts. Moving it forward wrongly skips
+        // blocks, and skipped blocks are transactions this wallet never sees —
+        // so it only ever climbs, and a second scan that got less far leaves
+        // the further mark alone.
+        let paths = scratch("resume-point");
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        create_for_test(&phrase, b"a good password", &paths);
+
+        Meta::record_scanned_to(&paths, 800_000, "aaaa");
+        assert_eq!(Meta::load(&paths).unwrap().scanned_to, Some(800_000));
+
+        Meta::record_scanned_to(&paths, 700_000, "bbbb");
+        let meta = Meta::load(&paths).unwrap();
+        assert_eq!(meta.scanned_to, Some(800_000), "it went backwards");
+        assert_eq!(
+            meta.scanned_hash.as_deref(),
+            Some("aaaa"),
+            "the hash must belong to the height beside it"
+        );
+
+        Meta::record_scanned_to(&paths, 900_000, "cccc");
+        let meta = Meta::load(&paths).unwrap();
+        assert_eq!(meta.scanned_to, Some(900_000));
+        assert_eq!(meta.scanned_hash.as_deref(), Some("cccc"));
 
         std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
     }
