@@ -25,6 +25,29 @@ use std::path::PathBuf;
 pub struct Palette {
     /// What the desktop uses for primary buttons, selection and focus.
     pub accent: String,
+    /// The surfaces, when the theme's own order them the way Adwaita does.
+    pub surfaces: Option<Surfaces>,
+}
+
+/// The surfaces a theme is built from, and the text that sits on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Surfaces {
+    /// The ordinary window.
+    pub window: String,
+    /// Behind a list or a document. Adwaita puts this *away* from the raised
+    /// surfaces: darker than the window in a dark theme, level with it in a
+    /// light one.
+    pub view: String,
+    /// Header bars, sidebars, dialogs and popovers — the surfaces that stand
+    /// apart from the window. Lighter than it in a dark theme, darker in a
+    /// light one, which is how Adwaita does it in both.
+    pub raised: String,
+    /// Text on all of them.
+    pub text: String,
+    /// Which way this set runs. Applying a dark theme's surfaces under a light
+    /// colour scheme puts light text on dark backgrounds and neither belongs
+    /// to the other, so they are only used when the two agree.
+    pub dark: bool,
 }
 
 /// Where Omarchy keeps the theme currently applied, under a state directory.
@@ -72,12 +95,72 @@ fn desktop_in(state: &std::path::Path) -> Option<Palette> {
 /// Hand-parsed rather than pulling in a TOML crate for one key: a dependency
 /// is a decision, `deny.toml` says so, and this file is four tokens wide.
 fn parse(text: &str) -> Option<Palette> {
-    let accent = text.lines().find_map(|line| {
-        let (key, value) = line.split_once('=')?;
-        (key.trim() == "accent").then(|| value.trim().trim_matches('"').to_owned())
-    })?;
+    let value = |wanted: &str| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == wanted).then(|| value.trim().trim_matches('"').to_owned())
+        })
+    };
 
-    is_hex(&accent).then_some(Palette { accent })
+    let accent = value("accent").filter(|hex| is_hex(hex))?;
+    Some(Palette {
+        accent,
+        surfaces: surfaces(&value),
+    })
+}
+
+/// The surfaces, mapped according to which way the theme runs.
+///
+/// The palette's *names* cannot be trusted across both modes — in
+/// catppuccin-latte `lighter_background` is `#dce0e8` against a `#eff1f5`
+/// background, so the "lighter" one is darker. They describe a dark theme's
+/// structure. The *ordering* is reliable in both, and it is what Adwaita cares
+/// about: a raised surface stands apart from the window, which means lighter
+/// in a dark theme and darker in a light one.
+fn surfaces(value: &impl Fn(&str) -> Option<String>) -> Option<Surfaces> {
+    let dark = match value("mode")?.as_str() {
+        "dark" => true,
+        "light" => false,
+        _ => return None,
+    };
+
+    let hex = |key: &str| value(key).filter(|hex| is_hex(hex));
+    let window = hex("background")?;
+    let found = if dark {
+        Surfaces {
+            view: hex("dark_background")?,
+            raised: hex("lighter_background")?,
+            window,
+            text: hex("foreground")?,
+            dark,
+        }
+    } else {
+        // A light theme's palette has nothing lighter than its background, so
+        // the window is also the view — as in Adwaita, where the two are a
+        // percent apart — and the raised surfaces step down from it.
+        Surfaces {
+            view: window.clone(),
+            raised: hex("dark_background")?,
+            window,
+            text: hex("foreground")?,
+            dark,
+        }
+    };
+
+    // Shadows and separators are drawn assuming the window sits between its
+    // view and its raised surfaces. A theme whose colours do not order that
+    // way would look inside out, so it keeps Adwaita's and contributes only
+    // its accent.
+    let lighter = |a: &str, b: &str| match (luminance(a), luminance(b)) {
+        (Some(a), Some(b)) => a < b,
+        _ => false,
+    };
+    let ordered = if dark {
+        lighter(&found.view, &found.window) && lighter(&found.window, &found.raised)
+    } else {
+        lighter(&found.raised, &found.window) && !lighter(&found.window, &found.view)
+    };
+    ordered.then_some(found)
 }
 
 /// `#rrggbb`, and nothing else. What goes into this string is written straight
@@ -92,12 +175,48 @@ impl Palette {
     /// Only `accent_bg_color` and the text colour that sits on it.
     /// `accent_color`, `theme_selected_bg_color` and the rest are defined by
     /// libadwaita in terms of `@accent_bg_color`, so they follow.
-    pub fn css(&self) -> String {
-        format!(
+    ///
+    /// `dark` is the colour scheme actually in force, which is the person's
+    /// Appearance choice rather than the desktop theme's own mode. When those
+    /// disagree — Light chosen while the desktop theme is dark — only the
+    /// accent is taken, and libadwaita's own light surfaces stand.
+    pub fn css(&self, dark: bool) -> String {
+        let mut css = format!(
             "@define-color accent_bg_color {};\n@define-color accent_fg_color {};\n",
             self.accent,
             self.readable_on_accent(),
-        )
+        );
+
+        // Card is deliberately absent: libadwaita defines it as white at 8%,
+        // an overlay that works on whatever is behind it. Naming a colour for
+        // it would only make it wrong.
+        if let Some(s) = self.surfaces.as_ref().filter(|s| s.dark == dark) {
+            for (name, colour) in [
+                ("window_bg_color", &s.window),
+                ("view_bg_color", &s.view),
+                ("headerbar_bg_color", &s.raised),
+                ("sidebar_bg_color", &s.raised),
+                ("secondary_sidebar_bg_color", &s.view),
+                ("dialog_bg_color", &s.raised),
+                ("popover_bg_color", &s.raised),
+                ("thumbnail_bg_color", &s.raised),
+            ] {
+                css.push_str(&format!("@define-color {name} {colour};\n"));
+            }
+            for name in [
+                "window_fg_color",
+                "view_fg_color",
+                "headerbar_fg_color",
+                "sidebar_fg_color",
+                "secondary_sidebar_fg_color",
+                "dialog_fg_color",
+                "popover_fg_color",
+                "thumbnail_fg_color",
+            ] {
+                css.push_str(&format!("@define-color {name} {};\n", s.text));
+            }
+        }
+        css
     }
 
     /// Black or white, whichever can be read on this accent.
@@ -189,7 +308,13 @@ mod tests {
 
     #[test]
     fn the_label_can_be_read_on_the_button() {
-        let on = |hex: &str| Palette { accent: hex.into() }.readable_on_accent();
+        let on = |hex: &str| {
+            Palette {
+                accent: hex.into(),
+                surfaces: None,
+            }
+            .readable_on_accent()
+        };
 
         // Every GNOME accent keeps white, as libadwaita intends — including
         // yellow, the lightest of them, which sits a thousandth under the
@@ -217,15 +342,108 @@ mod tests {
     }
 
     #[test]
-    fn the_stylesheet_says_only_what_it_means_to() {
+    fn an_accent_alone_touches_nothing_else() {
         let css = Palette {
             accent: "#89b4fa".into(),
+            surfaces: None,
         }
-        .css();
+        .css(true);
         assert!(css.contains("@define-color accent_bg_color #89b4fa;"));
-        // Everything else libadwaita derives from that one colour, so nothing
-        // else belongs here.
+        // With no surfaces, the only thing said is the accent — libadwaita
+        // derives the rest from it, and every background stays Adwaita's.
         assert!(!css.contains("window_bg_color"), "{css}");
         assert_eq!(css.lines().count(), 2);
+    }
+
+    #[test]
+    #[test]
+    fn a_light_theme_maps_the_other_way_up() {
+        // catppuccin-latte, where `lighter_background` (#dce0e8) is *darker*
+        // than `background` (#eff1f5) — the names describe a dark theme. The
+        // ordering is what is trusted: a raised surface steps away from the
+        // window, which is downwards in a light theme.
+        let latte = "mode = \"light\"\naccent = \"#1e66f5\"\nbackground = \"#eff1f5\"\n\
+                     dark_background = \"#e3e4e8\"\nlighter_background = \"#dce0e8\"\n\
+                     foreground = \"#4c4f69\"\n";
+        let css = parse(latte).unwrap().css(false);
+
+        assert!(
+            css.contains("@define-color window_bg_color #eff1f5;"),
+            "{css}"
+        );
+        assert!(
+            css.contains("@define-color headerbar_bg_color #e3e4e8;"),
+            "{css}"
+        );
+        assert!(
+            css.contains("@define-color window_fg_color #4c4f69;"),
+            "{css}"
+        );
+        // Nothing in a light palette is lighter than its background, so the
+        // view is the window — as in Adwaita, where the two are a percent
+        // apart.
+        assert!(
+            css.contains("@define-color view_bg_color #eff1f5;"),
+            "{css}"
+        );
+    }
+
+    #[test]
+    fn surfaces_are_left_alone_when_the_scheme_disagrees() {
+        // A dark desktop theme under a light colour scheme, or the reverse:
+        // taking the surfaces would put one theme's backgrounds under the
+        // other's text. The accent is a hue and survives either way.
+        let catppuccin = "mode = \"dark\"\naccent = \"#89b4fa\"\nbackground = \"#1e1e2e\"\n\
+                          dark_background = \"#161622\"\nlighter_background = \"#313244\"\n\
+                          foreground = \"#cdd6f4\"\n";
+        let palette = parse(catppuccin).unwrap();
+
+        assert!(palette.css(true).contains("window_bg_color"));
+        let disagreeing = palette.css(false);
+        assert!(!disagreeing.contains("window_bg_color"), "{disagreeing}");
+        assert!(disagreeing.contains("accent_bg_color #89b4fa"));
+    }
+
+    #[test]
+    fn a_dark_theme_maps_its_surfaces_in_adwaitas_order() {
+        let catppuccin = "mode = \"dark\"\naccent = \"#89b4fa\"\nbackground = \"#1e1e2e\"\n\
+                          dark_background = \"#161622\"\nlighter_background = \"#313244\"\n\
+                          foreground = \"#cdd6f4\"\n";
+        let css = parse(catppuccin).unwrap().css(true);
+
+        assert!(
+            css.contains("@define-color window_bg_color #1e1e2e;"),
+            "{css}"
+        );
+        assert!(
+            css.contains("@define-color view_bg_color #161622;"),
+            "{css}"
+        );
+        assert!(
+            css.contains("@define-color headerbar_bg_color #313244;"),
+            "{css}"
+        );
+        assert!(
+            css.contains("@define-color window_fg_color #cdd6f4;"),
+            "{css}"
+        );
+
+        // The card is an overlay in libadwaita — white at 8%, which works on
+        // whatever is behind it. Naming a colour for it would only make it
+        // wrong.
+        assert!(!css.contains("card_bg_color"), "{css}");
+    }
+
+    #[test]
+    fn a_dark_theme_whose_surfaces_are_out_of_order_is_refused() {
+        // Adwaita draws shadows and separators assuming view < window <
+        // raised. A theme that inverts that would look inside out, so it keeps
+        // Adwaita's surfaces and contributes only its accent.
+        let inverted = "mode = \"dark\"\naccent = \"#89b4fa\"\nbackground = \"#161622\"\n\
+                        dark_background = \"#313244\"\nlighter_background = \"#101019\"\n\
+                        foreground = \"#cdd6f4\"\n";
+        let palette = parse(inverted).unwrap();
+        assert_eq!(palette.accent, "#89b4fa");
+        assert!(palette.surfaces.is_none());
     }
 }

@@ -105,6 +105,9 @@ pub struct App {
     /// that reason — being held *is* what it does.
     #[allow(dead_code)]
     theme_watch: Option<gtk::gio::FileMonitor>,
+    /// Where the desktop's palette is written, so it can be reapplied when the
+    /// colour scheme changes under it.
+    accent_provider: Option<gtk::CssProvider>,
     /// The payment a replacement is replacing, taken from the plan at the
     /// moment of signing and cleared when the broadcast lands.
     ///
@@ -152,18 +155,24 @@ fn apply_palette(provider: &gtk::CssProvider) {
     // them: one theme change arrived as five. Applying the same colour five
     // times is harmless and reading it five times in a log is not, so the last
     // one applied is remembered and an unchanged palette does nothing.
+    #[allow(clippy::type_complexity)]
     thread_local! {
-        static APPLIED: std::cell::RefCell<Option<crate::palette::Palette>> =
+        static APPLIED: std::cell::RefCell<Option<(Option<crate::palette::Palette>, bool)>> =
             const { std::cell::RefCell::new(None) };
     }
 
+    // The scheme actually in force, which is the Appearance preference rather
+    // than the desktop theme's own mode. Part of the key, so choosing Light
+    // under a dark desktop theme re-applies rather than leaving that theme's
+    // surfaces in place.
+    let dark = adw::StyleManager::default().is_dark();
     let found = crate::palette::desktop();
     let changed = APPLIED.with(|applied| {
         let mut applied = applied.borrow_mut();
-        if *applied == found {
+        if *applied == Some((found.clone(), dark)) {
             return false;
         }
-        applied.clone_from(&found);
+        *applied = Some((found.clone(), dark));
         true
     });
     if !changed {
@@ -172,8 +181,12 @@ fn apply_palette(provider: &gtk::CssProvider) {
 
     match found {
         Some(palette) => {
-            tracing::debug!(accent = %palette.accent, "following the desktop's accent");
-            provider.load_from_string(&palette.css());
+            tracing::debug!(
+                accent = %palette.accent,
+                surfaces = palette.surfaces.as_ref().is_some_and(|s| s.dark == dark),
+                "following the desktop's palette"
+            );
+            provider.load_from_string(&palette.css(dark));
         }
         // Nothing published, or it stopped being readable: back to whatever
         // libadwaita would have done on its own.
@@ -309,7 +322,6 @@ pub enum AppMsg {
     UnlockClosed,
     ToggleDenomination,
     ForgetPeers,
-    SetAppearance(crate::settings::Appearance),
     RenameWallet {
         paths: Paths,
         name: String,
@@ -596,12 +608,10 @@ impl Component for App {
         let desktop = desktop_interface_settings();
         let settings = crate::settings::Settings::load();
 
-        apply_appearance(&style, settings.appearance);
+        follow_desktop_scheme(&style);
         if let Some(gio_settings) = &desktop {
-            // Keep following it while the choice is to follow.
             gio_settings.connect_changed(Some("color-scheme"), move |_, _| {
-                let current = crate::settings::Settings::load();
-                apply_appearance(&adw::StyleManager::default(), current.appearance);
+                follow_desktop_scheme(&adw::StyleManager::default());
             });
         }
 
@@ -630,6 +640,7 @@ impl Component for App {
             );
         }
         apply_palette(&accent);
+        let accent_provider = Some(accent.clone());
 
         // A theme change replaces the symlink this reads through, so the file
         // is watched rather than polled. Omarchy also sets `color-scheme` on
@@ -700,6 +711,7 @@ impl Component for App {
             blocks_recorded: false,
             sleep_watch: None,
             theme_watch,
+            accent_provider,
             bumping: None,
             last_seen: std::time::Instant::now(),
             stirs: 0,
@@ -982,12 +994,6 @@ impl Component for App {
                 } else {
                     self.wallet.emit(WalletPageMsg::SetPrice(None));
                 }
-            }
-
-            AppMsg::SetAppearance(appearance) => {
-                self.settings.appearance = appearance;
-                self.settings.save();
-                apply_appearance(&adw::StyleManager::default(), appearance);
             }
 
             AppMsg::RenameWallet { paths, name } => {
@@ -1738,6 +1744,9 @@ impl Component for App {
             }
 
             AppMsg::ColorSchemeChanged(dark) => {
+                if let Some(provider) = &self.accent_provider {
+                    apply_palette(provider);
+                }
                 tracing::debug!(dark, "system color scheme changed");
             }
         }
@@ -2106,26 +2115,30 @@ fn desktop_interface_settings() -> Option<gtk::gio::Settings> {
         .map(|_| gtk::gio::Settings::new(SCHEMA))
 }
 
-/// Apply the chosen appearance.
+/// Follow the desktop's colour scheme. There is no other option, on purpose.
 ///
-/// Following the system means reading the desktop's setting directly rather
-/// than leaving it to `ColorScheme::Default`, which does not find the source in
-/// every session.
-fn apply_appearance(style: &adw::StyleManager, appearance: crate::settings::Appearance) {
-    use crate::settings::Appearance;
-
-    let scheme = match appearance {
-        Appearance::Light => adw::ColorScheme::ForceLight,
-        Appearance::Dark => adw::ColorScheme::ForceDark,
-        Appearance::System => match desktop_interface_settings()
-            .map(|s| s.string("color-scheme").to_string())
-            .as_deref()
-        {
-            Some("prefer-dark") => adw::ColorScheme::PreferDark,
-            Some("prefer-light") => adw::ColorScheme::PreferLight,
-            // No opinion from the desktop, so none from us either.
-            _ => adw::ColorScheme::Default,
-        },
+/// Light and dark belong to the desktop, not to one application: an app with
+/// its own switch is an app that can disagree with everything around it. It
+/// also made a real mess here — choosing Light under a dark desktop theme put
+/// that theme's dark surfaces under libadwaita's light text, which is a class
+/// of bug that a preference invites and its absence forbids.
+///
+/// GNOME's own setting is read directly rather than left to
+/// `ColorScheme::Default`, because the settings portal is not reachable in
+/// every session and this app has met one where it is not. Where GNOME's
+/// schema says nothing — a KDE session, say, which publishes its choice
+/// through the portal instead — `Default` is exactly right, and libadwaita
+/// asks the portal itself.
+fn follow_desktop_scheme(style: &adw::StyleManager) {
+    let scheme = match desktop_interface_settings()
+        .map(|s| s.string("color-scheme").to_string())
+        .as_deref()
+    {
+        Some("prefer-dark") => adw::ColorScheme::PreferDark,
+        Some("prefer-light") => adw::ColorScheme::PreferLight,
+        // No opinion from GNOME's schema, so none from us: whatever the
+        // portal says, or light if nothing says anything.
+        _ => adw::ColorScheme::Default,
     };
     style.set_color_scheme(scheme);
 }
@@ -2670,31 +2683,19 @@ impl App {
         }
         display.add(&fiat);
 
-        // Sieve never sets the colour scheme — it follows the desktop. This
-        // row says what it is currently reading, which is the only way to tell
-        // "the app ignores my theme" apart from "the desktop is not telling
-        // it", and those have very different fixes.
-        let appearance = adw::ComboRow::new();
+        // Not a choice, a statement. Light and dark belong to the desktop, and
+        // Sieve has no switch for them — but "the app ignores my theme" and
+        // "the desktop is not saying anything" look identical from here, and
+        // they have very different fixes, so this says which one is happening.
+        let appearance = adw::ActionRow::new();
         appearance.set_title("Appearance");
-        appearance.set_model(Some(&gtk::StringList::new(
-            &crate::settings::Appearance::ALL.map(|a| a.label()),
-        )));
-        appearance.set_selected(
-            crate::settings::Appearance::ALL
-                .iter()
-                .position(|a| *a == self.settings.appearance)
-                .unwrap_or(0) as u32,
-        );
-        // Connected after the initial selection, so setting it does not fire.
-        {
-            let sender = sender.clone();
-            appearance.connect_selected_notify(move |row| {
-                if let Some(choice) = crate::settings::Appearance::ALL.get(row.selected() as usize)
-                {
-                    sender.input(AppMsg::SetAppearance(*choice));
-                }
-            });
-        }
+        let palette = crate::palette::desktop();
+        appearance.set_subtitle(&match (&palette, adw::StyleManager::default().is_dark()) {
+            (Some(p), _) => format!("Following this desktop's theme, accent {}", p.accent),
+            (None, true) => "Following the desktop — dark".into(),
+            (None, false) => "Following the desktop — light".into(),
+        });
+        appearance.set_subtitle_lines(2);
         display.add(&appearance);
 
         page.add(&display);

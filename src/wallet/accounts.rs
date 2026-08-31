@@ -693,7 +693,7 @@ mod persistence_tests {
         };
 
         // Reopened the way a restart reopens it: from the database alone.
-        let mut account = Account::load(ScriptType::Taproot, &db, network)
+        let account = Account::load(ScriptType::Taproot, &db, network)
             .unwrap()
             .unwrap();
         let found = account

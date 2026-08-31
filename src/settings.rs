@@ -143,29 +143,6 @@ fn group(n: u64) -> String {
     out
 }
 
-/// Light, dark, or whatever the desktop says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum Appearance {
-    /// Follow the desktop. The default, and the right answer for most people:
-    /// the desktop already knows, and an app that ignores it looks foreign.
-    #[default]
-    System,
-    Light,
-    Dark,
-}
-
-impl Appearance {
-    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Appearance::System => "Follow the system",
-            Appearance::Light => "Light",
-            Appearance::Dark => "Dark",
-        }
-    }
-}
-
 /// How long the wallet stays open with nobody touching it.
 ///
 /// Not about the seed — that is decrypted only at the moment of signing, and
@@ -225,8 +202,6 @@ pub struct Settings {
     /// disclosures should not make one nobody asked for.
     #[serde(default)]
     pub show_fiat: bool,
-    #[serde(default)]
-    pub appearance: Appearance,
     /// Ask mempool.space what fees are going for, instead of reading the last
     /// block ourselves.
     ///
@@ -390,11 +365,16 @@ mod tests {
     }
 
     #[test]
-    fn appearance_defaults_to_the_desktop() {
-        // An app that picks its own look before being asked is an app that
-        // looks foreign on somebody's desktop.
-        assert_eq!(Appearance::default(), Appearance::System);
-        assert_eq!(Settings::default().appearance, Appearance::System);
+    fn there_is_no_appearance_to_remember() {
+        // Light and dark belong to the desktop. The setting that used to live
+        // here let somebody contradict it, which is a way to look foreign on
+        // your own machine and — once Sieve started following a desktop
+        // palette — a way to put one theme's backgrounds under another's text.
+        // Old files may still carry the key; serde ignores what it does not
+        // know, so upgrading does not fail.
+        let old = br#"{"denomination":"Btc","appearance":"Dark","show_fiat":true}"#;
+        let settings: Settings = serde_json::from_slice(old).expect("an old file still loads");
+        assert!(settings.show_fiat);
     }
 
     #[test]
