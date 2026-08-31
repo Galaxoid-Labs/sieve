@@ -53,6 +53,32 @@ And three things it costs, which are real:
 That is a fair trade for a wallet whose users are the sort of people who
 already have `yay`. It is worth writing down that it *is* a trade.
 
+## What three packages cover, and what they miss
+
+| Family | Reaches |
+|---|---|
+| AUR | Arch, Omarchy, Manjaro, EndeavourOS, CachyOS, Garuda |
+| `.deb` | Debian, Ubuntu, Mint, Pop!_OS, elementary, Zorin, KDE neon, Raspberry Pi OS |
+| `.rpm` | Fedora, RHEL, Alma, Rocky, Nobara |
+
+That is most of what people actually run. What it misses, in the order it is
+likely to matter:
+
+- **Immutable distributions** — Silverblue, Kinoite, Bazzite, SteamOS. Flatpak
+  is the native idiom there and layering an `.rpm` with `rpm-ostree` works but
+  is discouraged. This is the real cost of not shipping a Flatpak, and it is
+  the one that would bring the decision back if people ask.
+- **openSUSE**, which is RPM with different package names, so a Fedora `.rpm`
+  may not resolve. A second spec rather than a new format; cheap when someone
+  wants it.
+- **NixOS**, which needs a derivation of its own and whose users usually write
+  one.
+- **Ubuntu 22.04 and Debian 12**, excluded by the libadwaita floor in any
+  format. Only a Flatpak carrying its own libadwaita, or lowering the
+  baseline, would reach them.
+- **Gentoo, Alpine, Void** and the rest, who build from source — which works
+  anywhere the libraries are new enough, and is what those users expect.
+
 ## The version floor, which decides the matrix
 
 Sieve needs **libadwaita ≥ 1.5** (GNOME 46) and **GTK ≥ 4.14**. Every target
