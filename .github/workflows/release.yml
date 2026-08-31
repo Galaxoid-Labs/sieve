@@ -99,7 +99,12 @@ jobs:
       - name: Install it, and run what was installed
         run: |
           pacman -U --noconfirm packaging/aur/*.pkg.tar.zst
-          test "$(sieve --version)" = "sieve ${GITHUB_REF_NAME#v}"
+          # Against the PKGBUILD's version, not the ref: on a rehearsal the
+          # ref is a branch, and this compared `sieve 0.1.0` with `sieve
+          # master`. Nothing is lost on a tag, where the check job has already
+          # proved the tag and the PKGBUILD agree.
+          version=$(grep -m1 '^pkgver=' packaging/aur/PKGBUILD | cut -d= -f2)
+          test "$(sieve --version)" = "sieve $version"
           test -f /usr/share/applications/com.galaxoidlabs.Sieve.desktop
           test -f /usr/share/icons/hicolor/48x48/apps/com.galaxoidlabs.Sieve.png
           test -f /usr/share/icons/hicolor/512x512/apps/com.galaxoidlabs.Sieve.png
