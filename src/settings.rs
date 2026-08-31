@@ -324,8 +324,6 @@ mod tests {
         assert!(Denomination::Sats.parse("2100000000000001").is_err());
     }
 
-    use super::*;
-
     #[test]
     fn test_coins_carry_their_own_ticker() {
         // "0.005 BTC" on signet reads as real money. It is worth nothing.

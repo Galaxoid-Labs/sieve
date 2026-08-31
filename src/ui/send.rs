@@ -1493,8 +1493,6 @@ pub(crate) fn capitalise(message: &str) -> String {
 mod tests {
     use super::capitalise;
     use super::*;
-    use adw::prelude::*;
-    use relm4::adw;
 
     #[test]
     fn review_waits_for_both_fields() {

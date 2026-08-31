@@ -126,41 +126,51 @@ fn surfaces(value: &impl Fn(&str) -> Option<String>) -> Option<Surfaces> {
 
     let hex = |key: &str| value(key).filter(|hex| is_hex(hex));
     let window = hex("background")?;
+
+    // Adwaita draws shadows and separators assuming the window sits between
+    // its view and its raised surfaces. Rather than refuse a theme whose
+    // colours do not arrive in that order, they are clamped into it — which is
+    // never wrong and is sometimes the only sensible reading:
+    //
+    //   vantablack   background #000000, dark_background #090909
+    //                nothing can be darker than black, so the view is the
+    //                window and the theme still applies.
+    //   solitude     lighter_background equal to background
+    //                a deliberately flat look, and equal is not out of order.
+    let darker = |a: String, b: &str| match (luminance(&a), luminance(b)) {
+        (Some(x), Some(y)) if y < x => b.to_owned(),
+        _ => a,
+    };
+    let lighter = |a: String, b: &str| match (luminance(&a), luminance(b)) {
+        (Some(x), Some(y)) if y > x => b.to_owned(),
+        _ => a,
+    };
+
     let found = if dark {
         Surfaces {
-            view: hex("dark_background")?,
-            raised: hex("lighter_background")?,
+            view: darker(hex("dark_background")?, &window),
+            raised: lighter(hex("lighter_background")?, &window),
             window,
             text: hex("foreground")?,
             dark,
         }
     } else {
-        // A light theme's palette has nothing lighter than its background, so
-        // the window is also the view — as in Adwaita, where the two are a
+        // A light theme's palette holds nothing lighter than its background,
+        // so the window is also the view — as in Adwaita, where the two are a
         // percent apart — and the raised surfaces step down from it.
         Surfaces {
             view: window.clone(),
-            raised: hex("dark_background")?,
+            raised: darker(hex("dark_background")?, &window),
             window,
             text: hex("foreground")?,
             dark,
         }
     };
 
-    // Shadows and separators are drawn assuming the window sits between its
-    // view and its raised surfaces. A theme whose colours do not order that
-    // way would look inside out, so it keeps Adwaita's and contributes only
-    // its accent.
-    let lighter = |a: &str, b: &str| match (luminance(a), luminance(b)) {
-        (Some(a), Some(b)) => a < b,
-        _ => false,
-    };
-    let ordered = if dark {
-        lighter(&found.view, &found.window) && lighter(&found.window, &found.raised)
-    } else {
-        lighter(&found.raised, &found.window) && !lighter(&found.window, &found.view)
-    };
-    ordered.then_some(found)
+    // Clamping can leave a theme whose colours are wholly inverted with no
+    // depth at all. Adwaita's own surfaces are better than a flat one.
+    let flat = found.view == found.window && found.raised == found.window;
+    (!flat).then_some(found)
 }
 
 /// `#rrggbb`, and nothing else. What goes into this string is written straight
@@ -435,10 +445,24 @@ mod tests {
     }
 
     #[test]
-    fn a_dark_theme_whose_surfaces_are_out_of_order_is_refused() {
-        // Adwaita draws shadows and separators assuming view < window <
-        // raised. A theme that inverts that would look inside out, so it keeps
-        // Adwaita's surfaces and contributes only its accent.
+    fn surfaces_are_clamped_into_adwaitas_order() {
+        // Themes do not always order their surfaces the way Adwaita needs, and
+        // sometimes cannot: vantablack's background is #000000, so its
+        // dark_background is necessarily lighter. Clamping keeps the theme
+        // rather than refusing it, and can never render the app inside out.
+        let vantablack = "mode = \"dark\"\naccent = \"#8d8d8d\"\nbackground = \"#000000\"\n\
+                          dark_background = \"#090909\"\nlighter_background = \"#1a1a1a\"\n\
+                          foreground = \"#d0d0d0\"\n";
+        let surfaces = parse(vantablack).unwrap().surfaces.unwrap();
+        assert_eq!(surfaces.window, "#000000");
+        assert_eq!(surfaces.view, "#000000", "nothing is darker than black");
+        assert_eq!(surfaces.raised, "#1a1a1a");
+    }
+
+    #[test]
+    fn a_theme_with_no_depth_left_after_clamping_is_refused() {
+        // Every surface inverted, so the clamp flattens them onto the window.
+        // Adwaita's surfaces carry more than a single flat colour would.
         let inverted = "mode = \"dark\"\naccent = \"#89b4fa\"\nbackground = \"#161622\"\n\
                         dark_background = \"#313244\"\nlighter_background = \"#101019\"\n\
                         foreground = \"#cdd6f4\"\n";
