@@ -124,10 +124,33 @@ package() {
 }
 ```
 
-Three variants, in the order they are worth making: **`sieve`** from a tagged
-release tarball, **`sieve-git`** from `master` for early testers, and
-**`sieve-bin`** last — a prebuilt binary is a trust decision, so it waits for
-signed tags and checksums.
+Three variants. **`sieve-bin`** is the one to recommend and the one to build
+first: nobody should have to compile a wallet to run it, and on the AUR the
+alternative is not a one-off cost but a full Rust build of this dependency tree
+on somebody else's machine *every time a version is tagged*. **`sieve`** from a
+tagged release tarball stays, for people who would rather build what they can
+read. **`sieve-git`** from `master` is for early testers.
+
+That ordering moves work rather than skipping it. A prebuilt binary is a trust
+decision — it asks people to run bytes they did not produce — and the answer to
+that is signed tags, a signed `SHA256SUMS`, and eventually reproducible builds.
+Those were "later" while `sieve-bin` was last. They are now **release-blocking**,
+because they are the whole of what makes a binary package honest:
+
+- `source=(... .sig)` and `validpgpkeys=()` in the PKGBUILD, so `makepkg`
+  verifies a **signature** rather than a checksum. A `sha256sums` line in a
+  recipe the same person publishes proves only that the download was not
+  corrupted in transit; it says nothing about who built it.
+- The signing key published somewhere a person can check it against, and
+  rotation announced in release notes rather than happening quietly.
+
+`sieve-bin` also carries a maintenance cost the source package does not. Arch
+is rolling, so a shared library it links against can bump its soname at any
+time; a source package is simply rebuilt, while a binary one has to be
+re-released. Nothing warns you — the package installs and then fails to start.
+The dependency-audit check that the binary links against exactly its declared
+dependencies is what catches this, and for `sieve-bin` it is the only thing
+that does, since there is no build on the user's machine to fail loudly.
 
 **`options=(!lto)` is not optional.** makepkg compiles C with `-flto=auto` by
 default — `OPTIONS=(... lto)` in `/etc/makepkg.conf` — and secp256k1 ships a
@@ -346,7 +369,49 @@ or check the device is unlocked.
 5. **Verify the floor claims** by installing the artefacts in
    `ubuntu:24.04`, `debian:trixie` and `fedora:41` containers and running the
    binary under a nested Wayland session.
-6. **Publish to GitHub Releases, then submit to AUR.**
+6. **Publish to GitHub Releases, then submit to AUR** — `sieve-bin` first,
+   since it is the one to recommend, and `sieve` alongside it.
+
+## How an update reaches somebody
+
+Worth writing down, because the rest of this file is about *producing* a
+release and none of it is about somebody receiving one.
+
+**On the AUR, a release is a git push.** The AUR hosts recipes, not binaries,
+so publishing a new version means pushing a bumped `pkgver` to
+`ssh://aur@aur.archlinux.org/sieve.git`. A helper — `yay`, `paru` — compares
+what is there against what is installed and rebuilds on the next `-Syu`. On
+Omarchy, `omarchy update` runs the system update, so it comes along with
+everything else. Nothing else has to happen, and Sieve is never involved.
+
+Three things about that are easy to get wrong:
+
+- **`.SRCINFO` is what helpers read**, not the `PKGBUILD`. A version bump
+  without `makepkg --printsrcinfo > .SRCINFO` is an update nobody is offered.
+  The AUR refuses a push where the two disagree, which catches it — but only if
+  CI regenerates the file rather than committing a stale one.
+- **`sieve-git` does not auto-update.** Its `pkgver()` is computed at build
+  time from `git describe`, so a helper cannot see a new commit without a devel
+  check — `paru -Sua --devel`, `yay -Syu --devel` — which most people never
+  run. Say so on the package page rather than letting early testers believe
+  they are current.
+- **Do not checksum GitHub's generated tarball.** `archive/refs/tags/*.tar.gz`
+  is produced on demand and its bytes have changed before, breaking
+  `sha256sums` for everybody at once. Point at a tarball attached to the
+  release, which is what the publish job already produces a `SHA256SUMS` for.
+
+**`.deb` and `.rpm` have no update path at all.** A downloaded package is a
+dead end: apt and dnf never hear about a version they were not told about. Both
+are install-once, update-never until there is a repository to point at, which
+is the real cost of "a real repository later" above. Anybody on those channels
+gets a new version only by coming back to look.
+
+**Sieve must not check for updates itself.** An update check is a network
+request that tells whoever answers it that this machine runs this wallet, at
+this version, at this time — a beacon, from a program whose whole claim is that
+no server is told anything. Package managers exist so that applications do not
+do this. If a release ever carries a security fix, the channel is the release
+notes and the distribution, not a dialog that phones home.
 
 ## What is now dead
 

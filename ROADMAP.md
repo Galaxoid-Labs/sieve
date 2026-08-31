@@ -401,11 +401,22 @@ and the order of work.
       of each family.
 - [ ] Verify the libadwaita 1.5 floor against real containers. Ubuntu 22.04 and Debian 12 are
       expected to fail it, and there is no fix short of lowering the baseline.
-- [ ] A signed tag, GitHub Releases and a `SHA256SUMS`, produced by a tag-triggered workflow
-      rather than by hand — including installing each artefact in a clean container and
-      running it, which is the only test the dependency lists ever get.
-- [ ] Publish to the AUR, then a pull request adding one line to Omarchy's install menu —
-      `PACKAGING.md` has the shape of the entry and why the category is the awkward part.
+- [ ] A signed tag, GitHub Releases and a signed `SHA256SUMS`, produced by a tag-triggered
+      workflow rather than by hand — including installing each artefact in a clean container
+      and running it, which is the only test the dependency lists ever get. Blocking on
+      `sieve-bin`, not parallel to it.
+- [ ] Re-release `sieve-bin` when a shared library it links against bumps its soname. Arch is
+      rolling and a source package is simply rebuilt; a binary one installs and then fails to
+      start, with nothing to warn you. The check that the binary links against exactly its
+      declared dependencies is the only thing that catches it.
+- [ ] Publish to the AUR — **`sieve-bin` first**, since nobody should have to compile a
+      wallet to run it, and on a rolling distribution the alternative is a full Rust build of
+      this dependency tree on somebody else's machine every time a version is tagged. That
+      makes the signing work release-blocking rather than deferred: a prebuilt binary asks
+      people to run bytes they did not produce, and a checksum in a recipe published by the
+      same person answers none of that. `makepkg` has to verify a **signature**.
+- [ ] Then a pull request adding one line to Omarchy's install menu — `PACKAGING.md` has the
+      shape of the entry and why the category is the awkward part.
 - [ ] Delete the Flatpak manifest and `scripts/fetch-tor.sh` once the AUR package is proven.
 - [ ] `org.freedesktop.portal.Secret`, reproducible builds, and external review of the vault
       format and the signing path.
