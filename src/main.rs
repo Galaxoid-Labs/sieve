@@ -77,6 +77,45 @@ fn answered_on_the_command_line() -> bool {
     false
 }
 
+/// Sieve's own styling, on top of libadwaita's.
+///
+/// Held as a constant so that `parses_without_error` can put it through a
+/// real CSS parser: a rule GTK cannot parse is dropped in silence, and the
+/// only sign of it is something looking slightly wrong on screen.
+const GLOBAL_CSS: &str = ".qr-ground { background-color: #ffffff; border-radius: 18px; padding: 6px; } \
+     .seed-word { \
+       background-color: alpha(currentColor, 0.07); \
+       border-radius: 9px; \
+       padding: 10px 12px; \
+     } \
+     .seed-index { opacity: 0.5; font-size: 0.8em; } \
+     .balance-mark { \
+       font-size: 190px; \
+       font-weight: 800; \
+       color: alpha(currentColor, 0.06); \
+       margin-left: -34px; \
+       margin-bottom: -76px; \
+       transform: rotate(-14deg); \
+     } \
+     .mark-bitcoin { color: alpha(@accent_bg_color, 0.20); } \
+     .mark-signet { color: alpha(#e01b24, 0.20); } \
+     .mark-testnet { color: alpha(#33d17a, 0.20); } \
+     /* The logo carries its own tilt and its own colour; all this \
+        adds is the room around it. */ \
+     .welcome-mark { margin-bottom: 10px; } \
+     .welcome-name { \
+       font-size: 34px; \
+       font-weight: 800; \
+       letter-spacing: 1px; \
+     } \
+     .welcome-line { font-size: 1.05em; } \
+     /* Under the tagline, and quieter than it: same words at the same \
+        weight would make the reader choose between two claims. */ \
+     .welcome-note { font-size: 0.85em; font-style: italic; opacity: 0.45; } \
+     /* Adwaita dims every row subtitle, which is right everywhere except \
+        where the subtitle carries the number a decision turns on. */ \
+     .full-contrast .subtitle { opacity: 1; }";
+
 fn main() {
     if answered_on_the_command_line() {
         return;
@@ -102,47 +141,16 @@ fn main() {
     // The radius has to be matched by clipping the picture to it, or the
     // code's own white square fills the corners it cuts away.
     //
-    // The balance mark's tints are the second and last place a colour is
-    // written down rather than taken from the theme. They are identity, not
-    // decoration: orange is bitcoin's, and the test networks get their own so
-    // that a glance at the card says which chain this wallet is on — the
-    // mistake worth making impossible. Kept at a fifth of an alpha so the hue
+    // The balance mark is tinted by network, so that a glance at the card
+    // says which chain this wallet is on — the mistake worth making
+    // impossible. Mainnet takes the desktop's accent, the same colour as the
+    // primary buttons, which makes the card part of the theme rather than a
+    // sticker on it. The test networks keep colours of their own, written
+    // down: they are the half of this that has to stay recognisable, and a
+    // theme whose accent happened to be green would otherwise make a mainnet
+    // wallet look like a testnet one. Kept at a fifth of an alpha so the hue
     // reads the same against a light or a dark card.
-    relm4::set_global_css(
-        ".qr-ground { background-color: #ffffff; border-radius: 18px; padding: 6px; } \
-         .seed-word { \
-           background-color: alpha(currentColor, 0.07); \
-           border-radius: 9px; \
-           padding: 10px 12px; \
-         } \
-         .seed-index { opacity: 0.5; font-size: 0.8em; } \
-         .balance-mark { \
-           font-size: 190px; \
-           font-weight: 800; \
-           color: alpha(currentColor, 0.06); \
-           margin-left: -34px; \
-           margin-bottom: -76px; \
-           transform: rotate(-14deg); \
-         } \
-         .mark-bitcoin { color: alpha(#f7931a, 0.20); } \
-         .mark-signet { color: alpha(#e01b24, 0.20); } \
-         .mark-testnet { color: alpha(#33d17a, 0.20); } \
-         /* The logo carries its own tilt and its own colour; all this \
-            adds is the room around it. */ \
-         .welcome-mark { margin-bottom: 10px; } \
-         .welcome-name { \
-           font-size: 34px; \
-           font-weight: 800; \
-           letter-spacing: 1px; \
-         } \
-         .welcome-line { font-size: 1.05em; } \
-         /* Under the tagline, and quieter than it: same words at the same \
-            weight would make the reader choose between two claims. */ \
-         .welcome-note { font-size: 0.85em; font-style: italic; opacity: 0.45; } \
-         /* Adwaita dims every row subtitle, which is right everywhere except \
-            where the subtitle carries the number a decision turns on. */ \
-         .full-contrast .subtitle { opacity: 1; }",
-    );
+    relm4::set_global_css(GLOBAL_CSS);
 
     // Sieve's own icons, compiled into the binary. Adwaita has no plain
     // vertical arrow — its options are a bare chevron, an arrow welded to a
@@ -156,4 +164,32 @@ fn main() {
         .expect("the icon resource is compiled into this binary");
 
     app.run::<app::App>(());
+}
+
+#[cfg(test)]
+mod tests {
+    /// A stylesheet GTK cannot parse is dropped rule by rule, in silence — the
+    /// only sign is something looking slightly off. `@accent_bg_color` makes
+    /// that a live risk: it is defined in libadwaita's stylesheet rather than
+    /// in this string, and a name that does not resolve takes its whole
+    /// declaration with it.
+    #[test]
+    #[ignore = "needs a display"]
+    fn the_stylesheet_parses_without_error() {
+        use relm4::gtk;
+        gtk::init().expect("no display");
+
+        let provider = gtk::CssProvider::new();
+        let errors = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        provider.connect_parsing_error({
+            let errors = errors.clone();
+            move |_, section, error| {
+                errors.borrow_mut().push(format!("{section}: {error}"));
+            }
+        });
+        provider.load_from_string(super::GLOBAL_CSS);
+
+        let errors = errors.borrow();
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
+    }
 }
