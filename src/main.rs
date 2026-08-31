@@ -205,6 +205,48 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// Everything `cargo deb` and `cargo generate-rpm` are told to package.
+    ///
+    /// These paths are read at release time and nowhere else, so a renamed
+    /// icon or a moved rules file fails on a tag — after the version is cut,
+    /// in a container, at the point where the fix is another tag. Checking
+    /// them here means a rename fails in the same commit that made it.
+    #[test]
+    fn every_file_the_packaging_installs_exists() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+
+        // The metadata blocks and nothing above them: `[dependencies]` names
+        // crates, not files.
+        let start = manifest
+            .find("[package.metadata.deb]")
+            .expect("the deb metadata is what builds the .deb");
+        let block = &manifest[start..];
+
+        let mut checked = 0;
+        for quoted in block.split('"').skip(1).step_by(2) {
+            let is_path = quoted.starts_with("data/")
+                || quoted.starts_with("packaging/")
+                || matches!(quoted, "LICENSE" | "README.md" | "SECURITY.md");
+            if !is_path {
+                continue;
+            }
+            assert!(
+                root.join(quoted).exists(),
+                "the packaging installs {quoted}, which is not there"
+            );
+            checked += 1;
+        }
+
+        // Both tools, every icon size, the desktop entry, the udev rules and
+        // the documents. A parse that quietly matched nothing would otherwise
+        // pass this test by checking nothing at all.
+        assert!(
+            checked >= 24,
+            "only {checked} paths checked — the metadata is not being read"
+        );
+    }
+
     /// A stylesheet GTK cannot parse is dropped rule by rule, in silence — the
     /// only sign is something looking slightly off. `@accent_bg_color` makes
     /// that a live risk: it is defined in libadwaita's stylesheet rather than
