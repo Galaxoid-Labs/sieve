@@ -2663,7 +2663,12 @@ impl App {
         }
 
         let this = adw::PreferencesGroup::new();
-        this.set_title("This wallet");
+        // Titled only when there is something under it. "This wallet" over a
+        // single row saying the wallet is locked is a heading for a section
+        // that is not there.
+        if self.unlocked {
+            this.set_title("This wallet");
+        }
 
         // What is on this page divides cleanly: how Sieve looks and how it
         // connects belong to the app and are nobody's secret, but a wallet's
