@@ -333,20 +333,45 @@ that in CI. If a runner is ever compromised the subkey is revoked and the
 identity survives; a leaked primary means starting again and asking everybody
 to trust something new.
 
+On your own machine, not in CI. Nothing below is a placeholder to paste
+verbatim — the two ids are read out of the first command's output and put in a
+variable, because `<LIKE-THIS>` in a shell is a redirect and not a blank to
+fill in.
+
 ```sh
-# On your own machine, not in CI.
-gpg --quick-generate-key "Galaxoid Labs <ismyhc@gmail.com>" ed25519 sign 2y
-gpg --list-secret-keys --keyid-format=long        # note the primary's fingerprint
-gpg --quick-add-key <FINGERPRINT> ed25519 sign 1y # the subkey CI will hold
+# 1. The primary. This is the one that goes offline afterwards.
+gpg --quick-generate-key "Your Name <you@example.com>" ed25519 sign 2y
 
-# Export the subkey alone. The `!` is what makes it the subkey and not
-# everything below the primary — without it you have just exported the key
-# you meant to keep.
-gpg --export-secret-subkeys --armor <SUBKEY-ID>! > release-subkey.asc
+# 2. Read its fingerprint out — the 40 characters under `sec`.
+gpg --list-secret-keys --keyid-format=long --with-subkey-fingerprints
+PRIMARY=paste-the-fingerprint-here
 
-# And the public half, for anybody verifying a download.
-gpg --export --armor <FINGERPRINT> > sieve-signing-key.asc
+# 3. The signing subkey, which is the half CI gets.
+gpg --quick-add-key "$PRIMARY" ed25519 sign 1y
+
+# 4. Read the subkey's id — the `ssb` line, the one dated today.
+gpg --list-secret-keys --keyid-format=long "$PRIMARY"
+SUBKEY=paste-the-ssb-key-id-here
+
+# 5. Export that subkey and nothing else. The `!` is what limits it to this
+#    key; without it you export everything under the primary, which is the
+#    thing you are trying not to hand over. It is quoted separately because
+#    an unquoted `!` is history expansion to an interactive bash.
+gpg --export-secret-subkeys --armor "$SUBKEY"'!' > release-subkey.asc
+
+# 6. And the public half, for anybody verifying a download.
+gpg --export --armor "$PRIMARY" > sieve-signing-key.asc
 ```
+
+Check step 5 before trusting it — an export that quietly included the primary
+looks identical from the outside:
+
+```sh
+gpg --show-keys release-subkey.asc     # `sec#` means the primary is absent
+```
+
+The `#` after `sec` is the whole point: it says the secret primary is *not*
+in this file. A bare `sec` means you exported the key you meant to keep.
 
 Then, in the repository's **Settings → Secrets and variables → Actions**:
 
