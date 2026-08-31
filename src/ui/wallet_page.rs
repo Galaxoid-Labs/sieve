@@ -2700,6 +2700,15 @@ impl WalletPage {
     /// first: it is the thing just typed, and so the thing to undo.
     fn nothing_shown(&self) -> String {
         match (!self.search.trim().is_empty(), self.activity_path) {
+            // The two filters compose, so a search runs inside whichever path
+            // is being shown. Said plainly when it is what emptied the list:
+            // otherwise the answer to "is this payment in my wallet" is no,
+            // and it is wrong.
+            (true, Some(_)) if self.matches_another_path() => format!(
+                "Nothing on this derivation path matches “{}” — but something on another \
+                 one does. Choose All paths to see it.",
+                self.search.trim()
+            ),
             (true, _) => format!(
                 "Nothing here matches “{}”. Try part of an address, an amount, or a name \
                  you gave a payment.",
@@ -2711,6 +2720,27 @@ impl WalletPage {
             }
             (false, None) => "Nothing to show.".to_string(),
         }
+    }
+
+    /// Whether what was searched for is in this wallet, only on a path the
+    /// filter is hiding.
+    fn matches_another_path(&self) -> bool {
+        let Some(summary) = &self.summary else {
+            return false;
+        };
+        summary.transactions.iter().any(|tx| {
+            self.activity_path
+                .is_some_and(|only| only != tx.script_type)
+                && matches_search(
+                    tx,
+                    self.labels
+                        .get(crate::wallet::labels::Kind::Tx, &tx.txid)
+                        .as_deref(),
+                    &self.search,
+                    self.settings.denomination,
+                    &summary.network,
+                )
+        })
     }
 
     /// Which of the two emptied it, said in a picture as well as in words.
