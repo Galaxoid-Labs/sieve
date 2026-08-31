@@ -313,13 +313,24 @@ watched. Show a fresh address per payer; never present one address as "the" wall
 The derivation-path list is a balance breakdown and must not show addresses: it duplicated
 the receive row and read as address reuse.
 
-## The Bitcoin logo
+## The application icon
 
-`data/icons/hicolor/scalable/apps/bitcoin-logo.svg` is the logo itself, public domain — created
-by Satoshi Nakamoto and distributed as such by Wikimedia Commons (File:Bitcoin.svg). Vendored
-rather than fetched, so the build has no network in it, and drawn as it is meant to be drawn:
-the tilt and the proportions are the mark, and a font's ₿ is only an approximation. It carries
-its own colour, so no tint is applied to it.
+`data/icons/hicolor/<size>/apps/com.galaxoidlabs.Sieve.png`, at 16 through 512. Fixed-size PNGs
+rather than one SVG because that is what the artwork is; the theme handles either.
+
+It is compiled into the binary **and** installed by the package, which is not redundant: a build
+run straight from the source tree has no hicolor directory to find it in, and an app whose own
+About window shows a broken image looks broken. The gresource prefixes have to be exactly
+`/com/galaxoidlabs/Sieve/icons/<size>x<size>/apps` — GTK searches `resource://{app-path}/icons`,
+and anything else buries the file where it will not be found.
+
+One name everywhere: the desktop entry, the About window, the welcome screen and the launcher
+all ask for `com.galaxoidlabs.Sieve`. `ICONS` in `app.rs` lists every icon name the app uses and
+warns at startup for any that does not resolve, which is how a missing one is caught before
+somebody sees a placeholder rather than after.
+
+The Bitcoin logo that used to stand in for it — public domain, from Wikimedia Commons — has
+been removed along with the last thing that referenced it.
 
 The balance card's watermark is still the glyph, deliberately — that one is tinted by network,
 and tinting a logo that is already orange would say nothing.

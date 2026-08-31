@@ -62,7 +62,8 @@ jobs:
           pacman -U --noconfirm packaging/aur/*.pkg.tar.zst
           test "$(sieve --version)" = "sieve ${GITHUB_REF_NAME#v}"
           test -f /usr/share/applications/com.galaxoidlabs.Sieve.desktop
-          test -f /usr/share/icons/hicolor/scalable/apps/com.galaxoidlabs.Sieve.svg
+          test -f /usr/share/icons/hicolor/48x48/apps/com.galaxoidlabs.Sieve.png
+          test -f /usr/share/icons/hicolor/512x512/apps/com.galaxoidlabs.Sieve.png
           test -f /usr/lib/udev/rules.d/51-sieve-hardware.rules
           desktop-file-validate /usr/share/applications/com.galaxoidlabs.Sieve.desktop
           udevadm verify /usr/lib/udev/rules.d/51-sieve-hardware.rules

@@ -261,11 +261,12 @@ impl Component for Onboarding {
                                 set_vexpand: true,
                                 set_valign: gtk::Align::Center,
 
-                                // The logo itself, not the currency glyph: the
-                                // tilt and the proportions are the mark, and a
-                                // font's ₿ is only an approximation of them.
+                                // Sieve's own icon, which is also what the
+                                // launcher and the About window show: the
+                                // first screen should introduce the thing by
+                                // the face it will be recognised by.
                                 gtk::Image {
-                                    set_icon_name: Some("bitcoin-logo"),
+                                    set_icon_name: Some(crate::APP_ID),
                                     set_pixel_size: 148,
                                     set_halign: gtk::Align::Center,
                                     add_css_class: "welcome-mark",

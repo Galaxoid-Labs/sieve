@@ -115,8 +115,10 @@ package() {
   install -Dm755 target/release/sieve "$pkgdir/usr/bin/sieve"
   install -Dm644 data/com.galaxoidlabs.Sieve.desktop \
     "$pkgdir/usr/share/applications/com.galaxoidlabs.Sieve.desktop"
-  install -Dm644 data/icons/hicolor/scalable/apps/bitcoin-logo.svg \
-    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.galaxoidlabs.Sieve.svg"
+  for size in 16 24 32 48 64 128 256 512; do
+    install -Dm644 "data/icons/hicolor/${size}x${size}/apps/com.galaxoidlabs.Sieve.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/com.galaxoidlabs.Sieve.png"
+  done
   install -Dm644 packaging/udev/51-sieve-hardware.rules \
     "$pkgdir/usr/lib/udev/rules.d/51-sieve-hardware.rules"
 }

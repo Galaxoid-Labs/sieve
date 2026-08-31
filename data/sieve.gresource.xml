@@ -9,12 +9,32 @@
     <file preprocess="xml-stripblanks" alias="sieve-receive-symbolic.svg">icons/hicolor/scalable/actions/sieve-receive-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="sieve-send-symbolic.svg">icons/hicolor/scalable/actions/sieve-send-symbolic.svg</file>
   </gresource>
-  <gresource prefix="/com/galaxoidlabs/Sieve/icons/scalable/apps">
-    <file preprocess="xml-stripblanks" alias="bitcoin-logo.svg">icons/hicolor/scalable/apps/bitcoin-logo.svg</file>
-    <!-- The same drawing again under the application id, because that is the
-         name the .desktop file and every GNOME surface look for. Until Sieve
-         has an icon of its own this is what it wears; a placeholder that is
-         findable beats a correct name that resolves to nothing. -->
-    <file preprocess="xml-stripblanks" alias="com.galaxoidlabs.Sieve.svg">icons/hicolor/scalable/apps/bitcoin-logo.svg</file>
+  <!-- Sieve's own icon, at the sizes the theme looks for. Compiled in as well
+       as installed by the package: a build run straight from the source tree
+       has no hicolor directory to find it in, and an app whose own About
+       window shows a broken image looks broken. -->
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/16x16/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/16x16/apps/com.galaxoidlabs.Sieve.png</file>
+  </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/24x24/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/24x24/apps/com.galaxoidlabs.Sieve.png</file>
+  </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/32x32/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/32x32/apps/com.galaxoidlabs.Sieve.png</file>
+  </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/48x48/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/48x48/apps/com.galaxoidlabs.Sieve.png</file>
+  </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/64x64/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/64x64/apps/com.galaxoidlabs.Sieve.png</file>
+  </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/128x128/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/128x128/apps/com.galaxoidlabs.Sieve.png</file>
+  </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/256x256/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/256x256/apps/com.galaxoidlabs.Sieve.png</file>
+  </gresource>
+  <gresource prefix="/com/galaxoidlabs/Sieve/icons/512x512/apps">
+    <file alias="com.galaxoidlabs.Sieve.png">icons/hicolor/512x512/apps/com.galaxoidlabs.Sieve.png</file>
   </gresource>
 </gresources>

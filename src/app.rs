@@ -224,7 +224,7 @@ const SCAN_MARGIN: u32 = 2_016;
 const TICK: std::time::Duration = std::time::Duration::from_secs(8);
 
 const ICONS: &[&str] = &[
-    "bitcoin-logo",
+    crate::APP_ID,
     "channel-secure-symbolic",
     "document-open-recent-symbolic",
     "document-save-symbolic",

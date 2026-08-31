@@ -60,8 +60,10 @@ package() {
   # The icon is compiled into the binary as a gresource for the app's own use,
   # which does nothing for the desktop's icon theme: the desktop entry asks for
   # `com.galaxoidlabs.Sieve`, and that name has to exist on disk under hicolor.
-  install -Dm0644 "data/icons/hicolor/scalable/apps/bitcoin-logo.svg" \
-    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.galaxoidlabs.Sieve.svg"
+  for size in 16 24 32 48 64 128 256 512; do
+    install -Dm0644 "data/icons/hicolor/${size}x${size}/apps/com.galaxoidlabs.Sieve.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/com.galaxoidlabs.Sieve.png"
+  done
 
   # Without these a hardware signer is visible only to root, which is the whole
   # of "it is plugged in and nothing happens" on Linux.
