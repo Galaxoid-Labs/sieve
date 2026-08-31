@@ -1785,10 +1785,7 @@ impl Component for App {
                     // showing a payment that no longer exists. Saying so and
                     // going to the one that does is the difference between
                     // "it worked" and a toast over a stale screen.
-                    Some(replaced) => self.wallet.emit(WalletPageMsg::Replaced {
-                        replaced,
-                        with: txid,
-                    }),
+                    Some(_) => self.wallet.emit(WalletPageMsg::Replaced { with: txid }),
                     None => self.wallet.emit(WalletPageMsg::Sent(Box::new(Ok(txid)))),
                 }
             }

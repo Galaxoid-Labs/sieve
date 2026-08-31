@@ -847,11 +847,14 @@ impl Session {
                 // The tail of a scan: the filters are all in and what remains is
                 // fetching the blocks they matched, which is the only work left
                 // and the only thing worth saying.
-                Info::BlockReceived(hash)
-                    if scanning && self.filters_done.load(Ordering::Relaxed) =>
-                {
+                Info::BlockReceived(_) if scanning && self.filters_done.load(Ordering::Relaxed) => {
                     let read = self.blocks_read.fetch_add(1, Ordering::Relaxed) + 1;
-                    tracing::debug!(%hash, read, "reading a block that matched a filter");
+                    // The count, never the hash. A block that matched this
+                    // wallet's filters is a block holding this wallet's
+                    // transactions, and naming it in a log hands that to
+                    // whoever the log is shared with — which, for a log, is
+                    // routinely somebody helping debug something else.
+                    tracing::debug!(read, "reading a block that matched a filter");
                     Progress::Blocks(read)
                 }
                 Info::SuccessfulHandshake | Info::ConnectionsMet | Info::BlockReceived(_)

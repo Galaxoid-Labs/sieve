@@ -598,7 +598,6 @@ pub enum WalletPageMsg {
     /// A replacement was broadcast. The old payment is gone from the wallet's
     /// view, so the page showing it has to go too.
     Replaced {
-        replaced: String,
         with: String,
     },
     /// This wallet holds no keys: the device that does is what signs.
@@ -2201,7 +2200,7 @@ impl Component for WalletPage {
                 });
             }
 
-            WalletPageMsg::Replaced { replaced, with } => {
+            WalletPageMsg::Replaced { with } => {
                 // Off the page that was showing the payment that no longer
                 // exists, and onto the one that took its place — which is
                 // where somebody would go looking to check it worked.
@@ -2214,7 +2213,11 @@ impl Component for WalletPage {
                 let toast = adw::Toast::new(&format!("Fee raised — this is now {short}…"));
                 toast.set_timeout(6);
                 self.toaster.add_toast(toast);
-                tracing::info!(%replaced, %with, "replaced a payment with a higher fee");
+                // Deliberately without the transaction ids. At info level
+                // these reach the journal, where they identify the user's own
+                // payments to anybody who can read it — and the journal is
+                // readable by more people than the wallet file is.
+                tracing::info!("replaced a payment with a higher fee");
             }
 
             WalletPageMsg::BumpPlanned(result) => match *result {
