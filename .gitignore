@@ -19,3 +19,7 @@
 /packaging/aur/pkg/
 /packaging/aur/src/
 /packaging/aur/*.pkg.tar.zst
+
+# Local notes that are nobody else's business — key details, machine-specific
+# reminders. Kept beside the work rather than somewhere they will be lost.
+*.local.md
