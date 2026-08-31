@@ -1,7 +1,12 @@
 # Sieve development plan
 
-Nine milestones in dependency order. Each ends with something usable. Mainnet is gated
-behind the last one.
+Nine numbered milestones in dependency order, each ending with something usable, plus M4a
+for hardware signers — which grew out of M4 once it was clear a device changes the whole
+signing path rather than adding a step to it.
+
+**Mainnet is not gated behind anything**, and this line used to say it was. Creating a wallet
+and importing one both offer bitcoin first, behind a switch acknowledging that the software is
+unreviewed. See the note at M8 for why a signet default was a gate that gated nothing.
 
 A rendered version of this plan: https://claude.ai/code/artifact/27f20a16-bce2-44a6-aa84-da33aa11112d
 
@@ -171,16 +176,18 @@ Then, in rough order:
 ## Milestones
 
 ### M0 — Scaffold — SHIPPED
-Adwaita shell, vault (Argon2id KEK wrapping a random DEK, XChaCha20-Poly1305, header bound
-as AAD), atomic writes, process hardening, six vault tests.
+Adwaita shell, vault (Argon2id KEK wrapping a random DEK at 256 MiB / 3 passes / 4 lanes,
+XChaCha20-Poly1305, header bound as AAD), atomic writes, process hardening, eight vault
+tests.
 
 ### M1 — Wallet creation and unlock — MOSTLY DONE
 *Done when: create a wallet, close the app, reopen, unlock back into the same wallet.*
 
 - [x] First-run detection routes to onboarding instead of unlock
-- [x] 12-word mnemonic via `bdk_wallet::keys::bip39`
+- [x] A 12- or 24-word mnemonic via `bdk_wallet::keys::bip39`, chosen when the wallet is made
 - [x] Display-once screen; three-word verification challenge before the wallet is created
-- [x] Passphrase with confirmation and a minimum length
+- [x] The wallet *password* typed twice and at least eight characters — not the BIP-39
+      passphrase, which is a separate field on a separate group and is confirmed separately
 - [x] Seal to `vault.sieve`, derive BIP86 descriptors, initialise the BDK SQLite store
 - [x] Unlock loads watch-only from the database; a lost database is rebuilt from the vault
 - [x] KDF retuned to 256 MiB / 3 passes (~0.7s) after measuring; params travel in the header
@@ -214,8 +221,9 @@ as AAD), atomic writes, process hardening, six vault tests.
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never
 crosses a component boundary as a message.
 
-### M2 — Compact filter sync
-*Done when: a funded signet wallet shows the right balance after a cold start.*
+### M2 — Compact filter sync — DONE, except keeping what it downloads
+*Done when: a funded signet wallet shows the right balance after a cold start.* It does, on
+mainnet as well, from a cold start and from an interrupted one.
 
 - `CbfBuilder` wiring; peer discovery via `lookup_host` (prefixes seeders with `x849`)
 - `CbfNode::run()` on its thread; `CbfClient::update()` awaited in a Relm4 command
@@ -406,7 +414,7 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       machine is left unattended.
 - PSBT export/import and device signing moved to M4a.
 
-### M8 — Package and release — MAINNET GATE
+### M8 — Package and release
 Native packages, three of them, and no Flatpak. See `PACKAGING.md` for why, what it costs,
 and the order of work.
 

@@ -5,3 +5,17 @@
 # assets that must be tracked — icons, the desktop entry — and ignoring it
 # silently kept them out of the repository.
 *.sieve
+
+# Source tarballs made while testing the PKGBUILD. `makepkg` builds one from
+# the working tree and leaves it here; one was committed that way. The
+# release workflow produces the real ones, and they belong on a release
+# rather than in the history.
+/*.tar.gz
+/*.tar.xz
+/pkg/
+/src-pkg/
+
+# What makepkg leaves behind when run in the source tree.
+/packaging/aur/pkg/
+/packaging/aur/src/
+/packaging/aur/*.pkg.tar.zst

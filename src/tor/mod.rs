@@ -1,10 +1,12 @@
 //! Tor, through a SOCKS5 proxy.
 //!
-//! Sieve does not ship or manage a Tor daemon; it uses one already running on
-//! the machine — the system service on `127.0.0.1:9050`, or Tor Browser's on
-//! `9150`. That is the same arrangement Bitcoin Core and Sparrow use, and it
-//! keeps the thing that needs careful updating out of a wallet's release
-//! cycle.
+//! Sieve does not *ship* a Tor daemon: it uses one already running on the
+//! machine — the system service on `127.0.0.1:9050`, or Tor Browser's on
+//! `9150` — and starts the distribution's own `tor` from `PATH` when nothing
+//! is listening (`daemon.rs`). That keeps the thing needing careful security
+//! updates on the distribution's release cycle rather than a wallet's, which
+//! is the arrangement Bitcoin Core and Sparrow use, while not requiring
+//! somebody to set a daemon up before they can switch Tor on.
 //!
 //! Two jobs here beyond pointing the node at a proxy:
 //!

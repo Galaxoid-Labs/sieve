@@ -60,15 +60,24 @@ behaves like the rest of the desktop rather than like a browser in a window.
 - Unconfirmed coins are never spent.
 
 **Knowing what you have**
-- All four standard derivation paths watched at once — legacy, nested segwit,
-  native segwit and taproot — because a restored seed can have coins on any of
-  them. Watching four costs no more bandwidth than watching one.
+- An imported seed is watched on all four standard derivation paths at once —
+  legacy, nested segwit, native segwit and taproot — because a restored seed
+  can have coins on any of them, and watching four costs no more bandwidth than
+  watching one. A wallet created here derives taproot and native segwit, since
+  it has no history on the others and nothing sends to them by preference.
 - Activity filterable by derivation path, with the full path shown on every
   address and output: `m/86'/0'/0'/1/7`.
 - **Labels** on payments and addresses, stored in BIP-329's format so they can
   be exported and imported anywhere else.
 - Every address you have handed out, which are used, what each received, and
   which have been paid more than once.
+- **Search** the activity list by amount, address, transaction id, the name you
+  gave a payment, or anything it published.
+- Amounts **typed in dollars** as well as read in them, with the bitcoin figure
+  shown before you commit to it.
+- **Export the public descriptors** — BIP-380 with checksums, which is what
+  every other wallet reads. Enough to recreate this wallet watch-only anywhere,
+  and not enough to spend from it.
 
 **Hardware wallets**
 - Import a watch-only wallet from a Ledger, Coldcard or Specter over USB — no
@@ -107,9 +116,6 @@ Stated plainly, because a wallet that overstates itself is dangerous:
   build payments but cannot spend. PSBT export and import is designed
   (`PSBT.md`) and not written.
 - **Multisig.** Single-signature only.
-- **Amounts typed in dollars.** They can be read in dollars.
-- **Searching the activity list.** It filters by derivation path, and by
-  nothing else.
 - **Storing anything the node downloads.** The version of kyoto Sieve uses
   discards the data directory it is given — `data_path: _` in its own
   `node.rs`. A synced wallet still starts from its own checkpoint, so an
