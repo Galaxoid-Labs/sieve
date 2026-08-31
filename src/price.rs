@@ -25,6 +25,25 @@ impl Price {
     pub fn value_of(&self, sats: u64) -> f64 {
         sats as f64 / 100_000_000.0 * self.usd
     }
+
+    /// What a sum of dollars is worth in satoshis, rounded to the nearest one.
+    ///
+    /// The inverse of `value_of`, and lossy in the direction that matters: a
+    /// payment is made in bitcoin, so this is a way of *reaching* an amount
+    /// rather than a currency the payment is denominated in. Whatever comes
+    /// back here is the real figure, and the screens show it.
+    ///
+    /// `None` when the price is not a number this can divide by — a zero or a
+    /// negative price would otherwise turn a small payment into an enormous
+    /// one, and a price fetched over the network is not something to trust
+    /// with that.
+    pub fn sats_for(&self, dollars: f64) -> Option<u64> {
+        if !self.usd.is_finite() || self.usd <= 0.0 || !dollars.is_finite() || dollars < 0.0 {
+            return None;
+        }
+        let sats = (dollars / self.usd * 100_000_000.0).round();
+        (sats >= 0.0 && sats <= u64::MAX as f64).then_some(sats as u64)
+    }
 }
 
 /// Money written the way money is written: grouped to the thousand, cut to
@@ -90,6 +109,35 @@ fn parse(body: &str) -> Result<Price> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn dollars_convert_back_to_what_they_came_from() {
+        let price = Price { usd: 78_500.0 };
+        for sats in [1_000u64, 29_876, 100_000, 1_000_000] {
+            let dollars = price.value_of(sats);
+            let back = price.sats_for(dollars).unwrap();
+            // Within a satoshi: the round trip goes through a float, and the
+            // payment is made in whatever comes back here.
+            assert!(
+                back.abs_diff(sats) <= 1,
+                "{sats} sats became ${dollars} became {back} sats"
+            );
+        }
+    }
+
+    #[test]
+    fn an_impossible_price_converts_nothing() {
+        // A price arrives over the network. Dividing by a zero or a negative
+        // one would turn a small payment into an enormous one, which is the
+        // sort of arithmetic that has to fail rather than round.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(Price { usd: bad }.sats_for(50.0), None, "{bad}");
+        }
+        assert_eq!(Price { usd: 78_500.0 }.sats_for(f64::NAN), None);
+        assert_eq!(Price { usd: 78_500.0 }.sats_for(-5.0), None);
+    }
+
     use super::*;
 
     #[test]

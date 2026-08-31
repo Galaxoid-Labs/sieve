@@ -146,6 +146,8 @@ pub enum SendMsg {
     /// An extra recipient's address or amount changed, so Review has to be
     /// re-decided.
     PayeeEdited,
+    /// Type the amount in dollars, or go back to bitcoin.
+    ToggleFiat(bool),
     /// The data field changed, which can turn a form with no recipient into a
     /// payment and back again.
     DataEdited,
@@ -268,6 +270,12 @@ pub struct SendForm {
     /// Kept so the form can be emptied after a payment goes out.
     /// Everybody after the first. The first has its own row on the form.
     extras: FactoryVecDeque<ExtraPayee>,
+    /// Whether the amount field is being typed in dollars. What is sent is
+    /// bitcoin either way; this only decides how the number is read.
+    in_fiat: bool,
+    /// What is in the amount field, so the line under it can say what those
+    /// dollars come to without reaching into the widget from the view.
+    amount_text: String,
     /// Exactly what is typed in the data field, held so the form can decide
     /// whether it describes a transaction and so the byte count can be shown.
     /// Never trimmed: a trailing space is part of what somebody asked to
@@ -327,6 +335,13 @@ impl SendForm {
 
     /// The same number without its unit, for a field that will be read back.
     fn available_amount(&self) -> String {
+        if self.in_fiat
+            && let Some(price) = self.price.as_ref()
+        {
+            // Two decimal places, because that is what a dollar has and
+            // because the figure is going into a field somebody may edit.
+            return format!("{:.2}", price.value_of(self.available_sats()));
+        }
         let shown = self.available();
         shown
             .rsplit_once(' ')
@@ -732,6 +747,52 @@ impl SendForm {
         )
     }
 
+    /// What the amount field is asking for, which is not always bitcoin.
+    fn amount_title(&self) -> String {
+        match self.in_fiat {
+            true => "Amount in dollars".to_string(),
+            false => format!("Amount in {}", self.unit()),
+        }
+    }
+
+    /// What is typed in the amount field, in satoshis.
+    ///
+    /// One place, so the review path and the readiness check cannot disagree
+    /// about what a number means. In dollars this converts at the price on
+    /// screen; the result is the payment, and every screen shows that figure
+    /// rather than the dollars it came from.
+    fn amount_sats(&self, typed: &str) -> Result<u64, String> {
+        if !self.in_fiat {
+            return self.settings.denomination.parse(typed);
+        }
+        let dollars: f64 = typed
+            .trim()
+            .trim_start_matches('$')
+            .replace(',', "")
+            .parse()
+            .map_err(|_| "That is not an amount in dollars".to_string())?;
+        let price = self
+            .price
+            .as_ref()
+            .ok_or_else(|| "No price to convert with — type the amount in bitcoin".to_string())?;
+        price
+            .sats_for(dollars)
+            .ok_or_else(|| "That amount cannot be converted".to_string())
+    }
+
+    /// What the dollars being typed come to in bitcoin, for the line under the
+    /// field. The payment is this number, not the one in the box.
+    fn fiat_preview(&self, typed: &str) -> Option<String> {
+        if !self.in_fiat {
+            return None;
+        }
+        let sats = self.amount_sats(typed).ok()?;
+        Some(format!(
+            "{} at today's price",
+            self.settings.denomination.format(sats, &self.network)
+        ))
+    }
+
     /// The bytes to publish, or `None` when the switch is off or nothing has
     /// been typed. Exactly what is in the field, encoded as UTF-8 — not
     /// trimmed, not normalised.
@@ -1089,7 +1150,7 @@ impl Component for SendForm {
                             #[name(amount_row)]
                             adw::EntryRow {
                                 #[watch]
-                                set_title: &format!("Amount in {}", model.unit()),
+                                set_title: &model.amount_title(),
                                 #[watch]
                                 set_sensitive: !model.busy,
                                 // Digits on a touch keyboard, rather than the
@@ -1106,6 +1167,29 @@ impl Component for SendForm {
                                 // refused by a greyed-out row.
                                 connect_changed[sender] => move |_| {
                                     sender.input(SendMsg::AmountEdited);
+                                },
+
+                                // Typing in dollars, for an amount that was
+                                // decided in dollars. What is sent is still
+                                // bitcoin — the conversion happens once, here,
+                                // at the price on screen — so the row says
+                                // underneath what the payment will actually
+                                // be, and the review dialog says it again.
+                                #[name(fiat_button)]
+                                add_suffix = &gtk::ToggleButton {
+                                    set_label: "$",
+                                    set_valign: gtk::Align::Center,
+                                    #[watch]
+                                    set_visible: model.price.is_some(),
+                                    #[watch]
+                                    set_tooltip_text: Some(if model.in_fiat {
+                                        "Type the amount in bitcoin instead"
+                                    } else {
+                                        "Type the amount in dollars instead"
+                                    }),
+                                    connect_toggled[sender] => move |button| {
+                                        sender.input(SendMsg::ToggleFiat(button.is_active()));
+                                    },
                                 },
 
                                 #[name(max_button)]
@@ -1133,6 +1217,21 @@ impl Component for SendForm {
                                         sender.input(SendMsg::ToggleMax(button.is_active()));
                                     },
                                 },
+                            },
+
+                            // What the dollars come to. The payment is this
+                            // figure, not the one in the box above it, and
+                            // saying so here means the review dialog is not
+                            // the first place anybody finds out.
+                            adw::ActionRow {
+                                #[watch]
+                                set_visible: model.in_fiat
+                                    && model.fiat_preview(&model.amount_text).is_some(),
+                                #[watch]
+                                set_title: &model
+                                    .fiat_preview(&model.amount_text)
+                                    .unwrap_or_default(),
+                                add_css_class: "dim-label",
                             },
 
                             #[name(from_row)]
@@ -1291,6 +1390,8 @@ impl Component for SendForm {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let mut model = SendForm {
+            in_fiat: false,
+            amount_text: String::new(),
             data: String::new(),
             data_row: None,
             extras: FactoryVecDeque::builder()
@@ -1391,7 +1492,9 @@ impl Component for SendForm {
                 // changed what that is. Refilling keeps the field and the
                 // button telling the same story.
                 if self.max {
-                    widgets.amount_row.set_text(&self.available_amount());
+                    let filled = self.available_amount();
+                    widgets.amount_row.set_text(&filled);
+                    self.amount_text = filled;
                 }
                 self.update_view(widgets, sender.clone());
             }
@@ -1488,12 +1591,46 @@ impl Component for SendForm {
                 self.error = None;
             }
 
+            SendMsg::ToggleFiat(in_fiat) => {
+                // Converted, never reinterpreted. Leaving "0.0002" in the box
+                // and relabelling it dollars would turn a small payment into a
+                // very different one without a character changing on screen.
+                let typed = widgets.amount_row.text().to_string();
+                let sats = self.amount_sats(&typed).ok();
+                self.in_fiat = in_fiat;
+                if let Some(sats) = sats
+                    && !typed.trim().is_empty()
+                {
+                    let rewritten: Option<String> = match (in_fiat, self.price.as_ref()) {
+                        (true, Some(price)) => Some(format!("{:.2}", price.value_of(sats))),
+                        (true, None) => None,
+                        // Back to bitcoin: the figure without its unit, since
+                        // the field's title carries that.
+                        (false, _) => {
+                            let shown = self.settings.denomination.format(sats, &self.network);
+                            Some(
+                                shown
+                                    .rsplit_once(' ')
+                                    .map_or(shown.clone(), |(amount, _)| amount.to_string()),
+                            )
+                        }
+                    };
+                    if let Some(text) = rewritten {
+                        widgets.amount_row.set_text(&text);
+                        self.amount_text = text;
+                    }
+                }
+                self.error = None;
+            }
+
             SendMsg::ToggleMax(max) => {
                 self.max = max;
                 // Filled in on the way up, and left alone on the way down: the
                 // number is a reasonable starting point for editing.
                 if max {
-                    widgets.amount_row.set_text(&self.available_amount());
+                    let filled = self.available_amount();
+                    widgets.amount_row.set_text(&filled);
+                    self.amount_text = filled;
                 }
             }
 
@@ -1506,6 +1643,7 @@ impl Component for SendForm {
                 // Whatever route the text arrived by — typing, paste, drop —
                 // it leaves as digits. `changed` is forwarded from the
                 // delegate, so this runs even where `insert-text` does not.
+                self.amount_text = widgets.amount_row.text().to_string();
                 let text = widgets.amount_row.text();
                 if !text.chars().all(is_amount_character) {
                     let cleaned: String =
@@ -1517,8 +1655,7 @@ impl Component for SendForm {
                 // Still the whole balance? Still a max send. Anything else and
                 // the toggle no longer describes what is in the field.
                 if self.max
-                    && self.settings.denomination.parse(&widgets.amount_row.text())
-                        != Ok(self.available_sats())
+                    && self.amount_sats(&widgets.amount_row.text()) != Ok(self.available_sats())
                 {
                     self.max = false;
                     widgets.max_button.set_active(false);
@@ -1595,7 +1732,10 @@ impl Component for SendForm {
                     let amount = if self.max {
                         Sending::Everything
                     } else {
-                        match self.settings.denomination.parse(&widgets.amount_row.text()) {
+                        // Through `amount_sats`, which knows whether the field
+                        // is dollars. Reading it as bitcoin here would send a
+                        // number nobody typed.
+                        match self.amount_sats(&widgets.amount_row.text()) {
                             Ok(sats) => Sending::Exact(bdk_wallet::bitcoin::Amount::from_sat(sats)),
                             Err(message) => {
                                 self.error = Some(message);

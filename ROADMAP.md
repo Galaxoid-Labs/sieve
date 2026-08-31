@@ -30,12 +30,6 @@ worked through. The milestone in brackets is where the work belongs.
 
 Then, in rough order:
 
-- **No descriptor export.** [M5] The recovery phrase can be revealed, but the *public*
-  descriptors cannot be got out — and that is the backup that recreates this wallet
-  watch-only somewhere else without putting a coin at risk.
-- **Amounts cannot be typed in dollars.** [M5] They can be read in dollars.
-- **No search in the activity list.** [M5] It filters by derivation path now; not by amount,
-  address or transaction id.
 - **Nothing the node downloads is kept.** [M2] `bip157::Node::new` destructures its config
   with `data_path: _`, so the data directory Sieve hands it is discarded, and an attempt to
   keep headers ourselves failed for a second reason — `build_with_wallets` sets its own chain
@@ -349,9 +343,16 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
 - [x] Filter the list by derivation path; the path named on each row when more than one is
       being watched.
 - [x] Labels, in BIP-329's format, importable and exportable.
-- [ ] Search by amount, address or transaction id.
-- [ ] Amounts typed in dollars, not only read in them.
-- [ ] Export the public descriptors — the backup that risks nothing.
+- [x] Search the activity list — by amount (as written on screen and as plain satoshis),
+      address, transaction id, the name given to it, or anything it published. Matched
+      anywhere in the value, not only at the start: an address is usually copied from
+      something showing only its middle.
+- [x] Amounts typed in dollars, not only read in them — a `$` toggle on the amount field,
+      with the bitcoin figure shown under it. Switching converts rather than reinterprets:
+      leaving "0.0002" in the box and relabelling it dollars would be a very different
+      payment with no character changed on screen.
+- [x] Export the public descriptors — the backup that risks nothing. BIP-380 form with its
+      checksum and nothing wrapped around it, so there is no Sieve format to learn.
 - [ ] Replaced state, which needs RBF to exist first.
 
 ### M6 — Privacy controls
