@@ -37,15 +37,52 @@ Then, in rough order:
 - **One recipient per transaction.** [M4]
 - **No search in the activity list.** [M5] It filters by derivation path now; not by amount,
   address or transaction id.
-- **Nothing the node downloads is kept.** [M2] Not filters, and not block headers either —
-  `bip157::Node::new` destructures its config with `data_path: _`, so the data directory Sieve
-  hands it is discarded. Every start re-downloads the header chain, every deep rescan
-  re-downloads gigabytes of filters, and a second wallet on a network gains nothing from the
-  first. An earlier attempt to keep headers ourselves failed for a different reason —
-  `build_with_wallets` overwrites the chain state — and the note about that is in `node.rs`
-  where somebody would otherwise try it again.
+- **Nothing the node downloads is kept.** [M2] `bip157::Node::new` destructures its config
+  with `data_path: _`, so the data directory Sieve hands it is discarded, and an attempt to
+  keep headers ourselves failed for a second reason — `build_with_wallets` sets its own chain
+  state one line before it builds, discarding any snapshot given to the builder. The note
+  about that is in `node.rs` where somebody would otherwise try it again.
+
+  What this actually costs is narrower than it was once written down as. `resume_point` moves
+  the recovery checkpoint forward, which is the one lever the API offers, and a synced wallet
+  starts from its own checkpoint — an ordinary warm start reaches a balance in about seven
+  seconds and re-downloads no headers. The cost lands on a **rescan** and on **importing a
+  wallet with history**, both of which re-fetch filters from the birthday, and on a second
+  wallet on the same network gaining nothing from the first.
 
 ## Closed since that list was written
+
+- **The desktop's own colours.** [M6] libadwaita follows GNOME's accent for free, but Omarchy
+  publishes a whole palette in a file its GNOME integration never applies — so a machine
+  themed catppuccin had stock GNOME blue buttons. `palette.rs` reads that file and hands
+  libadwaita the accent, plus the background family when the theme's mode matches the scheme
+  in force. Nothing about any particular theme is written down: it reads `mode`, `accent` and
+  three surface colours from whatever the current-theme symlink points at, so a theme someone
+  writes themselves works exactly like a shipped one. All 23 themes on the development
+  machine map fully, a user's own among them.
+  - **The surfaces are clamped into Adwaita's order, not checked against it.** Adwaita draws
+    for view < window < raised. Refusing a theme that arrives otherwise threw away three that
+    were not wrong: two set `lighter_background` equal to `background` — a flat look, and
+    equal is not out of order — and vantablack's background is `#000000`, so its
+    `dark_background` is necessarily *lighter*. Clamping is never wrong and is sometimes the
+    only sensible reading. A theme whose colours are wholly inverted still falls back to the
+    accent alone, since clamping would flatten every surface onto one colour.
+  - **Light and dark come from the theme file, not from GNOME's copy of it.** Omarchy writes
+    the mode into GNOME's settings as a separate step, and that copy was found stale —
+    `prefer-light` under a dark theme, a state no single source can produce. Reading the mode
+    where the colours are read means the two cannot disagree. GNOME's settings still answer on
+    every other desktop.
+  - **The Appearance picker is gone.** Light and dark belong to the desktop, not to one
+    application, and choosing Light under a dark desktop theme put that theme's dark surfaces
+    under libadwaita's light text. A read-only row says what is being followed.
+  - Three bugs made this look like a theming problem when it was not: a `GSettings` dropped at
+    the end of `init` took its subscription with it, so the scheme was read once and never
+    again; the mode came from that stale copy; and the provider sat at `PRIORITY_SETTINGS`,
+    where libadwaita defines the same names, so a tie broken by insertion order put a stock
+    blue accent back. The last is only visible in the balance mark, which now reads
+    `@accent_bg_color` — mainnet takes the desktop's accent while the test networks keep
+    colours written down, since a theme with a green accent would otherwise make a mainnet
+    wallet look like testnet.
 
 - **Fee bump (RBF).** [M4] "Raise the fee" on the detail page of an unconfirmed payment you
   made — its own row, not a button crushed into a suffix. Two dialogs: a rate, floored at what
@@ -349,6 +386,13 @@ and the order of work.
 `ui/restore.rs` lets mainnet through behind an acknowledgement, and the wallet has been run
 against mainnet with real coins. Either the gate becomes real or this stops claiming one;
 what it must not do is keep saying something the code does not do.
+
+## Before anyone else runs it
+
+- [ ] Remove the **Welcome screen (preview)** item from the header menu. It exists to look at
+      the first-run screen without starting over, is marked TEMPORARY in five places, and is
+      the one thing in the UI that is there for the person building it rather than the person
+      using it.
 
 ## Running alongside
 
