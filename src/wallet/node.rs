@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use bdk_kyoto::builder::{Builder, BuilderExt};
 use bdk_kyoto::{Info, LightClient, ScanType, UpdateSubscriber, wallets::Multiple};
 use bdk_wallet::Wallet;
@@ -852,10 +852,15 @@ impl Session {
         // Broadcasting tells the peer it goes to that this transaction is
         // probably ours — the one thing a filter-based wallet cannot hide by
         // downloading more. It is inherent to sending, not to this design.
+        // `submit_package` returns once the transaction is queued and
+        // announced, not once anybody accepted it — and nobody ever says they
+        // did. This error means the announcement could not be made at all;
+        // the previous wording claimed no peer accepted it, which is a thing
+        // this call is in no position to know.
         self.requester
             .submit_package(tx.clone())
             .await
-            .map_err(|e| anyhow!("no peer accepted the transaction: {e}"))?;
+            .map_err(|e| anyhow!("the transaction could not be announced: {e}"))?;
 
         let seen = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -866,6 +871,50 @@ impl Session {
 
         let summary = Summary::from_portfolio(&mut portfolio)?;
         Ok((txid, summary))
+    }
+
+    /// Announce an unconfirmed transaction again.
+    ///
+    /// Worth having because a broadcast reaches exactly one peer: kyoto picks
+    /// a random one and announces to it, which is plenty for an ordinary
+    /// payment — every node accepts those — and is a coin toss for anything a
+    /// peer might refuse on policy. A transaction carrying data is the first
+    /// such thing Sieve can build, and the refusal is silent: BIP-61 `reject`
+    /// messages are gone, so a peer that will not relay simply does not, and
+    /// nothing distinguishes that from being ignored.
+    ///
+    /// Each call is another peer told this transaction is probably ours, which
+    /// is why this is asked for rather than done on a timer.
+    pub async fn rebroadcast(
+        &self,
+        txid: &str,
+        script_type: super::accounts::ScriptType,
+    ) -> Result<()> {
+        let txid: bdk_wallet::bitcoin::Txid = txid
+            .parse()
+            .map_err(|_| anyhow!("that is not a transaction id"))?;
+
+        let portfolio = self.portfolio.lock().await;
+        let account = portfolio
+            .accounts
+            .iter()
+            .find(|a| a.script_type == script_type)
+            .context("that derivation path is not part of this wallet")?;
+        let tx = account
+            .wallet
+            .get_tx(txid)
+            .context("this wallet does not hold that transaction")?;
+        if tx.chain_position.is_confirmed() {
+            bail!("that payment is already in a block");
+        }
+        let tx = tx.tx_node.tx.as_ref().clone();
+        drop(portfolio);
+
+        self.requester
+            .submit_package(tx)
+            .await
+            .map_err(|e| anyhow!("the transaction could not be announced: {e}"))?;
+        Ok(())
     }
 
     /// Who is connected, right now.

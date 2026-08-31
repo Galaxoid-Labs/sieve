@@ -364,6 +364,11 @@ pub enum AppMsg {
         fee_rate: f64,
         cancel: bool,
     },
+    /// Announce an unconfirmed transaction to one more peer.
+    Rebroadcast {
+        txid: String,
+        from: wallet::accounts::ScriptType,
+    },
     /// Write every label out as a BIP-329 file, or read one in.
     /// Show this wallet's public descriptors, and offer to save them.
     ShowDescriptors,
@@ -426,6 +431,8 @@ pub enum AppMsg {
 
 #[derive(Debug)]
 pub enum AppCmd {
+    /// The result of telling one more peer about a transaction.
+    Rebroadcast(String),
     Started {
         generation: u64,
         result: Result<Arc<Session>, String>,
@@ -562,6 +569,9 @@ impl Component for App {
                     crate::ui::wallet_page::WalletPageOutput::AskRescan => AppMsg::AskRescan,
                     // TEMPORARY — remove with the menu entry that sends it.
                     crate::ui::wallet_page::WalletPageOutput::ShowWelcome => AppMsg::PreviewWelcome,
+                    crate::ui::wallet_page::WalletPageOutput::Rebroadcast { txid, from } => {
+                        AppMsg::Rebroadcast { txid, from }
+                    }
                     crate::ui::wallet_page::WalletPageOutput::PlanBump {
                         txid,
                         from,
@@ -1330,6 +1340,26 @@ impl Component for App {
                 ));
             }
 
+            AppMsg::Rebroadcast { txid, from } => {
+                let Some(session) = self.session.clone() else {
+                    self.wallet.emit(WalletPageMsg::Toast(
+                        "Not connected to the network yet — wait for peers".into(),
+                    ));
+                    return;
+                };
+                sender.oneshot_command(async move {
+                    AppCmd::Rebroadcast(match session.rebroadcast(&txid, from).await {
+                        // Said carefully. Nobody ever answers "yes, I took
+                        // it", so the most this can honestly claim is that
+                        // another peer has now been told.
+                        Ok(()) => "Told another peer. If it is relayed it will appear in a \
+                                   mempool within a minute or so"
+                            .to_string(),
+                        Err(e) => crate::ui::send::capitalise(&e.to_string()),
+                    })
+                });
+            }
+
             AppMsg::PlanBump {
                 txid,
                 from,
@@ -1944,6 +1974,10 @@ impl Component for App {
         _root: &Self::Root,
     ) {
         match msg {
+            AppCmd::Rebroadcast(message) => {
+                self.wallet.emit(WalletPageMsg::Toast(message));
+            }
+
             AppCmd::Started {
                 generation,
                 result: Ok(session),

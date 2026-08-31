@@ -26,6 +26,11 @@ pub enum WalletPageOutput {
     },
     /// TEMPORARY — show the welcome screen for a look at it.
     ShowWelcome,
+    /// Announce an unconfirmed transaction to another peer.
+    Rebroadcast {
+        txid: String,
+        from: crate::wallet::accounts::ScriptType,
+    },
     /// Rebuild an unconfirmed payment at a higher fee — either paying the
     /// same people, or paying nobody, which is what cancelling one means.
     PlanBump {
@@ -603,6 +608,8 @@ pub enum WalletPageMsg {
         txid: String,
         text: String,
     },
+    /// Tell one more peer about a payment that has not been seen.
+    Rebroadcast(String),
     /// Ask for a new fee rate for an unconfirmed payment. `cancel` decides
     /// whether the replacement pays the same people or pays nobody; both go
     /// through one path so the two can never drift apart.
@@ -2241,6 +2248,20 @@ impl Component for WalletPage {
             }
             WalletPageMsg::ShowAddresses => self.show_addresses(root, &sender),
 
+            WalletPageMsg::Rebroadcast(txid) => {
+                let Some(from) = self
+                    .summary
+                    .as_ref()
+                    .and_then(|s| s.transactions.iter().find(|t| t.txid == txid))
+                    .map(|tx| tx.script_type)
+                else {
+                    return;
+                };
+                self.toaster
+                    .add_toast(adw::Toast::new("Telling another peer…"));
+                let _ = sender.output(WalletPageOutput::Rebroadcast { txid, from });
+            }
+
             WalletPageMsg::AskBump { txid, cancel } => self.ask_bump(&txid, cancel, root, &sender),
 
             WalletPageMsg::Bump {
@@ -2653,6 +2674,32 @@ impl WalletPage {
             // the action it is instead of an afterthought. A payment somebody
             // else made is not ours to replace — we cannot sign its inputs —
             // and neither is one on a wallet that holds no keys.
+            if !incoming && !self.watch_only {
+                // Above the fee rows on purpose. A payment nobody has seen is
+                // usually not one that needs to pay more: kyoto announces to
+                // exactly one peer, and a peer that will not relay it is
+                // silent about that. Telling another costs nothing, where
+                // raising the fee costs money and rebuilds the same
+                // transaction into the same wall.
+                let again = adw::ActionRow::new();
+                again.set_title("Broadcast again");
+                again.set_subtitle(
+                    "Tell another peer. A payment is announced to one peer at a time, and a \
+                     peer that will not pass it on does not say so",
+                );
+                again.set_subtitle_lines(3);
+                again.set_activatable(true);
+                again.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                {
+                    let sender = sender.clone();
+                    let txid = tx.txid.clone();
+                    again.connect_activated(move |_| {
+                        sender.input(WalletPageMsg::Rebroadcast(txid.clone()));
+                    });
+                }
+                status.add(&again);
+            }
+
             if tx.replaceable && !incoming && !self.watch_only {
                 let raise = adw::ActionRow::new();
                 raise.set_title("Raise the fee");
