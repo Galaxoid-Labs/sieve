@@ -105,7 +105,6 @@ jobs:
   # will not run on an older.
   deb:
     needs: check
-    runs-on: ubuntu-latest
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
