@@ -108,6 +108,14 @@ pub struct App {
     /// Where the desktop's palette is written, so it can be reapplied when the
     /// colour scheme changes under it.
     accent_provider: Option<gtk::CssProvider>,
+    /// GNOME's interface settings, held only so the handler connected to them
+    /// stays connected: a `Settings` is an ordinary object, and dropping the
+    /// last reference finalizes it and silently unsubscribes. Letting go of
+    /// this at the end of `init` is what left the app stuck on whatever
+    /// scheme was in force at startup — dark themes appeared to work, because
+    /// a stale "dark" still matched them.
+    #[allow(dead_code)]
+    desktop_settings: Option<gtk::gio::Settings>,
     /// The payment a replacement is replacing, taken from the plan at the
     /// moment of signing and cleared when the broadcast lands.
     ///
@@ -160,9 +168,8 @@ fn apply_palette(provider: &gtk::CssProvider) {
             const { std::cell::RefCell::new(None) };
     }
 
-    // The scheme actually in force, which is the Appearance preference rather
-    // than the desktop theme's own mode. Part of the key, so choosing Light
-    // under a dark desktop theme re-applies rather than leaving that theme's
+    // The scheme actually in force. Part of the key, so a theme change that
+    // also flips light to dark re-applies rather than leaving the old
     // surfaces in place.
     let dark = adw::StyleManager::default().is_dark();
     let found = crate::palette::desktop();
@@ -182,7 +189,7 @@ fn apply_palette(provider: &gtk::CssProvider) {
         Some(palette) => {
             tracing::debug!(
                 accent = %palette.accent,
-                surfaces = palette.surfaces.as_ref().is_some_and(|s| s.dark == dark),
+                surfaces = palette.surfaces.is_some() && palette.dark == Some(dark),
                 "following the desktop's palette"
             );
             provider.load_from_string(&palette.css(dark));
@@ -613,6 +620,7 @@ impl Component for App {
                 follow_desktop_scheme(&adw::StyleManager::default());
             });
         }
+        let desktop_settings = desktop.clone();
 
         tracing::debug!(
             dark = style.is_dark(),
@@ -651,7 +659,12 @@ impl Component for App {
             gtk::gio::Cancellable::NONE,
         ) {
             let accent = accent.clone();
-            monitor.connect_changed(move |_, _, _, _| apply_palette(&accent));
+            monitor.connect_changed(move |_, _, _, _| {
+                // Order matters: the colours are chosen against the scheme in
+                // force, so the scheme is settled first.
+                follow_desktop_scheme(&adw::StyleManager::default());
+                apply_palette(&accent);
+            });
             Some(monitor)
         } else {
             None
@@ -711,6 +724,7 @@ impl Component for App {
             sleep_watch: None,
             theme_watch,
             accent_provider,
+            desktop_settings,
             bumping: None,
             last_seen: std::time::Instant::now(),
             stirs: 0,
@@ -2129,6 +2143,21 @@ fn desktop_interface_settings() -> Option<gtk::gio::Settings> {
 /// through the portal instead — `Default` is exactly right, and libadwaita
 /// asks the portal itself.
 fn follow_desktop_scheme(style: &adw::StyleManager) {
+    // A desktop that publishes a palette has already said which way it runs,
+    // in the same file the colours come from. That is preferred over GNOME's
+    // settings because those hold a *copy*, written by a separate step that
+    // can be skipped or fail: this machine sat at `prefer-light` under a dark
+    // theme, which is a state no single source can produce. Reading the mode
+    // where the colours are read means the two cannot disagree.
+    if let Some(dark) = crate::palette::desktop().and_then(|palette| palette.dark) {
+        style.set_color_scheme(if dark {
+            adw::ColorScheme::ForceDark
+        } else {
+            adw::ColorScheme::ForceLight
+        });
+        return;
+    }
+
     let scheme = match desktop_interface_settings()
         .map(|s| s.string("color-scheme").to_string())
         .as_deref()

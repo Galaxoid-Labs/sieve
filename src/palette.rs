@@ -25,7 +25,11 @@ use std::path::PathBuf;
 pub struct Palette {
     /// What the desktop uses for primary buttons, selection and focus.
     pub accent: String,
-    /// The surfaces, when the theme's own order them the way Adwaita does.
+    /// Which way the theme runs, where it says. This is the desktop's own
+    /// statement of light or dark, and a fresher one than the copy it leaves
+    /// in GNOME's settings — see `follow_desktop_scheme`.
+    pub dark: Option<bool>,
+    /// The surfaces, once mapped into the order Adwaita draws for.
     pub surfaces: Option<Surfaces>,
 }
 
@@ -44,10 +48,6 @@ pub struct Surfaces {
     pub raised: String,
     /// Text on all of them.
     pub text: String,
-    /// Which way this set runs. Applying a dark theme's surfaces under a light
-    /// colour scheme puts light text on dark backgrounds and neither belongs
-    /// to the other, so they are only used when the two agree.
-    pub dark: bool,
 }
 
 /// Where Omarchy keeps the theme currently applied, under a state directory.
@@ -103,9 +103,15 @@ fn parse(text: &str) -> Option<Palette> {
     };
 
     let accent = value("accent").filter(|hex| is_hex(hex))?;
+    let dark = match value("mode").as_deref() {
+        Some("dark") => Some(true),
+        Some("light") => Some(false),
+        _ => None,
+    };
     Some(Palette {
         accent,
-        surfaces: surfaces(&value),
+        dark,
+        surfaces: dark.and_then(|dark| surfaces(&value, dark)),
     })
 }
 
@@ -117,13 +123,7 @@ fn parse(text: &str) -> Option<Palette> {
 /// structure. The *ordering* is reliable in both, and it is what Adwaita cares
 /// about: a raised surface stands apart from the window, which means lighter
 /// in a dark theme and darker in a light one.
-fn surfaces(value: &impl Fn(&str) -> Option<String>) -> Option<Surfaces> {
-    let dark = match value("mode")?.as_str() {
-        "dark" => true,
-        "light" => false,
-        _ => return None,
-    };
-
+fn surfaces(value: &impl Fn(&str) -> Option<String>, dark: bool) -> Option<Surfaces> {
     let hex = |key: &str| value(key).filter(|hex| is_hex(hex));
     let window = hex("background")?;
 
@@ -152,7 +152,6 @@ fn surfaces(value: &impl Fn(&str) -> Option<String>) -> Option<Surfaces> {
             raised: lighter(hex("lighter_background")?, &window),
             window,
             text: hex("foreground")?,
-            dark,
         }
     } else {
         // A light theme's palette holds nothing lighter than its background,
@@ -163,7 +162,6 @@ fn surfaces(value: &impl Fn(&str) -> Option<String>) -> Option<Surfaces> {
             raised: darker(hex("dark_background")?, &window),
             window,
             text: hex("foreground")?,
-            dark,
         }
     };
 
@@ -200,7 +198,7 @@ impl Palette {
         // Card is deliberately absent: libadwaita defines it as white at 8%,
         // an overlay that works on whatever is behind it. Naming a colour for
         // it would only make it wrong.
-        if let Some(s) = self.surfaces.as_ref().filter(|s| s.dark == dark) {
+        if let Some(s) = self.surfaces.as_ref().filter(|_| self.dark == Some(dark)) {
             for (name, colour) in [
                 ("window_bg_color", &s.window),
                 ("view_bg_color", &s.view),
@@ -321,6 +319,7 @@ mod tests {
         let on = |hex: &str| {
             Palette {
                 accent: hex.into(),
+                dark: None,
                 surfaces: None,
             }
             .readable_on_accent()
@@ -355,6 +354,7 @@ mod tests {
     fn an_accent_alone_touches_nothing_else() {
         let css = Palette {
             accent: "#89b4fa".into(),
+            dark: None,
             surfaces: None,
         }
         .css(true);
@@ -365,7 +365,6 @@ mod tests {
         assert_eq!(css.lines().count(), 2);
     }
 
-    #[test]
     #[test]
     fn a_light_theme_maps_the_other_way_up() {
         // catppuccin-latte, where `lighter_background` (#dce0e8) is *darker*
@@ -442,6 +441,22 @@ mod tests {
         // whatever is behind it. Naming a colour for it would only make it
         // wrong.
         assert!(!css.contains("card_bg_color"), "{css}");
+    }
+
+    #[test]
+    fn a_theme_states_which_way_it_runs() {
+        // This is what the colour scheme is taken from, so it is read whether
+        // or not the surfaces map: Omarchy copies the mode into GNOME's
+        // settings as a separate step, and that copy has been seen stale.
+        let light = "mode = \"light\"\naccent = \"#1e66f5\"\n";
+        assert_eq!(parse(light).unwrap().dark, Some(false));
+
+        let dark = "mode = \"dark\"\naccent = \"#89b4fa\"\n";
+        assert_eq!(parse(dark).unwrap().dark, Some(true));
+
+        // No mode, so no opinion — and the desktop's own setting is used.
+        let quiet = "accent = \"#89b4fa\"\n";
+        assert_eq!(parse(quiet).unwrap().dark, None);
     }
 
     #[test]
