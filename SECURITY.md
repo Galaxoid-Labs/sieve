@@ -82,7 +82,17 @@ neither has a fix that does not amount to writing a different toolkit.
 
 `RLIMIT_CORE=0` so a crash writes no dump. `PR_SET_DUMPABLE(0)` so another
 process running as the same user cannot attach a debugger — the one that
-matters. `mlockall(MCL_CURRENT|MCL_FUTURE)` is attempted and **routinely
+matters.
+
+**`PR_SET_DUMPABLE` is lifted for the length of a file dialog**, and put back
+when it closes. Setting it to zero does more than stop core dumps: the kernel
+re-owns `/proc/<pid>` to root, and `xdg-desktop-portal` reads
+`/proc/<pid>/root` to identify a caller. Unable to, it refuses that caller
+everything — including the file chooser, which then never appears and reports
+nothing. Every file dialog in Sieve silently did nothing until this was found.
+The window is one somebody opened on purpose, and Sieve handles only public
+data inside it: labels, descriptors, a PSBT. Signing is never inside it, and
+`RLIMIT_CORE=0` is not lifted, so a crash still writes no dump. `mlockall(MCL_CURRENT|MCL_FUTURE)` is attempted and **routinely
 fails**: the default `RLIMIT_MEMLOCK` is 8 MiB and a GTK application is far
 larger, so this is expected rather than a misconfiguration. It is logged and
 not treated as fatal.
