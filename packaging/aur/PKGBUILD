@@ -27,6 +27,16 @@ optdepends=('tor: route every connection through Tor')
 # perfectly well outside makepkg. This switches off the *C* LTO that makepkg
 # adds, which is the standard measure for a Rust package with a C dependency.
 options=(!lto)
+# GitHub's generated tarball, which is what this points at, is produced on
+# demand and has changed bytes before — which is why the release attaches a
+# tarball of its own and why the PKGBUILD published to the AUR must point at
+# that one, with the checksum the release computed for it.
+#
+# SKIP is tolerable *here* and nowhere else: CI builds this PKGBUILD against a
+# `git archive` of the commit under test, placed beside it, so there is no
+# download to verify. A SKIP in the published PKGBUILD would mean every AUR
+# user accepting whatever the URL serves them, which is the whole thing a
+# checksum is for.
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

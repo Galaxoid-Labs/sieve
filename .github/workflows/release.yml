@@ -79,6 +79,19 @@ jobs:
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
           chown -R builder .
+      # makepkg skips the download when the file is already beside the
+      # PKGBUILD, so this builds the tree that was checked out. Two reasons:
+      # a rehearsal has no tag to fetch, and even on a tag this is the source
+      # that should be tested — the point of the job is to prove the PKGBUILD
+      # builds *this commit*, not that GitHub can serve a tarball.
+      - name: The source, from the checkout rather than the network
+        run: |
+          git config --global --add safe.directory "$PWD"
+          version=$(grep -m1 '^pkgver=' packaging/aur/PKGBUILD | cut -d= -f2)
+          git archive --format=tar.gz --prefix="sieve-$version/" \
+            -o "packaging/aur/sieve-$version.tar.gz" HEAD
+          ls -la packaging/aur/*.tar.gz
+
       - name: Build the package from the tag
         run: |
           cd packaging/aur
@@ -145,9 +158,17 @@ jobs:
           - { runner: 'ubuntu-24.04-arm', arch: aarch64 }
     container: fedora:41
     steps:
-      - run: dnf install -y cargo rust gtk4-devel libadwaita-devel sqlite-devel openssl-devel systemd-devel
+      # The container is here for the glibc and system-library baseline, not
+      # for the toolchain: Fedora ships rustc 1.91 and this needs 1.93, which
+      # relm4 requires. rustup, as the .deb job already does — a distribution's
+      # Rust and a project's MSRV move independently and always will.
+      - run: |
+          dnf install -y curl gcc pkgconf-pkg-config rpm-build \
+            gtk4-devel libadwaita-devel sqlite-devel openssl-devel systemd-devel
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - uses: actions/checkout@v7
       - run: |
+          . "$HOME/.cargo/env"
           cargo install cargo-generate-rpm --locked
           cargo build --release --locked
           cargo generate-rpm
