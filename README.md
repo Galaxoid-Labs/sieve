@@ -140,7 +140,6 @@ Then unplug the device and plug it in again.
 | `PACKAGING.md` | how this reaches other people's machines |
 | `PSBT.md` | air-gapped signing, designed and not built |
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
-| `PASSWORDS.md` | one password or several, and the wallets that have none |
 
 ```sh
 cargo test          # 131 tests, needing no network and no display

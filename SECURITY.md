@@ -50,6 +50,14 @@ watch-only wallet has no recovery phrase to restore from. Which is why the
 dialog that sets one asks for it twice and will not accept a pair that
 disagree.
 
+**One password per wallet, not one for the app.** Electrum and Sparrow are
+both per-wallet-file too, so this is the ordinary arrangement rather than an
+unusual one. A single application password was considered and rejected: it
+would mean one secret opening every wallet, and typing one fewer password is
+not worth that. Sparrow's one improvement on the usual arrangement — locking
+watch-only wallets, on the grounds that public keys are still worth protecting
+— is the part Sieve adopted.
+
 **In memory** — `src/wallet/send.rs`, `src/wallet/node.rs`
 
 The seed is decrypted at exactly two moments: signing a payment, and revealing

@@ -305,8 +305,8 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
 - [x] Lock on suspend, via logind `PrepareForSleep` over the D-Bus GIO already provides.
 - [x] A lock for watch-only wallets, which had none at all: `lock.sieve` seals a known
       constant, so a wallet with no keys still has a password to fail against. Per-wallet
-      passwords stay; the shared-password design in `PASSWORDS.md` was considered and not
-      taken, and the reasoning is kept there.
+      passwords stay — a single application password was considered and rejected, since one
+      secret opening every wallet is a poor trade for typing one fewer password.
 - [ ] Opt-in Secret Service storage, labelled as convenience and not as a boundary.
 - [ ] FIDO2 `hmac-secret` as a second wrap.
 - [ ] Lock on screensaver as well as on sleep — a locked session is the other ordinary way a
