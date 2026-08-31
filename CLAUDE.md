@@ -331,6 +331,41 @@ is a protocol rather than an application, so the collision is in search results
 rather than in anybody's app menu — worth knowing before the name is on a
 release.
 
+## Following the desktop's accent
+
+`src/palette.rs`. GNOME publishes an accent as one of nine names and
+libadwaita turns it into `@accent_bg_color`, which every other accent colour
+derives from — a GTK app gets that for free, including this one.
+
+Omarchy is the exception, and it is what this file exists for. Its themes
+carry a full palette in `colors.toml`, but `omarchy-theme-set-gnome` applies
+only three settings: `color-scheme`, `gtk-theme` and `icon-theme`. It never
+sets `accent-color`. So a machine themed catppuccin has purple folders, a
+lavender terminal and stock GNOME blue buttons, and `dconf read
+/org/gnome/desktop/interface/accent-color` is empty because nothing ever wrote
+it.
+
+Three decisions worth keeping:
+
+- **One colour.** Only `accent_bg_color` is set; libadwaita derives
+  `accent_color`, `theme_selected_bg_color` and the focus ring from it. The
+  background was deliberately left alone: `window_bg_color` has a dozen
+  relatives — cards, headerbars, dialogs, sidebars, shades — and replacing one
+  of them leaves the rest mismatched.
+- **The label colour is computed, because libadwaita hardcodes white.** That is
+  right for all nine GNOME accents and wrong for a light one. White clears the
+  3:1 contrast minimum only up to luminance 0.30, and GNOME's lightest accent
+  sits at 0.299 — so the threshold is derived rather than chosen, and a test
+  pins all nine to white and six real theme accents to dark.
+- **Detected by the file, not the distribution.** The question is whether there
+  is a palette to read. A missing or unreadable file falls back to whatever
+  libadwaita would have done alone, and the hex is validated before it reaches
+  a stylesheet.
+
+Watched with a `GFileMonitor` rather than the gsettings signal: switching
+between two dark themes changes the palette without changing `color-scheme`,
+so nothing else would fire.
+
 ## The application icon
 
 `data/icons/hicolor/<size>/apps/com.galaxoidlabs.Sieve.png`, at 16 through 512. Fixed-size PNGs

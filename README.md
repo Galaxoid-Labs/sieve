@@ -71,6 +71,12 @@ behaves like the rest of the desktop rather than like a browser in a window.
   to protect.
 - Idle auto-lock, and lock when the computer goes to sleep.
 
+**Looking like the rest of the desktop**
+- Light, dark, or follow the system, and the system's accent colour on primary
+  buttons — including on Omarchy, whose themes publish an accent that GNOME's
+  own settings never carry. The theme is followed live, so switching one
+  changes the wallet without restarting it.
+
 ## What it does not do yet
 
 Stated plainly, because a wallet that overstates itself is dangerous:

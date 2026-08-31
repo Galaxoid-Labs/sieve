@@ -100,6 +100,11 @@ pub struct App {
     /// Dropping this unsubscribes from logind, so it is held for the life of
     /// the app rather than let go at the end of `init`.
     sleep_watch: Option<gtk::gio::SignalSubscription>,
+    /// The same for the desktop theme: dropping the monitor stops the watch,
+    /// and the accent would then be whatever it was at startup. Never read for
+    /// that reason — being held *is* what it does.
+    #[allow(dead_code)]
+    theme_watch: Option<gtk::gio::FileMonitor>,
     /// The payment a replacement is replacing, taken from the plan at the
     /// moment of signing and cleared when the broadcast lands.
     ///
@@ -136,6 +141,23 @@ const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 /// How often to ask whether the wallet has been left alone. Coarse on purpose:
 /// see `watch_for_idle`.
 const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Hand the desktop's accent to libadwaita, or take ours back out of the way.
+///
+/// Everything else — `accent_color`, `theme_selected_bg_color`, focus rings —
+/// libadwaita defines in terms of `@accent_bg_color`, so one colour is the
+/// whole change.
+fn apply_palette(provider: &gtk::CssProvider) {
+    match crate::palette::desktop() {
+        Some(palette) => {
+            tracing::debug!(accent = %palette.accent, "following the desktop's accent");
+            provider.load_from_string(&palette.css());
+        }
+        // Nothing published, or it stopped being readable: back to whatever
+        // libadwaita would have done on its own.
+        None => provider.load_from_string(""),
+    }
+}
 
 /// Lock when the computer goes to sleep.
 ///
@@ -570,6 +592,36 @@ impl Component for App {
             move |manager| sender.input(AppMsg::ColorSchemeChanged(manager.is_dark()))
         });
 
+        // The desktop's own accent, where the desktop publishes one that
+        // GNOME's settings do not carry. Its own provider, at a priority above
+        // libadwaita's stylesheet and below a user's own, so it overrides the
+        // default accent and nothing overrides the person sitting here.
+        let accent = gtk::CssProvider::new();
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &accent,
+                gtk::STYLE_PROVIDER_PRIORITY_SETTINGS,
+            );
+        }
+        apply_palette(&accent);
+
+        // A theme change replaces the symlink this reads through, so the file
+        // is watched rather than polled. Omarchy also sets `color-scheme` on
+        // every theme change, but only *changes* it when the mode changes —
+        // switching between two dark themes emits nothing.
+        let watching = gtk::gio::File::for_path(crate::palette::watch_dir());
+        let theme_watch = if let Ok(monitor) = watching.monitor_directory(
+            gtk::gio::FileMonitorFlags::WATCH_MOVES,
+            gtk::gio::Cancellable::NONE,
+        ) {
+            let accent = accent.clone();
+            monitor.connect_changed(move |_, _, _, _| apply_palette(&accent));
+            Some(monitor)
+        } else {
+            None
+        };
+
         // Pages are registered up front and navigated by tag. The view owns
         // the history, which is what lets back work everywhere without each
         // screen inventing its own.
@@ -622,6 +674,7 @@ impl Component for App {
         let mut model = App {
             blocks_recorded: false,
             sleep_watch: None,
+            theme_watch,
             bumping: None,
             last_seen: std::time::Instant::now(),
             stirs: 0,

@@ -4,6 +4,7 @@ mod about;
 mod app;
 mod fees;
 mod hardware;
+mod palette;
 mod peers;
 mod price;
 mod settings;
