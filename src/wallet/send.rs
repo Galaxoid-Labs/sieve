@@ -70,6 +70,15 @@ pub struct Draft {
 /// older nodes still enforce the old cap. Eighty is what relays everywhere.
 /// Above it is a bet on which peers you happen to have, and losing that bet is
 /// silent: a node that will not relay simply does not.
+///
+/// It cannot be discovered rather than assumed, which is worth knowing before
+/// anybody tries to make it dynamic. Relay policy is not gossiped: the version
+/// handshake carries services, protocol version, user agent and the relay
+/// flag, and the only policy value a node volunteers anywhere is its minimum
+/// relay fee, through BIP-133 `feefilter`. Guessing from a peer's software
+/// would need its user agent, and `bip157` surfaces only `ServiceFlags`. Nor
+/// can it be learned by trying, since BIP-61 `reject` messages are long gone
+/// from Core and an over-limit transaction simply produces silence.
 pub const MAX_DATA: usize = 80;
 
 /// Everything a transaction publishes, in the order the outputs appear.

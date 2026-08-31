@@ -283,7 +283,7 @@ crosses a component boundary as a message.
       trimmed: silently altering something somebody is about to make permanent is the one
       thing the field must not do. The warning changes with the form, since the two cases are
       not equally bad and the worse one looks safer — a transaction that pays nobody proves
-      which outputs are yours, where a payment only lets somebody guess. See `OP_RETURN.md`.
+      which outputs are yours, where a payment only lets somebody guess.
 - [ ] Pay a silent payment address (BIP-352). Contained, needs no server, and the ordering
       falls out of coin control — see `SILENT_PAYMENTS.md`, which also records why *receiving*
       is blocked on tweak data a filter wallet cannot compute.

@@ -757,6 +757,14 @@ impl SendForm {
 
     /// What this costs, said differently for the two cases — because the one
     /// that looks safer is the worse one.
+    ///
+    /// With somebody paid, a third party has to *guess* which output is change
+    /// and the guess is a heuristic that is sometimes wrong. With nobody paid
+    /// there is no guess: an `OP_RETURN` is provably unspendable, so if it is
+    /// the only output that is not change then every other output is certainly
+    /// yours — an inference replaced by a proof, and if several coins were
+    /// spent, one that ties them together too. That is why these two strings
+    /// are not shared.
     fn data_warning(&self) -> Option<&'static str> {
         if self.data_too_long() {
             return Some(
