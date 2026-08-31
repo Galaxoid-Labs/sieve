@@ -196,7 +196,7 @@ Releases carry one signature, over `SHA256SUMS`. Check the checksums against
 it, then check your download against the checksums:
 
 ```sh
-gpg --recv-keys 15C1CCED12599960355812BC1A9E0F864D412FB7
+gpg --import sieve-signing-key.asc     # in this repository
 gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 ```
