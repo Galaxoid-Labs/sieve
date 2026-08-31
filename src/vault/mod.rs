@@ -58,7 +58,11 @@ impl Default for KdfParams {
     /// Changing this does not strand existing wallets — the parameters used to
     /// seal a file travel in its header.
     fn default() -> Self {
-        Self { m_cost: 256 * 1024, t_cost: 3, p_cost: 4 }
+        Self {
+            m_cost: 256 * 1024,
+            t_cost: 3,
+            p_cost: 4,
+        }
     }
 }
 
@@ -86,7 +90,10 @@ fn derive_kek(passphrase: &[u8], salt: &[u8], p: KdfParams) -> Result<Zeroizing<
 
 /// Encrypt `secret` under `passphrase`.
 pub fn seal(secret: &[u8], passphrase: &[u8], network: &str, kdf: KdfParams) -> Result<Vec<u8>> {
-    let header = serde_json::to_vec(&Header { kdf, network: network.to_owned() })?;
+    let header = serde_json::to_vec(&Header {
+        kdf,
+        network: network.to_owned(),
+    })?;
     let header_len = u16::try_from(header.len()).context("header too large")?;
 
     let mut salt = [0u8; SALT_LEN];
@@ -107,11 +114,23 @@ pub fn seal(secret: &[u8], passphrase: &[u8], network: &str, kdf: KdfParams) -> 
 
     let kek = derive_kek(passphrase, &salt, kdf)?;
     let wrapped = XChaCha20Poly1305::new((&*kek).into())
-        .encrypt(&XNonce::from(nonce_kek), Payload { msg: dek.as_ref(), aad: &aad })
+        .encrypt(
+            &XNonce::from(nonce_kek),
+            Payload {
+                msg: dek.as_ref(),
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("failed to wrap data key"))?;
 
     let body = XChaCha20Poly1305::new((&*dek).into())
-        .encrypt(&XNonce::from(nonce_dek), Payload { msg: secret, aad: &aad })
+        .encrypt(
+            &XNonce::from(nonce_dek),
+            Payload {
+                msg: secret,
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("failed to encrypt secret"))?;
 
     let mut out = aad;
@@ -141,8 +160,7 @@ pub fn open(blob: &[u8], passphrase: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     if take(blob, &mut cursor, MAGIC.len())? != MAGIC {
         bail!("not a Sieve vault file");
     }
-    let header_len =
-        u16::from_le_bytes(take(blob, &mut cursor, 2)?.try_into().unwrap()) as usize;
+    let header_len = u16::from_le_bytes(take(blob, &mut cursor, 2)?.try_into().unwrap()) as usize;
     let header: Header = serde_json::from_slice(take(blob, &mut cursor, header_len)?)
         .context("vault header is malformed")?;
 
@@ -177,7 +195,11 @@ mod tests {
     use super::*;
 
     /// Cheap parameters so the suite stays fast; production uses the defaults.
-    const FAST: KdfParams = KdfParams { m_cost: 8, t_cost: 1, p_cost: 1 };
+    const FAST: KdfParams = KdfParams {
+        m_cost: 8,
+        t_cost: 1,
+        p_cost: 1,
+    };
 
     /// Not run by default — it exists to measure the KDF cost on real hardware
     /// before the parameters are locked into shipped vault files.
@@ -188,12 +210,36 @@ mod tests {
     fn kdf_cost() {
         // Cost is roughly m_cost * t_cost; lanes only buy parallelism.
         let candidates = [
-            KdfParams { m_cost: 512 * 1024, t_cost: 4, p_cost: 4 },
-            KdfParams { m_cost: 512 * 1024, t_cost: 2, p_cost: 4 },
-            KdfParams { m_cost: 256 * 1024, t_cost: 3, p_cost: 4 },
-            KdfParams { m_cost: 256 * 1024, t_cost: 2, p_cost: 4 },
-            KdfParams { m_cost: 128 * 1024, t_cost: 3, p_cost: 4 },
-            KdfParams { m_cost: 64 * 1024, t_cost: 3, p_cost: 4 },
+            KdfParams {
+                m_cost: 512 * 1024,
+                t_cost: 4,
+                p_cost: 4,
+            },
+            KdfParams {
+                m_cost: 512 * 1024,
+                t_cost: 2,
+                p_cost: 4,
+            },
+            KdfParams {
+                m_cost: 256 * 1024,
+                t_cost: 3,
+                p_cost: 4,
+            },
+            KdfParams {
+                m_cost: 256 * 1024,
+                t_cost: 2,
+                p_cost: 4,
+            },
+            KdfParams {
+                m_cost: 128 * 1024,
+                t_cost: 3,
+                p_cost: 4,
+            },
+            KdfParams {
+                m_cost: 64 * 1024,
+                t_cost: 3,
+                p_cost: 4,
+            },
         ];
 
         for params in candidates {
@@ -252,7 +298,11 @@ mod tests {
     fn params_are_read_from_the_header_not_the_default() {
         // A file sealed with old, expensive parameters must still open after
         // the default is retuned. This is what makes the default safe to change.
-        let old = KdfParams { m_cost: 32, t_cost: 7, p_cost: 1 };
+        let old = KdfParams {
+            m_cost: 32,
+            t_cost: 7,
+            p_cost: 1,
+        };
         assert_ne!(old.t_cost, KdfParams::default().t_cost);
 
         let sealed = seal(b"seed", b"pw", "signet", old).unwrap();

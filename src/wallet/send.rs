@@ -16,14 +16,14 @@
 //!    transaction that silently does not finalize.
 
 use anyhow::{Result, anyhow, bail};
-use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Psbt, ScriptBuf};
+use bdk_wallet::bitcoin::Network;
 use bdk_wallet::bitcoin::address::NetworkUnchecked;
 use bdk_wallet::bitcoin::bip32::Xpriv;
+use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Psbt, ScriptBuf};
 use bdk_wallet::chain::DescriptorExt;
+use bdk_wallet::keys::bip39::{Language, Mnemonic};
 use bdk_wallet::template::{Bip44, Bip49, Bip84, Bip86};
 use bdk_wallet::{KeychainKind, Wallet};
-use bdk_wallet::bitcoin::Network;
-use bdk_wallet::keys::bip39::{Language, Mnemonic};
 
 use super::accounts::ScriptType;
 
@@ -174,7 +174,10 @@ fn hd_signer(xprv: Xpriv, script_type: ScriptType, network: Network) -> Result<W
 /// and a mismatch means the key from the vault belongs to some other wallet.
 /// In practice that is a BIP-39 passphrase: it is part of the seed, so a
 /// missing one derives a valid, different, empty wallet rather than an error.
-pub fn check_signer(signing: &Wallet, watching_descriptor_id: bdk_wallet::chain::DescriptorId) -> Result<()> {
+pub fn check_signer(
+    signing: &Wallet,
+    watching_descriptor_id: bdk_wallet::chain::DescriptorId,
+) -> Result<()> {
     let derived = signing
         .public_descriptor(KeychainKind::External)
         .descriptor_id();
@@ -235,7 +238,11 @@ pub fn estimated_vbytes(script_type: ScriptType, inputs: usize, outputs: usize) 
     };
     // Version, locktime and the two counts, plus the segwit marker and flag
     // where there is a witness at all.
-    let overhead = if matches!(script_type, ScriptType::Legacy) { 10 } else { 11 };
+    let overhead = if matches!(script_type, ScriptType::Legacy) {
+        10
+    } else {
+        11
+    };
     overhead + input * inputs as u64 + output * outputs as u64
 }
 
@@ -270,10 +277,9 @@ pub(super) fn split_outputs_of(
             continue;
         }
         if paid.is_none() {
-            let address =
-                bdk_wallet::bitcoin::Address::from_script(&out.script_pubkey, network)
-                    .map(|address| address.to_string())
-                    .unwrap_or_else(|_| "an unusual script, not an address".into());
+            let address = bdk_wallet::bitcoin::Address::from_script(&out.script_pubkey, network)
+                .map(|address| address.to_string())
+                .unwrap_or_else(|_| "an unusual script, not an address".into());
             paid = Some((address, out.value));
         }
     }
@@ -324,15 +330,20 @@ mod tests {
         // The network check is the one that must not be softened by unpacking
         // a URI first.
         let uri = format!("bitcoin:{MAINNET}");
-        let err = parse_address(&uri, Network::Signet).unwrap_err().to_string();
+        let err = parse_address(&uri, Network::Signet)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("different network"), "{err}");
     }
 
     #[test]
     fn a_mainnet_address_is_refused_on_signet() {
-        let err = parse_address("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", Network::Signet)
-            .unwrap_err()
-            .to_string();
+        let err = parse_address(
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            Network::Signet,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("different network"), "{err}");
     }
 
@@ -409,13 +420,20 @@ mod tests {
             // built it — which is what happens for real, where the builder is
             // watch-only and the signer comes out of the vault.
             let fresh = signer(PHRASE, script_type, network, None).unwrap();
-            check_signer(&fresh, wallet.public_descriptor(KeychainKind::External).descriptor_id())
-                .unwrap();
+            check_signer(
+                &fresh,
+                wallet
+                    .public_descriptor(KeychainKind::External)
+                    .descriptor_id(),
+            )
+            .unwrap();
             assert!(
                 sign(&fresh, &mut psbt).unwrap(),
                 "{script_type} did not finalize"
             );
-            psbt.clone().extract_tx().expect("could not extract the signed transaction");
+            psbt.clone()
+                .extract_tx()
+                .expect("could not extract the signed transaction");
         }
     }
 
@@ -432,7 +450,10 @@ mod tests {
         // never optimistic, since an estimate that rounds down says "enough"
         // and then fails to build.
         assert_eq!(estimated_vbytes(ScriptType::Taproot, 1, 2), 11 + 58 + 86);
-        assert_eq!(estimated_vbytes(ScriptType::NativeSegwit, 1, 2), 11 + 68 + 62);
+        assert_eq!(
+            estimated_vbytes(ScriptType::NativeSegwit, 1, 2),
+            11 + 68 + 62
+        );
         assert_eq!(estimated_vbytes(ScriptType::Legacy, 1, 2), 10 + 148 + 68);
 
         // Taproot spends smaller than native segwit, which spends smaller than
@@ -440,7 +461,10 @@ mod tests {
         let taproot = estimated_vbytes(ScriptType::Taproot, 3, 2);
         let segwit = estimated_vbytes(ScriptType::NativeSegwit, 3, 2);
         let legacy = estimated_vbytes(ScriptType::Legacy, 3, 2);
-        assert!(taproot < segwit && segwit < legacy, "{taproot} {segwit} {legacy}");
+        assert!(
+            taproot < segwit && segwit < legacy,
+            "{taproot} {segwit} {legacy}"
+        );
 
         // Each extra coin costs another input, which is the whole reason
         // choosing more coins costs more money.
@@ -450,7 +474,11 @@ mod tests {
 
         // Rounded up, never down.
         assert_eq!(estimated_fee(ScriptType::Taproot, 1, 2, 1.0), 155);
-        assert_eq!(estimated_fee(ScriptType::Taproot, 1, 2, 1.5), 233, "232.5 rounds up");
+        assert_eq!(
+            estimated_fee(ScriptType::Taproot, 1, 2, 1.5),
+            233,
+            "232.5 rounds up"
+        );
     }
 
     /// A replacement spends the same coins as the payment it replaces — that
@@ -491,8 +519,11 @@ mod tests {
         let original = psbt.extract_tx().unwrap();
         let original_txid = original.compute_txid();
         let original_fee = wallet.calculate_fee(&original).unwrap();
-        let spent: Vec<OutPoint> =
-            original.input.iter().map(|input| input.previous_output).collect();
+        let spent: Vec<OutPoint> = original
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
         wallet.apply_unconfirmed_txs([(original, 0u64)]);
 
         // Every payment Sieve makes signals BIP-125, because that is BDK's
@@ -573,8 +604,12 @@ mod tests {
         builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
         let psbt = builder.finish().expect("40,000 covers 20,000 and the fee");
 
-        let spent: Vec<OutPoint> =
-            psbt.unsigned_tx.input.iter().map(|input| input.previous_output).collect();
+        let spent: Vec<OutPoint> = psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
         assert_eq!(spent, chosen, "only the chosen coin may be spent");
 
         // And a selection that cannot cover the payment fails rather than
@@ -641,7 +676,9 @@ mod tests {
         let other = signer(PHRASE, ScriptType::Taproot, network, Some("a passphrase")).unwrap();
         let err = check_signer(
             &other,
-            watching.public_descriptor(KeychainKind::External).descriptor_id(),
+            watching
+                .public_descriptor(KeychainKind::External)
+                .descriptor_id(),
         )
         .unwrap_err()
         .to_string();

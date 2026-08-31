@@ -46,7 +46,11 @@ pub fn usd(amount: f64) -> String {
         grouped.push(c);
     }
 
-    format!("{}{grouped}.{:02}", if negative { "-" } else { "" }, cents % 100)
+    format!(
+        "{}{grouped}.{:02}",
+        if negative { "-" } else { "" },
+        cents % 100
+    )
 }
 
 /// Fetch the last traded price.
@@ -71,14 +75,16 @@ pub fn fetch(proxy: Option<crate::tor::Proxy>) -> Result<Price> {
 /// `[BID, BID_SIZE, ASK, ASK_SIZE, DAILY_CHANGE, DAILY_CHANGE_RELATIVE,
 ///   LAST_PRICE, VOLUME, HIGH, LOW, ...]`
 fn parse(body: &str) -> Result<Price> {
-    let fields: Vec<f64> = serde_json::from_str(body)
-        .context("the price service returned something unexpected")?;
+    let fields: Vec<f64> =
+        serde_json::from_str(body).context("the price service returned something unexpected")?;
 
     let usd = *fields
         .get(6)
         .context("the price response had no last price")?;
     if !usd.is_finite() || usd <= 0.0 {
-        return Err(anyhow!("the price service returned an implausible price: {usd}"));
+        return Err(anyhow!(
+            "the price service returned an implausible price: {usd}"
+        ));
     }
 
     Ok(Price {
@@ -122,7 +128,10 @@ mod tests {
 
     #[test]
     fn converts_sats_to_value() {
-        let price = Price { usd: 100_000.0, change_24h: 0.0 };
+        let price = Price {
+            usd: 100_000.0,
+            change_24h: 0.0,
+        };
         assert!((price.value_of(100_000_000) - 100_000.0).abs() < 0.01);
         assert!((price.value_of(53_713) - 53.713).abs() < 0.01);
     }

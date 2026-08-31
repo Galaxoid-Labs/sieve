@@ -58,9 +58,9 @@ impl Recommended {
 pub fn endpoint(network: &str) -> Option<String> {
     match network {
         "bitcoin" => Some("https://mempool.space/api/v1/fees/recommended".into()),
-        "signet" | "testnet" | "testnet4" => {
-            Some(format!("https://mempool.space/{network}/api/v1/fees/recommended"))
-        }
+        "signet" | "testnet" | "testnet4" => Some(format!(
+            "https://mempool.space/{network}/api/v1/fees/recommended"
+        )),
         _ => None,
     }
 }
@@ -69,8 +69,7 @@ pub fn endpoint(network: &str) -> Option<String> {
 ///
 /// Blocking: call it from a command, never on the main thread.
 pub fn fetch(network: &str, proxy: Option<crate::tor::Proxy>) -> Result<Recommended> {
-    let url = endpoint(network)
-        .ok_or_else(|| anyhow!("mempool.space does not serve {network}"))?;
+    let url = endpoint(network).ok_or_else(|| anyhow!("mempool.space does not serve {network}"))?;
 
     let body = ureq::get(&url)
         .config()
@@ -110,9 +109,17 @@ fn parse(body: &str) -> Result<Recommended> {
 
     // A wrong number here is money, so an implausible one is refused rather
     // than shown. Sieve's local estimate still works.
-    for rate in [rates.fastest, rates.half_hour, rates.hour, rates.economy, rates.minimum] {
+    for rate in [
+        rates.fastest,
+        rates.half_hour,
+        rates.hour,
+        rates.economy,
+        rates.minimum,
+    ] {
         if !rate.is_finite() || rate <= 0.0 || rate > IMPLAUSIBLE {
-            return Err(anyhow!("mempool.space returned an implausible fee rate: {rate}"));
+            return Err(anyhow!(
+                "mempool.space returned an implausible fee rate: {rate}"
+            ));
         }
     }
 
@@ -140,7 +147,10 @@ mod tests {
 
     #[test]
     fn implausible_rates_are_refused() {
-        assert!(parse(r#"{"fastestFee":0,"halfHourFee":1,"hourFee":1,"economyFee":1,"minimumFee":1}"#).is_err());
+        assert!(
+            parse(r#"{"fastestFee":0,"halfHourFee":1,"hourFee":1,"economyFee":1,"minimumFee":1}"#)
+                .is_err()
+        );
         assert!(parse(r#"{"fastestFee":9000000,"halfHourFee":1,"hourFee":1,"economyFee":1,"minimumFee":1}"#).is_err());
         assert!(parse("not json").is_err());
         assert!(parse("{}").is_err());

@@ -49,9 +49,17 @@ const NAMED: &[(&str, &str, &str)] = &[
         "The node itself: block headers, compact filters, and the peer connections that fetch \
          them. This is what lets Sieve sync without telling a server which addresses are yours.",
     ),
-    ("relm4", "Relm4", "The Elm-shaped architecture the interface is built in."),
+    (
+        "relm4",
+        "Relm4",
+        "The Elm-shaped architecture the interface is built in.",
+    ),
     ("gtk4", "GTK", "The toolkit."),
-    ("libadwaita", "libadwaita", "The GNOME platform library, and its design language."),
+    (
+        "libadwaita",
+        "libadwaita",
+        "The GNOME platform library, and its design language.",
+    ),
     (
         "async-hwi",
         "async-hwi",
@@ -72,8 +80,16 @@ const NAMED: &[(&str, &str, &str)] = &[
         "SQLite, via rusqlite",
         "Where each derivation path's public descriptors and transaction history live.",
     ),
-    ("ureq", "ureq", "The only HTTP client here — prices and, if asked for, fee rates."),
-    ("qrcode", "qrcode-rust", "Draws the code on the receive screen."),
+    (
+        "ureq",
+        "ureq",
+        "The only HTTP client here — prices and, if asked for, fee rates.",
+    ),
+    (
+        "qrcode",
+        "qrcode-rust",
+        "Draws the code on the receive screen.",
+    ),
 ];
 
 /// Not a crate, so it is not in `cargo metadata` — but it ships in the Flatpak
@@ -164,13 +180,21 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
             Some(licence),
         );
     }
-    about.add_legal_section(TOR.0, Some(TOR.2), gtk::License::Custom, Some("BSD-3-Clause"));
+    about.add_legal_section(
+        TOR.0,
+        Some(TOR.2),
+        gtk::License::Custom,
+        Some("BSD-3-Clause"),
+    );
 
     // Then everything, because the named ones are a choice and the licences
     // apply to all of it.
     let mut rest = String::new();
     for found in &all {
-        rest.push_str(&format!("{} {} — {}\n", found.name, found.version, found.licence));
+        rest.push_str(&format!(
+            "{} {} — {}\n",
+            found.name, found.version, found.licence
+        ));
     }
     about.add_legal_section(
         &format!("All {} Rust crates", all.len()),
@@ -191,12 +215,20 @@ mod tests {
         // A build that quietly lost or malformed the file would ship an About
         // window acknowledging nobody.
         let all = crates();
-        assert!(all.len() > 100, "the crate list looks truncated: {}", all.len());
-        assert!(all.iter().all(|c| !c.name.is_empty() && !c.version.is_empty()));
+        assert!(
+            all.len() > 100,
+            "the crate list looks truncated: {}",
+            all.len()
+        );
+        assert!(
+            all.iter()
+                .all(|c| !c.name.is_empty() && !c.version.is_empty())
+        );
         // Every crate says something about its licence, including the two that
         // state it in a file rather than in their manifest.
         assert!(
-            all.iter().all(|c| !c.licence.is_empty() && c.licence != "unstated"),
+            all.iter()
+                .all(|c| !c.licence.is_empty() && c.licence != "unstated"),
             "a crate has no licence recorded"
         );
     }

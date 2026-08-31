@@ -97,10 +97,11 @@ impl std::str::FromStr for Proxy {
 /// it here.
 pub fn ureq_proxy(proxy: Option<Proxy>) -> Result<Option<ureq::Proxy>> {
     match proxy {
-        Some(proxy) => Ok(Some(
-            ureq::Proxy::new(&proxy.ureq_url())
-                .map_err(|e| anyhow!("could not use the proxy at {proxy}: {e}"))?,
-        )),
+        Some(proxy) => {
+            Ok(Some(ureq::Proxy::new(&proxy.ureq_url()).map_err(|e| {
+                anyhow!("could not use the proxy at {proxy}: {e}")
+            })?))
+        }
         None => Ok(None),
     }
 }
@@ -220,7 +221,10 @@ pub fn seeds(network: &str) -> Vec<String> {
             "seed.tbtc.petertodd.org",
             "seed.testnet.bitcoin.sprovoost.nl",
         ],
-        "testnet4" => &["seed.testnet4.bitcoin.sprovoost.nl", "seed.testnet4.wiz.biz"],
+        "testnet4" => &[
+            "seed.testnet4.bitcoin.sprovoost.nl",
+            "seed.testnet4.wiz.biz",
+        ],
         // A chain on this machine has no seeds, and Tor has nothing to hide
         // about a connection to localhost.
         _ => &[],
@@ -301,7 +305,10 @@ mod tests {
     #[test]
     fn proxies_can_be_written_several_ways() {
         assert_eq!("9050".parse::<Proxy>().unwrap(), Proxy::local(9050));
-        assert_eq!("127.0.0.1:9150".parse::<Proxy>().unwrap(), Proxy::local(9150));
+        assert_eq!(
+            "127.0.0.1:9150".parse::<Proxy>().unwrap(),
+            Proxy::local(9150)
+        );
         assert_eq!("127.0.0.1".parse::<Proxy>().unwrap(), Proxy::local(9050));
         assert!("not a proxy".parse::<Proxy>().is_err());
         // The h matters: without it the hostname is resolved here, which is
@@ -368,8 +375,9 @@ mod tests {
     #[test]
     fn nothing_listening_is_an_error_not_a_hang() {
         // Port 1 on loopback: nothing is there, and connect fails at once.
-        let error = resolve(Proxy::local(1), "example.com").unwrap_err().to_string();
+        let error = resolve(Proxy::local(1), "example.com")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("nothing is answering"), "{error}");
     }
 }
-

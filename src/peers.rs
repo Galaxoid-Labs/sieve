@@ -71,7 +71,10 @@ fn is_address(text: &str) -> bool {
     if crate::tor::onion::looks_like_onion(text) {
         return crate::tor::onion::decode(text).is_some();
     }
-    text.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().is_ok()
+    text.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .is_ok()
 }
 
 /// Record peers that serve compact filters on this network.
@@ -97,8 +100,14 @@ pub fn remember(network: Network, addresses: &[String]) {
         return;
     }
 
-    let record = Remembered { version: FORMAT, serves_filters: true, peers: keep };
-    let Ok(bytes) = serde_json::to_vec_pretty(&record) else { return };
+    let record = Remembered {
+        version: FORMAT,
+        serves_filters: true,
+        peers: keep,
+    };
+    let Ok(bytes) = serde_json::to_vec_pretty(&record) else {
+        return;
+    };
     if let Err(e) = crate::vault::write_atomic(&path(network), &bytes) {
         // Losing this costs a slower start, nothing more.
         tracing::debug!(%e, "could not remember peers");
@@ -122,8 +131,7 @@ pub fn clear(network: Network) {
 mod tests {
     use super::*;
 
-    const REAL_ONION: &str =
-        "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
+    const REAL_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
 
     #[test]
     fn only_addresses_that_could_be_dialled_are_kept() {

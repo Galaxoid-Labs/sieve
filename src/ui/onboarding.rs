@@ -121,7 +121,10 @@ pub enum OnboardingMsg {
 
 #[derive(Debug)]
 pub enum OnboardingOutput {
-    Created { paths: Paths, summary: Summary },
+    Created {
+        paths: Paths,
+        summary: Summary,
+    },
     WantsRestore,
     /// Backed out of the first step; there is a screen behind this one.
     Cancelled,
@@ -558,10 +561,14 @@ impl Component for Onboarding {
 
             OnboardingMsg::Verify(a, b, c) => {
                 let given = [a, b, c];
-                let matches = self.challenge.iter().zip(given.iter()).all(|(position, given)| {
-                    self.word(*position)
-                        .is_some_and(|expected| expected == given.0.trim().to_lowercase())
-                });
+                let matches = self
+                    .challenge
+                    .iter()
+                    .zip(given.iter())
+                    .all(|(position, given)| {
+                        self.word(*position)
+                            .is_some_and(|expected| expected == given.0.trim().to_lowercase())
+                    });
 
                 if !matches {
                     self.error =

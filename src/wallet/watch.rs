@@ -56,13 +56,21 @@ pub fn parse(text: &str) -> Result<Descriptors> {
     // A descriptor is anything with a function around the key.
     if text.contains('(') {
         let (external, internal) = split_paths(text)?;
-        return Ok(Descriptors { external, internal, script_type });
+        return Ok(Descriptors {
+            external,
+            internal,
+            script_type,
+        });
     }
 
     // A bare key, with an origin to say what it is.
     let external = wrap(text, script_type, 0)?;
     let internal = wrap(text, script_type, 1)?;
-    Ok(Descriptors { external, internal, script_type })
+    Ok(Descriptors {
+        external,
+        internal,
+        script_type,
+    })
 }
 
 /// Which standard path this key or descriptor belongs to.

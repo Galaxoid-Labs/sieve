@@ -65,14 +65,16 @@ pub fn texture(data: &str) -> Option<gdk::Texture> {
         }
     }
 
-    Some(gdk::MemoryTexture::new(
-        CANVAS as i32,
-        CANVAS as i32,
-        gdk::MemoryFormat::R8g8b8,
-        &Bytes::from_owned(pixels),
-        CANVAS * 3,
+    Some(
+        gdk::MemoryTexture::new(
+            CANVAS as i32,
+            CANVAS as i32,
+            gdk::MemoryFormat::R8g8b8,
+            &Bytes::from_owned(pixels),
+            CANVAS * 3,
+        )
+        .upcast(),
     )
-    .upcast())
 }
 
 /// What to encode for a receive address.
@@ -119,7 +121,8 @@ mod tests {
 
     #[test]
     fn a_real_address_produces_a_square_code() {
-        let code = qrcode::QrCode::new(payment_uri("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")).unwrap();
+        let code =
+            qrcode::QrCode::new(payment_uri("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")).unwrap();
         let modules = code.to_colors();
         let width = (modules.len() as f64).sqrt() as usize;
         assert_eq!(width * width, modules.len(), "a QR code is square");
@@ -165,8 +168,11 @@ mod icon_names {
         let theme = relm4::gtk::IconTheme::for_display(
             &relm4::gtk::gdk::Display::default().expect("a display"),
         );
-        let missing: Vec<&str> =
-            FROM_THEME.iter().copied().filter(|name| !theme.has_icon(name)).collect();
+        let missing: Vec<&str> = FROM_THEME
+            .iter()
+            .copied()
+            .filter(|name| !theme.has_icon(name))
+            .collect();
         assert!(missing.is_empty(), "the icon theme has no {missing:?}");
     }
 }

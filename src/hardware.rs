@@ -113,7 +113,10 @@ async fn specters() -> Result<Vec<Found>> {
     let devices = Specter::enumerate().await.map_err(|e| anyhow!("{e:?}"))?;
     Ok(devices
         .into_iter()
-        .map(|_| Found { kind: Kind::Specter, label: "Specter".into() })
+        .map(|_| Found {
+            kind: Kind::Specter,
+            label: "Specter".into(),
+        })
         .collect())
 }
 
@@ -213,7 +216,10 @@ pub async fn account_descriptors(
         match device.get_extended_pubkey(&path).await {
             Ok(xpub) => {
                 tracing::info!(%script_type, %path, "read an account from the device");
-                found.push((script_type, descriptor(script_type, fingerprint, &path, &xpub)));
+                found.push((
+                    script_type,
+                    descriptor(script_type, fingerprint, &path, &xpub),
+                ));
             }
             Err(e) => {
                 tracing::warn!(%script_type, error = %explain(&e), "the device would not give this path");
@@ -230,7 +236,9 @@ pub async fn account_descriptors(
         // Bitcoin app knows only coin type 0. It says "not supported" to every
         // path and nothing about why.
         let detail = refusals.first().cloned().unwrap_or_default();
-        let version = version.map(|v| format!(" (version {v})")).unwrap_or_default();
+        let version = version
+            .map(|v| format!(" (version {v})"))
+            .unwrap_or_default();
 
         if network != Network::Bitcoin {
             bail!(
@@ -291,12 +299,8 @@ fn explain(error: &async_hwi::Error) -> String {
         async_hwi::Error::DeviceNotFound => {
             "the device is no longer there — check the cable".into()
         }
-        async_hwi::Error::DeviceDisconnected => {
-            "the device disconnected part way through".into()
-        }
-        async_hwi::Error::UnimplementedMethod => {
-            "this device cannot do that yet".into()
-        }
+        async_hwi::Error::DeviceDisconnected => "the device disconnected part way through".into(),
+        async_hwi::Error::UnimplementedMethod => "this device cannot do that yet".into(),
         async_hwi::Error::UnsupportedVersion => {
             "this device's firmware is too old for Sieve to talk to".into()
         }
@@ -329,20 +333,28 @@ mod tests {
     #[test]
     fn the_account_path_follows_the_standards() {
         assert_eq!(
-            account_path(ScriptType::NativeSegwit, Network::Bitcoin).unwrap().to_string(),
+            account_path(ScriptType::NativeSegwit, Network::Bitcoin)
+                .unwrap()
+                .to_string(),
             "84'/0'/0'"
         );
         assert_eq!(
-            account_path(ScriptType::Taproot, Network::Bitcoin).unwrap().to_string(),
+            account_path(ScriptType::Taproot, Network::Bitcoin)
+                .unwrap()
+                .to_string(),
             "86'/0'/0'"
         );
         // Every test network is coin type 1, which is what devices expect.
         assert_eq!(
-            account_path(ScriptType::NativeSegwit, Network::Signet).unwrap().to_string(),
+            account_path(ScriptType::NativeSegwit, Network::Signet)
+                .unwrap()
+                .to_string(),
             "84'/1'/0'"
         );
         assert_eq!(
-            account_path(ScriptType::Legacy, Network::Testnet).unwrap().to_string(),
+            account_path(ScriptType::Legacy, Network::Testnet)
+                .unwrap()
+                .to_string(),
             "44'/1'/0'"
         );
     }

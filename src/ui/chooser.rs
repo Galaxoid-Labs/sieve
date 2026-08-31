@@ -46,7 +46,11 @@ impl FactoryComponent for WalletRow {
     }
 
     fn init_model(entry: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
-        WalletRow { id: entry.id, name: entry.name, network: entry.network }
+        WalletRow {
+            id: entry.id,
+            name: entry.name,
+            network: entry.network,
+        }
     }
 }
 
@@ -138,13 +142,18 @@ impl SimpleComponent for Chooser {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let wallets = FactoryVecDeque::builder()
-            .launch_default()
-            .forward(sender.input_sender(), |out| match out {
-                WalletRowOutput::Chosen(id) => ChooserMsg::Chosen(id),
-            });
+        let wallets =
+            FactoryVecDeque::builder()
+                .launch_default()
+                .forward(sender.input_sender(), |out| match out {
+                    WalletRowOutput::Chosen(id) => ChooserMsg::Chosen(id),
+                });
 
-        let mut model = Chooser { wallets, count: 0, can_go_back: false };
+        let mut model = Chooser {
+            wallets,
+            count: 0,
+            can_go_back: false,
+        };
         model.reload();
 
         let wallet_list = model.wallets.widget();

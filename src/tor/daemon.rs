@@ -108,8 +108,12 @@ fn adopt(dir: &std::path::Path) -> Option<Proxy> {
 /// Without this its data directory stays locked and every later start fails
 /// with "another Tor process is running with the same data directory".
 fn clear_stale(dir: &std::path::Path) {
-    let Ok(text) = std::fs::read_to_string(pid_file(dir)) else { return };
-    let Ok(pid) = text.trim().parse::<i32>() else { return };
+    let Ok(text) = std::fs::read_to_string(pid_file(dir)) else {
+        return;
+    };
+    let Ok(pid) = text.trim().parse::<i32>() else {
+        return;
+    };
     if pid <= 1 {
         return;
     }
@@ -120,7 +124,10 @@ fn clear_stale(dir: &std::path::Path) {
         if libc::kill(pid, 0) != 0 {
             return;
         }
-        tracing::warn!(pid, "a Tor from an earlier run is still holding the data directory");
+        tracing::warn!(
+            pid,
+            "a Tor from an earlier run is still holding the data directory"
+        );
         libc::kill(pid, libc::SIGTERM);
     }
 
@@ -230,7 +237,10 @@ pub(crate) fn ensure_in(dir: PathBuf, mut progress: impl FnMut(String)) -> Resul
         .arg("--PidFile")
         .arg(pid_file(&dir))
         // If Sieve dies without stopping Tor, Tor stops itself.
-        .args(["--__OwningControllerProcess", &std::process::id().to_string()])
+        .args([
+            "--__OwningControllerProcess",
+            &std::process::id().to_string(),
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null())
@@ -426,9 +436,18 @@ mod tests {
 
     #[test]
     fn bootstrap_progress_is_read() {
-        assert_eq!(parse_bootstrap("[notice] Bootstrapped 0% (starting)"), Some(0));
-        assert_eq!(parse_bootstrap("[notice] Bootstrapped 45% (requesting_descriptors)"), Some(45));
-        assert_eq!(parse_bootstrap("[notice] Bootstrapped 100% (done): Done"), Some(100));
+        assert_eq!(
+            parse_bootstrap("[notice] Bootstrapped 0% (starting)"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_bootstrap("[notice] Bootstrapped 45% (requesting_descriptors)"),
+            Some(45)
+        );
+        assert_eq!(
+            parse_bootstrap("[notice] Bootstrapped 100% (done): Done"),
+            Some(100)
+        );
         assert_eq!(parse_bootstrap("[notice] Opened Socks listener"), None);
     }
 
@@ -465,7 +484,10 @@ mod tests {
         // had every chance to poll.
         assert!(ours_is_alive(), "Tor was gone as soon as it started");
         std::thread::sleep(std::time::Duration::from_millis(600));
-        assert!(ours_is_alive(), "the watchdog killed a Tor that had started");
+        assert!(
+            ours_is_alive(),
+            "the watchdog killed a Tor that had started"
+        );
 
         stop();
         assert!(!ours_is_alive(), "stop left it running");
@@ -530,8 +552,7 @@ mod live {
     fn tor_actually_starts_and_answers_as_tor() {
         // The test binary lives in target/debug/deps, so the bundle beside the
         // *app* binary is named directly rather than discovered.
-        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/debug/tor/tor");
+        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/tor/tor");
         if bundled.is_file() {
             // SAFETY: single-threaded test.
             unsafe { std::env::set_var("SIEVE_TOR", &bundled) };

@@ -242,7 +242,11 @@ impl Account {
         }
         .map_err(|e| anyhow!("could not create the {script_type} wallet: {e}"))?;
 
-        Ok(Account { script_type, wallet, conn })
+        Ok(Account {
+            script_type,
+            wallet,
+            conn,
+        })
     }
 
     /// Create a wallet holding exactly one key, from WIF.
@@ -255,7 +259,12 @@ impl Account {
         db: &Path,
         network: Network,
     ) -> Result<Self> {
-        Self::create_single(&script_type.single_key_descriptor(wif), script_type, db, network)
+        Self::create_single(
+            &script_type.single_key_descriptor(wif),
+            script_type,
+            db,
+            network,
+        )
     }
 
     /// Create a watch-only wallet from a descriptor the user supplied.
@@ -279,7 +288,11 @@ impl Account {
             .create_wallet(&mut conn)
             .map_err(|e| anyhow!("could not import the {script_type} key: {e}"))?;
 
-        Ok(Account { script_type, wallet, conn })
+        Ok(Account {
+            script_type,
+            wallet,
+            conn,
+        })
     }
 
     /// Create a wallet from public descriptors — the hardware-wallet case.
@@ -305,7 +318,11 @@ impl Account {
             .create_wallet(&mut conn)
             .map_err(|e| anyhow!("could not read that descriptor: {e}"))?;
 
-        Ok(Account { script_type, wallet, conn })
+        Ok(Account {
+            script_type,
+            wallet,
+            conn,
+        })
     }
 
     /// Reopen a wallet watch-only. No key material is involved: the database
@@ -321,7 +338,11 @@ impl Account {
             .load_wallet(&mut conn)
             .map_err(|e| anyhow!("could not load the {script_type} wallet: {e}"))?;
 
-        Ok(loaded.map(|wallet| Account { script_type, wallet, conn }))
+        Ok(loaded.map(|wallet| Account {
+            script_type,
+            wallet,
+            conn,
+        }))
     }
 
     /// Identifies this account when updates arrive for several wallets at once.
@@ -341,7 +362,9 @@ impl Account {
 
 impl fmt::Debug for Account {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Account").field("script_type", &self.script_type).finish()
+        f.debug_struct("Account")
+            .field("script_type", &self.script_type)
+            .finish()
     }
 }
 
@@ -357,7 +380,10 @@ mod tests {
     #[test]
     fn the_first_address_of_each_path_matches_the_published_vectors() {
         use bdk_wallet::bitcoin::bip32::Xpriv;
-        use bdk_wallet::keys::{DerivableKey, ExtendedKey, bip39::{Language, Mnemonic}};
+        use bdk_wallet::keys::{
+            DerivableKey, ExtendedKey,
+            bip39::{Language, Mnemonic},
+        };
         use bdk_wallet::miniscript::Tap;
 
         const PHRASE: &str = "abandon abandon abandon abandon abandon abandon \
@@ -365,8 +391,14 @@ mod tests {
 
         let expected = [
             (ScriptType::Legacy, "1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA"),
-            (ScriptType::NestedSegwit, "37VucYSaXLCAsxYyAPfbSi9eh4iEcbShgf"),
-            (ScriptType::NativeSegwit, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"),
+            (
+                ScriptType::NestedSegwit,
+                "37VucYSaXLCAsxYyAPfbSi9eh4iEcbShgf",
+            ),
+            (
+                ScriptType::NativeSegwit,
+                "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+            ),
             (
                 ScriptType::Taproot,
                 "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
@@ -390,7 +422,10 @@ mod tests {
                 .peek_address(KeychainKind::External, 0)
                 .address
                 .to_string();
-            assert_eq!(first, address, "{script_type} derived the wrong first address");
+            assert_eq!(
+                first, address,
+                "{script_type} derived the wrong first address"
+            );
         }
 
         std::fs::remove_dir_all(&dir).ok();
@@ -400,7 +435,11 @@ mod tests {
     fn every_path_has_its_own_database() {
         let files: Vec<String> = ScriptType::ALL.iter().map(|s| s.db_file()).collect();
         let unique: std::collections::HashSet<_> = files.iter().collect();
-        assert_eq!(files.len(), unique.len(), "paths must not share a database file");
+        assert_eq!(
+            files.len(),
+            unique.len(),
+            "paths must not share a database file"
+        );
     }
 
     #[test]
@@ -408,13 +447,22 @@ mod tests {
         // A WIF key has no derivation, so the same key may have been used under
         // any script type and each needs its own descriptor.
         let key = "cVt4o7BGAig1UXywgGSmARhxMdzP5qvQsxKkSsc1XEkw3tDTQFpy";
-        assert_eq!(ScriptType::Legacy.single_key_descriptor(key), format!("pkh({key})"));
+        assert_eq!(
+            ScriptType::Legacy.single_key_descriptor(key),
+            format!("pkh({key})")
+        );
         assert_eq!(
             ScriptType::NestedSegwit.single_key_descriptor(key),
             format!("sh(wpkh({key}))")
         );
-        assert_eq!(ScriptType::NativeSegwit.single_key_descriptor(key), format!("wpkh({key})"));
-        assert_eq!(ScriptType::Taproot.single_key_descriptor(key), format!("tr({key})"));
+        assert_eq!(
+            ScriptType::NativeSegwit.single_key_descriptor(key),
+            format!("wpkh({key})")
+        );
+        assert_eq!(
+            ScriptType::Taproot.single_key_descriptor(key),
+            format!("tr({key})")
+        );
     }
 
     #[test]
@@ -458,7 +506,10 @@ mod tests {
             if script_type == ScriptType::Taproot {
                 assert_eq!(floor, Some(709_632));
             } else {
-                assert_eq!(floor, None, "{script_type} predates taproot and has no floor");
+                assert_eq!(
+                    floor, None,
+                    "{script_type} predates taproot and has no floor"
+                );
             }
         }
     }
@@ -503,7 +554,13 @@ impl Portfolio {
         let mut accounts = Vec::new();
         for script_type in script_types {
             let db = dir.join(script_type.db_file());
-            accounts.push(Account::create(xprv, *script_type, &db, network, lookahead)?);
+            accounts.push(Account::create(
+                xprv,
+                *script_type,
+                &db,
+                network,
+                lookahead,
+            )?);
         }
         Ok(Portfolio { accounts, primary })
     }
@@ -602,8 +659,7 @@ mod persistence_tests {
 
         let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
         let txid = {
-            let mut account =
-                Account::create(xprv, ScriptType::Taproot, &db, network, 25).unwrap();
+            let mut account = Account::create(xprv, ScriptType::Taproot, &db, network, 25).unwrap();
             let address = account
                 .wallet
                 .reveal_next_address(KeychainKind::External)
@@ -626,13 +682,17 @@ mod persistence_tests {
                 }],
             };
             let txid = tx.compute_txid();
-            account.wallet.apply_unconfirmed_txs([(tx, 1_700_000_000u64)]);
+            account
+                .wallet
+                .apply_unconfirmed_txs([(tx, 1_700_000_000u64)]);
             account.persist().unwrap();
             txid
         };
 
         // Reopened the way a restart reopens it: from the database alone.
-        let mut account = Account::load(ScriptType::Taproot, &db, network).unwrap().unwrap();
+        let mut account = Account::load(ScriptType::Taproot, &db, network)
+            .unwrap()
+            .unwrap();
         let found = account
             .wallet
             .transactions()
@@ -642,7 +702,10 @@ mod persistence_tests {
             matches!(found.chain_position, ChainPosition::Unconfirmed { .. }),
             "it came back, but not as pending"
         );
-        assert_eq!(account.wallet.balance().untrusted_pending, Amount::from_sat(50_000));
+        assert_eq!(
+            account.wallet.balance().untrusted_pending,
+            Amount::from_sat(50_000)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -241,7 +241,10 @@ pub enum AppMsg {
     ToggleDenomination,
     ForgetPeers,
     SetAppearance(crate::settings::Appearance),
-    RenameWallet { paths: Paths, name: String },
+    RenameWallet {
+        paths: Paths,
+        name: String,
+    },
     SetShowFiat(bool),
     SetMempoolFees(bool),
     SetTor(bool),
@@ -262,13 +265,24 @@ pub enum AppMsg {
     /// Ask whether to delete the open wallet from this computer.
     AskRemoveWallet,
     /// Name a transaction or an address, or clear its name.
-    SetLabel { kind: wallet::labels::Kind, reference: String, text: String },
+    SetLabel {
+        kind: wallet::labels::Kind,
+        reference: String,
+        text: String,
+    },
     /// Rebuild an unconfirmed payment at a higher fee, without signing it.
-    PlanBump { txid: String, from: wallet::accounts::ScriptType, fee_rate: f64 },
+    PlanBump {
+        txid: String,
+        from: wallet::accounts::ScriptType,
+        fee_rate: f64,
+    },
     /// Write every label out as a BIP-329 file, or read one in.
     ExportLabels,
     ImportLabels,
-    LabelFile { path: std::path::PathBuf, importing: bool },
+    LabelFile {
+        path: std::path::PathBuf,
+        importing: bool,
+    },
     /// Somebody touched the window. Not a state change — it only moves the
     /// clock the idle lock counts from.
     Stirred,
@@ -288,7 +302,10 @@ pub enum AppMsg {
     /// arrive with a watch-only summary and nothing secret. The paths say
     /// *which* wallet, which is what decides whether the running light client
     /// still belongs to what is on screen.
-    Ready { paths: Paths, summary: Summary },
+    Ready {
+        paths: Paths,
+        summary: Summary,
+    },
     /// Reveal a fresh receive address on one derivation path.
     RevealAddress(crate::wallet::accounts::ScriptType),
     /// Build a transaction and hand back what it would cost. Watch-only: no
@@ -310,13 +327,31 @@ pub enum AppMsg {
 
 #[derive(Debug)]
 pub enum AppCmd {
-    Started { generation: u64, result: Result<Arc<Session>, String> },
-    Update { generation: u64, result: Result<Summary, String> },
+    Started {
+        generation: u64,
+        result: Result<Arc<Session>, String>,
+    },
+    Update {
+        generation: u64,
+        result: Result<Summary, String>,
+    },
     /// `None` means the node stopped.
-    Progress { generation: u64, progress: Option<Progress> },
-    Warning { generation: u64, notice: Option<Notice> },
-    Revealed { generation: u64, result: Result<(String, Summary), String> },
-    Chain { generation: u64, result: Result<crate::wallet::node::ChainInfo, String> },
+    Progress {
+        generation: u64,
+        progress: Option<Progress>,
+    },
+    Warning {
+        generation: u64,
+        notice: Option<Notice>,
+    },
+    Revealed {
+        generation: u64,
+        result: Result<(String, Summary), String>,
+    },
+    Chain {
+        generation: u64,
+        result: Result<crate::wallet::node::ChainInfo, String>,
+    },
     Planned(Result<crate::wallet::send::Plan, String>),
     Sent(Result<(String, Summary), String>),
     Tick,
@@ -330,7 +365,10 @@ pub enum AppCmd {
     /// A watch-only wallet, opened without a password.
     Opened(Result<(Paths, Summary), String>),
     /// Who is connected, without waiting for the chain.
-    Peers { generation: u64, peers: Vec<crate::wallet::node::PeerInfo> },
+    Peers {
+        generation: u64,
+        peers: Vec<crate::wallet::node::PeerInfo>,
+    },
     /// A fee rate in sat/vB, and where it came from.
     Estimated(Result<(f64, String), String>),
     /// Bootstrap news, while Tor is starting.
@@ -339,7 +377,10 @@ pub enum AppCmd {
     /// switch someone just flipped — which goes back when it fails — from Tor
     /// already being on, where the honest answer is to stay on and not
     /// connect.
-    TorReady { asked_for: bool, result: Result<crate::tor::Proxy, String> },
+    TorReady {
+        asked_for: bool,
+        result: Result<crate::tor::Proxy, String>,
+    },
 }
 
 #[relm4::component(pub)]
@@ -379,30 +420,29 @@ impl Component for App {
         // No fixed height: the dialog sizes to its content, so the button can
         // never end up below the fold.
 
-        let chooser = Chooser::builder().launch(()).forward(
-            sender.input_sender(),
-            |out| match out {
-                ChooserOutput::Open(id) => AppMsg::OpenWallet(id),
-                ChooserOutput::New => AppMsg::ShowOnboarding,
-                ChooserOutput::Import => AppMsg::ShowRestore,
-                ChooserOutput::Back => AppMsg::Back,
-            },
-        );
-        let onboarding = Onboarding::builder().launch(()).forward(
-            sender.input_sender(),
-            |out| match out {
+        let chooser =
+            Chooser::builder()
+                .launch(())
+                .forward(sender.input_sender(), |out| match out {
+                    ChooserOutput::Open(id) => AppMsg::OpenWallet(id),
+                    ChooserOutput::New => AppMsg::ShowOnboarding,
+                    ChooserOutput::Import => AppMsg::ShowRestore,
+                    ChooserOutput::Back => AppMsg::Back,
+                });
+        let onboarding = Onboarding::builder()
+            .launch(())
+            .forward(sender.input_sender(), |out| match out {
                 OnboardingOutput::Created { paths, summary } => AppMsg::Ready { paths, summary },
                 OnboardingOutput::WantsRestore => AppMsg::ShowRestore,
                 OnboardingOutput::Cancelled => AppMsg::Back,
-            },
-        );
-        let restore = Restore::builder().launch(()).forward(
-            sender.input_sender(),
-            |out| match out {
-                RestoreOutput::Imported { paths, summary } => AppMsg::Ready { paths, summary },
-                RestoreOutput::Cancelled => AppMsg::Back,
-            },
-        );
+            });
+        let restore =
+            Restore::builder()
+                .launch(())
+                .forward(sender.input_sender(), |out| match out {
+                    RestoreOutput::Imported { paths, summary } => AppMsg::Ready { paths, summary },
+                    RestoreOutput::Cancelled => AppMsg::Back,
+                });
         let unlock = Unlock::builder()
             .launch(())
             .forward(sender.input_sender(), |out| match out {
@@ -410,34 +450,46 @@ impl Component for App {
                 UnlockOutput::SwitchWallet => AppMsg::Back,
             });
         let reveal = Reveal::builder().launch(()).detach();
-        let wallet = WalletPage::builder().launch(()).forward(
-            sender.input_sender(),
-            |out| match out {
-                crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowWallets,
-                crate::ui::wallet_page::WalletPageOutput::ShowPreferences => {
-                    AppMsg::ShowPreferences
-                }
-                crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
-                crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
-                    AppMsg::RevealAddress(script_type)
-                }
-                crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
-                crate::ui::wallet_page::WalletPageOutput::AskRescan => AppMsg::AskRescan,
-                crate::ui::wallet_page::WalletPageOutput::PlanBump { txid, from, fee_rate } => {
-                    AppMsg::PlanBump { txid, from, fee_rate }
-                }
-                crate::ui::wallet_page::WalletPageOutput::SetLabel { kind, reference, text } => {
-                    AppMsg::SetLabel { kind, reference, text }
-                }
-                crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
-                crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
-                    AppMsg::PlanSend(draft)
-                }
-                crate::ui::wallet_page::WalletPageOutput::Send { plan, password } => {
-                    AppMsg::SendNow { plan, password }
-                }
-            },
-        );
+        let wallet =
+            WalletPage::builder()
+                .launch(())
+                .forward(sender.input_sender(), |out| match out {
+                    crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowWallets,
+                    crate::ui::wallet_page::WalletPageOutput::ShowPreferences => {
+                        AppMsg::ShowPreferences
+                    }
+                    crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
+                    crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
+                        AppMsg::RevealAddress(script_type)
+                    }
+                    crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
+                    crate::ui::wallet_page::WalletPageOutput::AskRescan => AppMsg::AskRescan,
+                    crate::ui::wallet_page::WalletPageOutput::PlanBump {
+                        txid,
+                        from,
+                        fee_rate,
+                    } => AppMsg::PlanBump {
+                        txid,
+                        from,
+                        fee_rate,
+                    },
+                    crate::ui::wallet_page::WalletPageOutput::SetLabel {
+                        kind,
+                        reference,
+                        text,
+                    } => AppMsg::SetLabel {
+                        kind,
+                        reference,
+                        text,
+                    },
+                    crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
+                    crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
+                        AppMsg::PlanSend(draft)
+                    }
+                    crate::ui::wallet_page::WalletPageOutput::Send { plan, password } => {
+                        AppMsg::SendNow { plan, password }
+                    }
+                });
 
         // The desktop owns this preference, not the app. Normally
         // `ColorScheme::Default` follows it on its own — but libadwaita's
@@ -483,7 +535,9 @@ impl Component for App {
 
         tracing::debug!(
             dark = style.is_dark(),
-            desktop = desktop.as_ref().map(|s| s.string("color-scheme").to_string()),
+            desktop = desktop
+                .as_ref()
+                .map(|s| s.string("color-scheme").to_string()),
             "following the system color scheme"
         );
         style.connect_dark_notify({
@@ -505,12 +559,27 @@ impl Component for App {
         reveal_page.set_tag(Some("phrase"));
 
         for (tag, title, child, can_pop) in [
-            ("wallet", "Wallet", wallet.widget().clone().upcast::<gtk::Widget>(), true),
+            (
+                "wallet",
+                "Wallet",
+                wallet.widget().clone().upcast::<gtk::Widget>(),
+                true,
+            ),
             // Setup and import drive their own back button: theirs steps
             // backwards through a flow before leaving it, and two back buttons
             // in one header is worse than one that does both jobs.
-            ("onboarding", "New wallet", onboarding.widget().clone().upcast(), false),
-            ("restore", "Import", restore.widget().clone().upcast(), false),
+            (
+                "onboarding",
+                "New wallet",
+                onboarding.widget().clone().upcast(),
+                false,
+            ),
+            (
+                "restore",
+                "Import",
+                restore.widget().clone().upcast(),
+                false,
+            ),
         ] {
             let page = adw::NavigationPage::new(&child, title);
             page.set_tag(Some(tag));
@@ -617,12 +686,7 @@ impl Component for App {
         ComponentParts { model, widgets }
     }
 
-    fn update(
-        &mut self,
-        msg: Self::Input,
-        sender: ComponentSender<Self>,
-        _root: &Self::Root,
-    ) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
             AppMsg::Back => {
                 // Setup and import set can_pop false so they can own their
@@ -653,7 +717,9 @@ impl Component for App {
             }
 
             AppMsg::RefreshChain => {
-                let Some(session) = self.session.clone() else { return };
+                let Some(session) = self.session.clone() else {
+                    return;
+                };
                 let generation = self.generation;
                 sender.oneshot_command(async move {
                     AppCmd::Chain {
@@ -687,7 +753,8 @@ impl Component for App {
             AppMsg::ToggleDenomination => {
                 self.settings.denomination = self.settings.denomination.toggled();
                 self.settings.save();
-                self.wallet.emit(WalletPageMsg::SetDenomination(self.settings.denomination));
+                self.wallet
+                    .emit(WalletPageMsg::SetDenomination(self.settings.denomination));
                 self.refresh_amounts_row();
             }
 
@@ -769,7 +836,9 @@ impl Component for App {
                     return;
                 }
 
-                let Some(session) = self.session.clone() else { return };
+                let Some(session) = self.session.clone() else {
+                    return;
+                };
                 // One block download per tip, not one per visit.
                 if let Some((height, rate, source)) = &self.fee_estimate
                     && self.chain_tip == Some(*height)
@@ -783,9 +852,7 @@ impl Component for App {
                         session
                             .average_fee_at_tip()
                             .await
-                            .map(|(height, rate)| {
-                                (rate, format!("Average of block {height}"))
-                            })
+                            .map(|(height, rate)| (rate, format!("Average of block {height}")))
                             .map_err(|e| e.to_string()),
                     )
                 });
@@ -844,15 +911,22 @@ impl Component for App {
                 self.prefs.push_subpage(&self.chooser_page);
             }
 
-            AppMsg::SetLabel { kind, reference, text } => {
-                let Some(paths) = self.active.clone() else { return };
+            AppMsg::SetLabel {
+                kind,
+                reference,
+                text,
+            } => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
                 let mut labels = wallet::labels::Labels::load(&paths.dir);
                 labels.set(kind, &reference, &text);
                 if let Err(e) = labels.save(&paths.dir) {
                     tracing::error!(%e, "could not save a label");
-                    self.wallet.emit(WalletPageMsg::Toast(crate::ui::send::capitalise(
-                        &e.to_string(),
-                    )));
+                    self.wallet
+                        .emit(WalletPageMsg::Toast(crate::ui::send::capitalise(
+                            &e.to_string(),
+                        )));
                     return;
                 }
                 self.wallet.emit(WalletPageMsg::SetLabels(Box::new(labels)));
@@ -860,7 +934,9 @@ impl Component for App {
 
             AppMsg::ExportLabels | AppMsg::ImportLabels => {
                 let importing = matches!(msg, AppMsg::ImportLabels);
-                let Some(window) = self.nav.root().and_downcast::<gtk::Window>() else { return };
+                let Some(window) = self.nav.root().and_downcast::<gtk::Window>() else {
+                    return;
+                };
 
                 let filter = gtk::FileFilter::new();
                 filter.set_name(Some("BIP-329 labels"));
@@ -869,7 +945,11 @@ impl Component for App {
                 filters.append(&filter);
 
                 let dialog = gtk::FileDialog::builder()
-                    .title(if importing { "Import labels" } else { "Export labels" })
+                    .title(if importing {
+                        "Import labels"
+                    } else {
+                        "Export labels"
+                    })
                     .filters(&filters)
                     .modal(true)
                     .build();
@@ -895,7 +975,9 @@ impl Component for App {
             }
 
             AppMsg::LabelFile { path, importing } => {
-                let Some(paths) = self.active.clone() else { return };
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
                 let result = if importing {
                     self.import_labels(&paths, &path)
                 } else {
@@ -956,7 +1038,11 @@ impl Component for App {
                 ));
             }
 
-            AppMsg::PlanBump { txid, from, fee_rate } => {
+            AppMsg::PlanBump {
+                txid,
+                from,
+                fee_rate,
+            } => {
                 // Remembered now so the label can follow the payment if this
                 // one is the one that gets broadcast.
                 self.bumping = Some(txid.clone());
@@ -988,7 +1074,9 @@ impl Component for App {
             }
 
             AppMsg::AskRescan => {
-                let Some(paths) = self.active.clone() else { return };
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
                 let birthday = wallet::Meta::load(&paths).map(|m| m.birthday_height);
 
                 // Said in terms of what it costs, because that is the whole
@@ -1003,11 +1091,13 @@ impl Component for App {
                      it confirms.",
                 );
                 if let Some(height) = birthday {
-                    body.push_str(&format!("\n\nScanning again from block {}.", crate::ui::wallet_page::thousands(height)));
+                    body.push_str(&format!(
+                        "\n\nScanning again from block {}.",
+                        crate::ui::wallet_page::thousands(height)
+                    ));
                 }
 
-                let dialog =
-                    adw::AlertDialog::new(Some("Scan the chain again?"), Some(&body));
+                let dialog = adw::AlertDialog::new(Some("Scan the chain again?"), Some(&body));
                 dialog.add_response("cancel", "Cancel");
                 dialog.add_response("rescan", "Rescan");
                 // Destructive of work, not of money — but the hours are real,
@@ -1031,7 +1121,9 @@ impl Component for App {
             }
 
             AppMsg::Rescan => {
-                let Some(paths) = self.active.clone() else { return };
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
 
                 // The node holds these database files open, so it goes first.
                 if let Some(session) = self.session.take() {
@@ -1047,7 +1139,9 @@ impl Component for App {
             }
 
             AppMsg::AskRemoveWallet => {
-                let Some(paths) = self.active.clone() else { return };
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
                 let id = paths
                     .dir
                     .file_name()
@@ -1130,13 +1224,17 @@ impl Component for App {
 
                 if let Err(e) = wallet::remove(&paths) {
                     tracing::error!(%e, "could not remove the wallet");
-                    self.prefs.add_toast(adw::Toast::new(&crate::ui::send::capitalise(
-                        &e.to_string(),
-                    )));
+                    self.prefs
+                        .add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                            &e.to_string(),
+                        )));
                     return;
                 }
 
-                let id = paths.dir.file_name().map(|n| n.to_string_lossy().to_string());
+                let id = paths
+                    .dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string());
                 if self.settings.last_wallet == id {
                     self.settings.last_wallet = None;
                     self.settings.save();
@@ -1260,7 +1358,9 @@ impl Component for App {
                 // own chain and its own peers. Everything on screen was right
                 // except the one word saying whose it was.
                 self.wallet.emit(WalletPageMsg::SetName(
-                    meta.as_ref().map(|m| m.display_name(&id)).unwrap_or_else(|| id.clone()),
+                    meta.as_ref()
+                        .map(|m| m.display_name(&id))
+                        .unwrap_or_else(|| id.clone()),
                 ));
 
                 // And it is the wallet to come back to next time. Without
@@ -1273,9 +1373,12 @@ impl Component for App {
                 if let Some(meta) = &meta {
                     // So the sync status can say how big the job is, rather
                     // than only how far through it is.
-                    self.wallet.emit(WalletPageMsg::SetBirthday(meta.birthday_height));
-                    self.wallet.emit(WalletPageMsg::SetNetwork(meta.network.clone()));
-                    self.wallet.emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
+                    self.wallet
+                        .emit(WalletPageMsg::SetBirthday(meta.birthday_height));
+                    self.wallet
+                        .emit(WalletPageMsg::SetNetwork(meta.network.clone()));
+                    self.wallet
+                        .emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
                 }
                 self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
                     wallet::labels::Labels::load(&paths.dir),
@@ -1305,7 +1408,10 @@ impl Component for App {
                 sender.oneshot_command(async move {
                     AppCmd::Revealed {
                         generation,
-                        result: session.reveal_next(script_type).await.map_err(|e| e.to_string()),
+                        result: session
+                            .reveal_next(script_type)
+                            .await
+                            .map_err(|e| e.to_string()),
                     }
                 });
             }
@@ -1337,8 +1443,7 @@ impl Component for App {
                     let opened = tokio::task::spawn_blocking(move || {
                         let blob = std::fs::read(&paths.vault)
                             .map_err(|e| format!("Cannot read the wallet file: {e}"))?;
-                        crate::vault::open(&blob, password.0.as_bytes())
-                            .map_err(|e| e.to_string())
+                        crate::vault::open(&blob, password.0.as_bytes()).map_err(|e| e.to_string())
                     })
                     .await;
 
@@ -1350,9 +1455,9 @@ impl Component for App {
                     let text = match std::str::from_utf8(&secret) {
                         Ok(text) => text.to_string(),
                         Err(_) => {
-                            return AppCmd::Sent(Err(
-                                "The wallet file is not readable text".into()
-                            ));
+                            return AppCmd::Sent(
+                                Err("The wallet file is not readable text".into()),
+                            );
                         }
                     };
 
@@ -1379,7 +1484,10 @@ impl Component for App {
         _root: &Self::Root,
     ) {
         match msg {
-            AppCmd::Started { generation, result: Ok(session) } if self.current(generation) => {
+            AppCmd::Started {
+                generation,
+                result: Ok(session),
+            } if self.current(generation) => {
                 tracing::info!("light client started");
                 self.session = Some(session);
                 // Two independent loops: one awaits wallet updates, the other
@@ -1391,11 +1499,17 @@ impl Component for App {
                 sender.input(AppMsg::RefreshChain);
                 self.schedule_tick(&sender);
             }
-            AppCmd::Started { generation, result: Err(message) } if self.current(generation) => {
+            AppCmd::Started {
+                generation,
+                result: Err(message),
+            } if self.current(generation) => {
                 tracing::error!(%message, "could not start the light client");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
-            AppCmd::Chain { generation, result: Ok(info) } if self.current(generation) => {
+            AppCmd::Chain {
+                generation,
+                result: Ok(info),
+            } if self.current(generation) => {
                 // What makes a block-derived fee estimate stale.
                 self.chain_tip = Some(info.tip_height);
                 self.wallet.emit(WalletPageMsg::SetChain(Some(info)));
@@ -1406,7 +1520,8 @@ impl Component for App {
             }
             AppCmd::Rescanned(Err(message)) => {
                 tracing::error!(%message, "could not clear the chain data");
-                self.wallet.emit(WalletPageMsg::Toast(crate::ui::send::capitalise(&message)));
+                self.wallet
+                    .emit(WalletPageMsg::Toast(crate::ui::send::capitalise(&message)));
                 // Whatever survived, the wallet is still watchable.
                 self.start_session(&sender);
             }
@@ -1421,8 +1536,11 @@ impl Component for App {
                     setting = ?self.settings.idle_lock,
                     "idle check"
                 );
-                if should_lock(self.settings.idle_lock, self.unlocked, self.last_seen.elapsed())
-                {
+                if should_lock(
+                    self.settings.idle_lock,
+                    self.unlocked,
+                    self.last_seen.elapsed(),
+                ) {
                     sender.input(AppMsg::Lock(LockReason::Idle));
                 }
                 self.watch_for_idle(&sender);
@@ -1439,10 +1557,16 @@ impl Component for App {
                 sender.input(AppMsg::RefreshChain);
                 self.schedule_tick(&sender);
             }
-            AppCmd::Chain { generation, result: Err(message) } if self.current(generation) => {
+            AppCmd::Chain {
+                generation,
+                result: Err(message),
+            } if self.current(generation) => {
                 tracing::warn!(%message, "could not read the chain");
             }
-            AppCmd::Update { generation, result: Ok(summary) } if self.current(generation) => {
+            AppCmd::Update {
+                generation,
+                result: Ok(summary),
+            } if self.current(generation) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
                 // What this scan cost in blocks, so the next one can draw a
                 // bar for the phase the node reports no total for. Once per
@@ -1453,25 +1577,31 @@ impl Component for App {
                     let read = session.blocks_read() as u32;
                     if read > 0 {
                         wallet::Meta::record_matched_blocks(paths, read);
-                        self.wallet.emit(WalletPageMsg::SetMatchedBlocks(Some(read)));
+                        self.wallet
+                            .emit(WalletPageMsg::SetMatchedBlocks(Some(read)));
                         tracing::debug!(blocks = read, "recorded what this scan had to read");
                     }
                     self.blocks_recorded = true;
                 }
                 self.balance_sats = Some(summary.balance_sats);
                 self.wallet.emit(WalletPageMsg::Show(summary));
-                self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
+                self.wallet
+                    .emit(WalletPageMsg::SetProgress(Progress::Synced));
                 sender.input(AppMsg::RefreshChain);
                 self.await_update(&sender);
             }
-            AppCmd::Update { generation, result: Err(message) } if self.current(generation) => {
+            AppCmd::Update {
+                generation,
+                result: Err(message),
+            } if self.current(generation) => {
                 // Do not re-arm: the loop would spin on a persistent failure.
                 tracing::error!(%message, "sync failed");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
-            AppCmd::Progress { generation, progress: Some(progress) }
-                if self.current(generation) =>
-            {
+            AppCmd::Progress {
+                generation,
+                progress: Some(progress),
+            } if self.current(generation) => {
                 // The block headers are complete the moment filter work
                 // begins: kyoto walks the whole header chain before asking for
                 // a single filter header. That is when to write them out.
@@ -1493,10 +1623,19 @@ impl Component for App {
             AppCmd::Progress { progress: None, .. } => {
                 tracing::warn!("the node stopped emitting progress")
             }
-            AppCmd::Warning { generation, notice: Some(notice) } if self.current(generation) => {
+            AppCmd::Warning {
+                generation,
+                notice: Some(notice),
+            } if self.current(generation) => {
                 match notice {
-                    Notice::Peers { connected, required } => {
-                        self.wallet.emit(WalletPageMsg::Peers { connected, required });
+                    Notice::Peers {
+                        connected,
+                        required,
+                    } => {
+                        self.wallet.emit(WalletPageMsg::Peers {
+                            connected,
+                            required,
+                        });
                         // Just the peers, not the whole chain view: reading the
                         // chain waits on a header, which during a header
                         // download is the slowest thing the node is doing. That
@@ -1529,7 +1668,9 @@ impl Component for App {
                 self.refresh_tor_row();
             }
 
-            AppCmd::TorReady { result: Ok(proxy), .. } => {
+            AppCmd::TorReady {
+                result: Ok(proxy), ..
+            } => {
                 tracing::info!(%proxy, "Tor is ready");
                 self.tor_failed = false;
                 self.tor_active = Some(proxy);
@@ -1543,7 +1684,10 @@ impl Component for App {
                 self.restart_session(&sender);
             }
 
-            AppCmd::TorReady { asked_for, result: Err(message) } => {
+            AppCmd::TorReady {
+                asked_for,
+                result: Err(message),
+            } => {
                 tracing::warn!(%message, "could not bring Tor up");
                 self.tor_active = None;
                 self.tor_failed = true;
@@ -1562,7 +1706,8 @@ impl Component for App {
                     // out over the clear instead would be the one thing this
                     // must never do quietly, so nothing connects and the
                     // wallet says so, with a way to try again.
-                    self.wallet.emit(WalletPageMsg::TorProblem(Some(message.clone())));
+                    self.wallet
+                        .emit(WalletPageMsg::TorProblem(Some(message.clone())));
                 }
 
                 self.tor_status = Some(message);
@@ -1584,8 +1729,9 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::Planned(Box::new(result)));
             }
             AppCmd::PlannedBump(result) => {
-                self.wallet
-                    .emit(WalletPageMsg::BumpPlanned(Box::new(result.map(|plan| *plan))));
+                self.wallet.emit(WalletPageMsg::BumpPlanned(Box::new(
+                    result.map(|plan| *plan),
+                )));
             }
 
             AppCmd::Sent(Ok((txid, summary))) => {
@@ -1599,15 +1745,15 @@ impl Component for App {
                     && let Some(paths) = self.active.clone()
                 {
                     let mut labels = wallet::labels::Labels::load(&paths.dir);
-                    if let Some(name) =
-                        labels.get(wallet::labels::Kind::Tx, replaced).map(str::to_owned)
+                    if let Some(name) = labels
+                        .get(wallet::labels::Kind::Tx, replaced)
+                        .map(str::to_owned)
                     {
                         labels.set(wallet::labels::Kind::Tx, &txid, &name);
                         if let Err(e) = labels.save(&paths.dir) {
                             tracing::warn!(%e, "could not carry the label to the replacement");
                         } else {
-                            self.wallet
-                                .emit(WalletPageMsg::SetLabels(Box::new(labels)));
+                            self.wallet.emit(WalletPageMsg::SetLabels(Box::new(labels)));
                         }
                     }
                 }
@@ -1630,11 +1776,13 @@ impl Component for App {
                 }
             }
             AppCmd::Sent(Err(message)) => {
-                self.wallet.emit(WalletPageMsg::Sent(Box::new(Err(message))));
+                self.wallet
+                    .emit(WalletPageMsg::Sent(Box::new(Err(message))));
             }
-            AppCmd::Revealed { generation, result: Ok((address, summary)) }
-                if self.current(generation) =>
-            {
+            AppCmd::Revealed {
+                generation,
+                result: Ok((address, summary)),
+            } if self.current(generation) => {
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::ShowFreshAddress(address));
             }
@@ -1648,7 +1796,10 @@ impl Component for App {
                 tracing::warn!(%message, "could not fetch a price");
                 self.wallet.emit(WalletPageMsg::SetPrice(None));
             }
-            AppCmd::Revealed { generation, result: Err(message) } if self.current(generation) => {
+            AppCmd::Revealed {
+                generation,
+                result: Err(message),
+            } if self.current(generation) => {
                 tracing::error!(%message, "could not reveal an address");
                 self.wallet.emit(WalletPageMsg::Failed(message));
             }
@@ -1818,9 +1969,15 @@ impl App {
             return;
         }
 
-        let Progress::Scanning(fraction) = progress else { return };
-        let (Some(paths), Some(tip)) = (self.active.clone(), self.chain_tip) else { return };
-        let Some(meta) = wallet::Meta::load(&paths) else { return };
+        let Progress::Scanning(fraction) = progress else {
+            return;
+        };
+        let (Some(paths), Some(tip)) = (self.active.clone(), self.chain_tip) else {
+            return;
+        };
+        let Some(meta) = wallet::Meta::load(&paths) else {
+            return;
+        };
 
         // Filter headers are the first quarter of kyoto's figure; the filters
         // themselves are the rest, and they are checked in order from the scan
@@ -1836,7 +1993,9 @@ impl App {
         }
 
         let reached = from + (done * f64::from(tip - from)) as u32;
-        let Some(safe) = reached.checked_sub(SCAN_MARGIN) else { return };
+        let Some(safe) = reached.checked_sub(SCAN_MARGIN) else {
+            return;
+        };
         if safe <= from {
             return;
         }
@@ -1857,13 +2016,10 @@ impl App {
     ///
     /// The hash comes from the node's own memory. Without it the height is
     /// useless — a checkpoint is both, and the node will not take one half.
-    fn pin_resume_point(
-        &self,
-        paths: Paths,
-        height: u32,
-        sender: &ComponentSender<Self>,
-    ) {
-        let Some(session) = self.session.clone() else { return };
+    fn pin_resume_point(&self, paths: Paths, height: u32, sender: &ComponentSender<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         sender.oneshot_command(async move {
             if let Some(hash) = session.header_hash(height).await {
                 tracing::info!(height, "recording how far the scan has checked");
@@ -1886,11 +2042,16 @@ impl App {
         if !due {
             return;
         }
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         self.peers_read = Some(std::time::Instant::now());
         let generation = self.generation;
         sender.oneshot_command(async move {
-            AppCmd::Peers { generation, peers: session.peers().await }
+            AppCmd::Peers {
+                generation,
+                peers: session.peers().await,
+            }
         });
     }
 
@@ -1924,7 +2085,9 @@ impl App {
     /// In place, for the same reason as the Tor row: rebuilding the page under
     /// somebody who has just tapped a row throws them back to the top of it.
     fn refresh_amounts_row(&self) {
-        let Some((row, unit)) = &self.amounts_row else { return };
+        let Some((row, unit)) = &self.amounts_row else {
+            return;
+        };
         row.set_subtitle(match self.settings.denomination {
             crate::settings::Denomination::Sats => "Satoshis",
             crate::settings::Denomination::Btc => "Decimal BTC",
@@ -2015,7 +2178,9 @@ impl App {
                     // would silently ignore what was asked for.
                     if let Some(proxy) = configured {
                         let result = tokio::task::spawn_blocking(move || {
-                            crate::tor::check(proxy).map(|_| proxy).map_err(|e| e.to_string())
+                            crate::tor::check(proxy)
+                                .map(|_| proxy)
+                                .map_err(|e| e.to_string())
                         })
                         .await
                         .unwrap_or_else(|e| Err(e.to_string()));
@@ -2047,7 +2212,9 @@ impl App {
         if self.session.is_some() {
             return;
         }
-        let Some(paths) = self.active.clone() else { return };
+        let Some(paths) = self.active.clone() else {
+            return;
+        };
         if !self.unlocked {
             return;
         }
@@ -2125,11 +2292,17 @@ impl App {
     /// the whole of it.
     fn restate_wallet(&self, sender: &ComponentSender<Self>) {
         let Some(paths) = &self.active else { return };
-        let Some(meta) = wallet::Meta::load(paths) else { return };
-        self.wallet.emit(WalletPageMsg::SetBirthday(meta.birthday_height));
-        self.wallet.emit(WalletPageMsg::SetNetwork(meta.network.clone()));
-        self.wallet.emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
-        self.wallet.emit(WalletPageMsg::SetWatchOnly(meta.watch_only));
+        let Some(meta) = wallet::Meta::load(paths) else {
+            return;
+        };
+        self.wallet
+            .emit(WalletPageMsg::SetBirthday(meta.birthday_height));
+        self.wallet
+            .emit(WalletPageMsg::SetNetwork(meta.network.clone()));
+        self.wallet
+            .emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
+        self.wallet
+            .emit(WalletPageMsg::SetWatchOnly(meta.watch_only));
         self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
             wallet::labels::Labels::load(&paths.dir),
         )));
@@ -2142,7 +2315,8 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        self.wallet.emit(WalletPageMsg::SetName(meta.display_name(&id)));
+        self.wallet
+            .emit(WalletPageMsg::SetName(meta.display_name(&id)));
     }
 
     /// Close a dialog only if it is on screen. Closing one that was never
@@ -2251,8 +2425,7 @@ impl App {
         {
             let sender = sender.clone();
             appearance.connect_selected_notify(move |row| {
-                if let Some(choice) =
-                    crate::settings::Appearance::ALL.get(row.selected() as usize)
+                if let Some(choice) = crate::settings::Appearance::ALL.get(row.selected() as usize)
                 {
                     sender.input(AppMsg::SetAppearance(*choice));
                 }
@@ -2290,8 +2463,7 @@ impl App {
         {
             let sender = sender.clone();
             idle.connect_selected_notify(move |row| {
-                if let Some(choice) = crate::settings::IdleLock::ALL.get(row.selected() as usize)
-                {
+                if let Some(choice) = crate::settings::IdleLock::ALL.get(row.selected() as usize) {
                     sender.input(AppMsg::SetIdleLock(*choice));
                 }
             });
@@ -2520,7 +2692,9 @@ impl App {
                 .is_some_and(|m| m.watch_only);
             phrase.set_subtitle(match (watch_only, self.unlocked) {
                 // Nothing was ever sealed here, so there is nothing to open.
-                (true, _) => "This wallet holds no keys — its recovery phrase lives wherever the keys do",
+                (true, _) => {
+                    "This wallet holds no keys — its recovery phrase lives wherever the keys do"
+                }
                 (false, true) => "Show the words again to write them down",
                 (false, false) => "Unlock this wallet to show the words",
             });
@@ -2608,7 +2782,9 @@ impl App {
     }
 
     fn await_update(&self, sender: &ComponentSender<Self>) {
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let generation = self.generation;
         sender.oneshot_command(async move {
             AppCmd::Update {
@@ -2619,18 +2795,28 @@ impl App {
     }
 
     fn await_progress(&self, sender: &ComponentSender<Self>) {
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let generation = self.generation;
         sender.oneshot_command(async move {
-            AppCmd::Progress { generation, progress: session.next_progress().await }
+            AppCmd::Progress {
+                generation,
+                progress: session.next_progress().await,
+            }
         });
     }
 
     fn await_warning(&self, sender: &ComponentSender<Self>) {
-        let Some(session) = self.session.clone() else { return };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         let generation = self.generation;
         sender.oneshot_command(async move {
-            AppCmd::Warning { generation, notice: session.next_warning().await }
+            AppCmd::Warning {
+                generation,
+                notice: session.next_warning().await,
+            }
         });
     }
 }
@@ -2648,15 +2834,31 @@ mod tests {
         // The ordinary case, and the one that cannot be reached from a test
         // through the interface: a wallet somebody unlocked and walked away
         // from.
-        assert!(!should_lock(IdleLock::After5Minutes, true, five - Duration::from_secs(1)));
+        assert!(!should_lock(
+            IdleLock::After5Minutes,
+            true,
+            five - Duration::from_secs(1)
+        ));
         assert!(should_lock(IdleLock::After5Minutes, true, five));
-        assert!(should_lock(IdleLock::After5Minutes, true, Duration::from_secs(3600)));
+        assert!(should_lock(
+            IdleLock::After5Minutes,
+            true,
+            Duration::from_secs(3600)
+        ));
 
         // Never means never, however long it has been.
-        assert!(!should_lock(IdleLock::Never, true, Duration::from_secs(86_400)));
+        assert!(!should_lock(
+            IdleLock::Never,
+            true,
+            Duration::from_secs(86_400)
+        ));
 
         // And a wallet that is already shut is not shut again — that would
         // toast "Locked" at somebody staring at a password prompt.
-        assert!(!should_lock(IdleLock::After5Minutes, false, Duration::from_secs(86_400)));
+        assert!(!should_lock(
+            IdleLock::After5Minutes,
+            false,
+            Duration::from_secs(86_400)
+        ));
     }
 }

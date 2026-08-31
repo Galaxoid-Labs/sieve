@@ -48,7 +48,10 @@ pub fn parse(text: &str) -> Result<Option<Payment>> {
         bail!("that link has no address in it");
     }
 
-    let mut payment = Payment { address: address.to_owned(), ..Default::default() };
+    let mut payment = Payment {
+        address: address.to_owned(),
+        ..Default::default()
+    };
 
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -103,7 +106,9 @@ fn amount_to_sats(text: &str) -> Result<u64> {
         bail!("that link has an amount Sieve cannot read: {text}");
     }
 
-    let whole: u64 = whole.parse().map_err(|_| anyhow::anyhow!("that amount is too large"))?;
+    let whole: u64 = whole
+        .parse()
+        .map_err(|_| anyhow::anyhow!("that amount is too large"))?;
     let padded = format!("{fraction:0<8}");
     let fraction: u64 = padded.parse().unwrap_or(0);
 
@@ -168,7 +173,9 @@ mod tests {
     #[test]
     fn the_scheme_is_case_insensitive() {
         // QR codes are often uppercase: it encodes smaller.
-        let payment = parse(&format!("BITCOIN:{ADDRESS}?amount=0.001")).unwrap().unwrap();
+        let payment = parse(&format!("BITCOIN:{ADDRESS}?amount=0.001"))
+            .unwrap()
+            .unwrap();
         assert_eq!(payment.amount_sats, Some(100_000));
     }
 
@@ -182,15 +189,22 @@ mod tests {
             ("0.00100000", 100_000),
         ];
         for (written, sats) in cases {
-            let payment =
-                parse(&format!("bitcoin:{ADDRESS}?amount={written}")).unwrap().unwrap();
+            let payment = parse(&format!("bitcoin:{ADDRESS}?amount={written}"))
+                .unwrap()
+                .unwrap();
             assert_eq!(payment.amount_sats, Some(sats), "amount={written}");
         }
     }
 
     #[test]
     fn an_unreadable_amount_is_refused_rather_than_guessed() {
-        for bad in ["amount=", "amount=abc", "amount=0.000000001", "amount=-1", "amount=1,5"] {
+        for bad in [
+            "amount=",
+            "amount=abc",
+            "amount=0.000000001",
+            "amount=-1",
+            "amount=1,5",
+        ] {
             assert!(
                 parse(&format!("bitcoin:{ADDRESS}?{bad}")).is_err(),
                 "{bad} should not parse"

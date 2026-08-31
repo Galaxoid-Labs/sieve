@@ -29,7 +29,10 @@ pub enum UnlockMsg {
     Submit(Password),
     SwitchWallet,
     /// Which wallet this screen is unlocking. Sent before the screen is shown.
-    Open { paths: Paths, name: String },
+    Open {
+        paths: Paths,
+        name: String,
+    },
 }
 
 #[derive(Debug)]
@@ -180,7 +183,9 @@ impl Component for Unlock {
                 widgets.password_row.set_text("");
             }
             UnlockMsg::Submit(passphrase) => {
-                let Some(paths) = self.paths.clone() else { return };
+                let Some(paths) = self.paths.clone() else {
+                    return;
+                };
                 if self.busy {
                     return;
                 }

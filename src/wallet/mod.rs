@@ -26,11 +26,11 @@ use bdk_wallet::miniscript::Tap;
 use zeroize::Zeroizing;
 
 pub mod accounts;
-pub mod send;
-pub mod watch;
 pub mod labels;
-pub mod uri;
 pub mod node;
+pub mod send;
+pub mod uri;
+pub mod watch;
 
 use crate::vault;
 
@@ -435,7 +435,9 @@ impl Meta {
     /// Never backwards: a fresh scan of a wallet that has already been scanned
     /// starts where it left off, and a lower figure would throw that away.
     pub fn record_scanned_to(paths: &Paths, height: u32, hash: &str) {
-        let Some(mut meta) = Self::load(paths) else { return };
+        let Some(mut meta) = Self::load(paths) else {
+            return;
+        };
         if meta.scanned_to.is_some_and(|already| already >= height) {
             return;
         }
@@ -448,7 +450,9 @@ impl Meta {
 
     /// Remember how many blocks the scan just finished had to read.
     pub fn record_matched_blocks(paths: &Paths, blocks: u32) {
-        let Some(mut meta) = Self::load(paths) else { return };
+        let Some(mut meta) = Self::load(paths) else {
+            return;
+        };
         if meta.matched_blocks == Some(blocks) {
             return;
         }
@@ -464,7 +468,9 @@ impl Meta {
     /// rescan: leaving the resume point in place would have the fresh
     /// databases skip straight back to where the old ones already were.
     pub fn forget_scan_progress(paths: &Paths) -> Result<()> {
-        let Some(mut meta) = Self::load(paths) else { return Ok(()) };
+        let Some(mut meta) = Self::load(paths) else {
+            return Ok(());
+        };
         meta.scanned_to = None;
         meta.scanned_hash = None;
         meta.save(paths)
@@ -477,7 +483,10 @@ impl Meta {
         script_type: accounts::ScriptType,
         name: Option<String>,
     ) -> Self {
-        Self { watch_only: true, ..Self::new(network, birthday, vec![script_type], script_type, name) }
+        Self {
+            watch_only: true,
+            ..Self::new(network, birthday, vec![script_type], script_type, name)
+        }
     }
 
     /// A name to show, falling back to something stable rather than blank.
@@ -711,13 +720,14 @@ pub struct Summary {
 
 impl Summary {
     pub(crate) fn from_portfolio(portfolio: &mut accounts::Portfolio) -> Result<Self> {
-        let mut summary = Summary { ..Default::default() };
+        let mut summary = Summary {
+            ..Default::default()
+        };
         let primary = portfolio.primary;
         // How many times each address has been paid across the whole wallet.
         // Counted here because it takes the walk we are already doing, and
         // reuse is what ties one payment to another for anyone watching.
-        let mut paid: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut paid: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         // And how much landed on each, for the address list.
         let mut landed_on: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
@@ -787,10 +797,7 @@ impl Summary {
                     outputs: tx.output.len(),
                     paid_to: split.theirs,
                     paid_to_self: split.ours,
-                    account_path: account_path(
-                        &account.wallet,
-                        bdk_wallet::KeychainKind::External,
-                    ),
+                    account_path: account_path(&account.wallet, bdk_wallet::KeychainKind::External),
                     // BIP-125: any input below the final sequence number says
                     // this may still be replaced.
                     replaceable: tx.input.iter().any(|i| i.sequence.is_rbf()),
@@ -811,7 +818,9 @@ impl Summary {
         // keychain's revealed index is the record of what was given out, and
         // deriving from it cannot drift from what the wallet is watching.
         for account in portfolio.accounts.iter_mut() {
-            let last = account.wallet.derivation_index(bdk_wallet::KeychainKind::External);
+            let last = account
+                .wallet
+                .derivation_index(bdk_wallet::KeychainKind::External);
             let Some(last) = last else { continue };
             let prefix = account_path(&account.wallet, bdk_wallet::KeychainKind::External);
 
@@ -855,9 +864,7 @@ impl Summary {
                             }
                             bdk_wallet::chain::ChainPosition::Unconfirmed { .. } => None,
                         },
-                        reused_address: paid
-                            .get(&address)
-                            .is_some_and(|count| *count > 1),
+                        reused_address: paid.get(&address).is_some_and(|count| *count > 1),
                         sats: utxo.txout.value.to_sat(),
                         from_txid: utxo.outpoint.txid.to_string(),
                         path: derivation_of(&account.wallet, &utxo.txout.script_pubkey),
@@ -952,15 +959,14 @@ pub fn create(
     lookahead: u32,
 ) -> Result<Summary> {
     let xprv = xprv_from_mnemonic(mnemonic, bip39_passphrase, network)?;
-    let mut portfolio =
-        accounts::Portfolio::create_from_xprv(
-            xprv,
-            data_dir(paths),
-            script_types,
-            primary,
-            network,
-            lookahead,
-        )?;
+    let mut portfolio = accounts::Portfolio::create_from_xprv(
+        xprv,
+        data_dir(paths),
+        script_types,
+        primary,
+        network,
+        lookahead,
+    )?;
 
     // Recorded before the vault is written, so a wallet that exists at all has
     // a network and a birthday, and never falls back to scanning from genesis.
@@ -993,18 +999,22 @@ pub fn import_xprv(
         .parse()
         .map_err(|e| anyhow!("that is not a valid extended private key: {e}"))?;
 
-    let mut portfolio =
-        accounts::Portfolio::create_from_xprv(
-            xprv,
-            data_dir(paths),
-            script_types,
-            primary,
-            network,
-            accounts::IMPORT_LOOKAHEAD,
-        )?;
+    let mut portfolio = accounts::Portfolio::create_from_xprv(
+        xprv,
+        data_dir(paths),
+        script_types,
+        primary,
+        network,
+        accounts::IMPORT_LOOKAHEAD,
+    )?;
     Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
 
-    let sealed = vault::seal(xprv_text.trim().as_bytes(), password, &network.to_string(), kdf)?;
+    let sealed = vault::seal(
+        xprv_text.trim().as_bytes(),
+        password,
+        &network.to_string(),
+        kdf,
+    )?;
     vault::write_atomic(&paths.vault, &sealed)?;
 
     Summary::from_portfolio(&mut portfolio)
@@ -1052,8 +1062,8 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
     // The databases hold no unrecoverable state, so losing them costs a rescan
     // rather than the wallet. Rebuild from the secret we just decrypted.
     if portfolio.is_empty() {
-        let phrase = std::str::from_utf8(&secret)
-            .context("the vault does not contain readable text")?;
+        let phrase =
+            std::str::from_utf8(&secret).context("the vault does not contain readable text")?;
         let xprv = xprv_from_mnemonic(phrase, None, meta.network())?;
         portfolio = accounts::Portfolio::create_from_xprv(
             xprv,
@@ -1108,7 +1118,11 @@ mod tests {
     }
 
     /// Cheap parameters: these tests exercise the plumbing, not the KDF.
-    const FAST: vault::KdfParams = vault::KdfParams { m_cost: 8, t_cost: 1, p_cost: 1 };
+    const FAST: vault::KdfParams = vault::KdfParams {
+        m_cost: 8,
+        t_cost: 1,
+        p_cost: 1,
+    };
 
     /// The taproot-only wallet Sieve creates for itself.
     fn create_for_test(phrase: &str, password: &[u8], paths: &Paths) -> Summary {
@@ -1129,8 +1143,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> Paths {
-        let dir = std::env::temp_dir()
-            .join(format!("sieve-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sieve-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Paths {
@@ -1174,7 +1187,9 @@ mod tests {
                 .unwrap()
                 .unwrap();
         for _ in 0..5 {
-            account.wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+            account
+                .wallet
+                .reveal_next_address(bdk_wallet::KeychainKind::External);
         }
         account.persist().unwrap();
         drop(account);
@@ -1226,7 +1241,9 @@ mod tests {
                 .unwrap()
                 .unwrap();
         for _ in 0..8 {
-            account.wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+            account
+                .wallet
+                .reveal_next_address(bdk_wallet::KeychainKind::External);
         }
         let revealed = account
             .wallet
@@ -1246,7 +1263,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            after.wallet.derivation_index(bdk_wallet::KeychainKind::External),
+            after
+                .wallet
+                .derivation_index(bdk_wallet::KeychainKind::External),
             Some(revealed),
             "a rescan must not stop watching addresses already handed out"
         );
@@ -1257,13 +1276,9 @@ mod tests {
         assert_eq!(meta.scanned_hash, None);
         assert_eq!(after.wallet.latest_checkpoint().height(), 0);
 
-        let mut portfolio = accounts::Portfolio::load(
-            &dir,
-            &meta.script_types,
-            meta.primary,
-            Network::Signet,
-        )
-        .unwrap();
+        let mut portfolio =
+            accounts::Portfolio::load(&dir, &meta.script_types, meta.primary, Network::Signet)
+                .unwrap();
         let reopened = Summary::from_portfolio(&mut portfolio).unwrap();
         assert_eq!(reopened.next_address, before.next_address);
 
@@ -1289,7 +1304,10 @@ mod tests {
 
         // And the list stays in order, newest first, or the search above
         // returns the wrong one.
-        let heights: Vec<u32> = checkpoints(Network::Bitcoin).iter().map(|c| c.height).collect();
+        let heights: Vec<u32> = checkpoints(Network::Bitcoin)
+            .iter()
+            .map(|c| c.height)
+            .collect();
         let mut sorted = heights.clone();
         sorted.sort_unstable_by(|a, b| b.cmp(a));
         assert_eq!(heights, sorted, "checkpoints must be newest first");
@@ -1301,12 +1319,17 @@ mod tests {
             for c in checkpoints(network) {
                 c.hash
                     .parse::<bdk_wallet::bitcoin::BlockHash>()
-                    .unwrap_or_else(|e| panic!("{} at {} is not a block hash: {e}", c.hash, c.height));
+                    .unwrap_or_else(|e| {
+                        panic!("{} at {} is not a block hash: {e}", c.hash, c.height)
+                    });
             }
         }
         // Newest first, so `find` returns the tightest checkpoint.
         for list in [MAINNET_CHECKPOINTS, SIGNET_CHECKPOINTS] {
-            assert!(list.windows(2).all(|w| w[0].height > w[1].height), "must be newest first");
+            assert!(
+                list.windows(2).all(|w| w[0].height > w[1].height),
+                "must be newest first"
+            );
         }
     }
 
@@ -1323,7 +1346,10 @@ mod tests {
         let typo = xprv_from_mnemonic(phrase, Some("extar"), DEFAULT_NETWORK).unwrap();
 
         assert_ne!(plain, with, "a passphrase must change the derived wallet");
-        assert_ne!(with, typo, "a mistyped passphrase derives a different wallet");
+        assert_ne!(
+            with, typo,
+            "a mistyped passphrase derives a different wallet"
+        );
     }
 
     #[test]
@@ -1341,14 +1367,22 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for script_type in accounts::ScriptType::ALL {
             let mut account = accounts::Account::create(
-                xprv, script_type, &dir.join(script_type.db_file()), DEFAULT_NETWORK, 25,
-            ).unwrap();
+                xprv,
+                script_type,
+                &dir.join(script_type.db_file()),
+                DEFAULT_NETWORK,
+                25,
+            )
+            .unwrap();
             let address = account
                 .wallet
                 .next_unused_address(KeychainKind::External)
                 .address
                 .to_string();
-            assert!(seen.insert(address.clone()), "{script_type} reused an address: {address}");
+            assert!(
+                seen.insert(address.clone()),
+                "{script_type} reused an address: {address}"
+            );
         }
         assert_eq!(seen.len(), 4);
 
@@ -1393,18 +1427,34 @@ mod tests {
 
         let from_phrase = {
             let mut a = accounts::Account::create(
-                xprv, accounts::ScriptType::NativeSegwit, &dir.join("a.sqlite"), DEFAULT_NETWORK, 25,
-            ).unwrap();
-            a.wallet.next_unused_address(KeychainKind::External).address.to_string()
+                xprv,
+                accounts::ScriptType::NativeSegwit,
+                &dir.join("a.sqlite"),
+                DEFAULT_NETWORK,
+                25,
+            )
+            .unwrap();
+            a.wallet
+                .next_unused_address(KeychainKind::External)
+                .address
+                .to_string()
         };
 
         // Round-trip the key through its text form, which is what an import does.
         let reparsed: bdk_wallet::bitcoin::bip32::Xpriv = xprv.to_string().parse().unwrap();
         let from_xprv = {
             let mut b = accounts::Account::create(
-                reparsed, accounts::ScriptType::NativeSegwit, &dir.join("b.sqlite"), DEFAULT_NETWORK, 25,
-            ).unwrap();
-            b.wallet.next_unused_address(KeychainKind::External).address.to_string()
+                reparsed,
+                accounts::ScriptType::NativeSegwit,
+                &dir.join("b.sqlite"),
+                DEFAULT_NETWORK,
+                25,
+            )
+            .unwrap();
+            b.wallet
+                .next_unused_address(KeychainKind::External)
+                .address
+                .to_string()
         };
 
         assert_eq!(from_phrase, from_xprv);
@@ -1424,8 +1474,7 @@ mod tests {
 
     #[test]
     fn wallet_ids_do_not_collide() {
-        let ids: std::collections::HashSet<String> =
-            (0..64).map(|_| Paths::new_id()).collect();
+        let ids: std::collections::HashSet<String> = (0..64).map(|_| Paths::new_id()).collect();
         assert_eq!(ids.len(), 64, "wallet ids must be unique");
     }
 
@@ -1461,7 +1510,11 @@ mod tests {
         let meta = Meta::load(&paths).expect("a created wallet must record its metadata");
         assert_eq!(meta.network(), DEFAULT_NETWORK);
         assert_eq!(meta.birthday_height, SIGNET_CHECKPOINTS[0].height);
-        assert!(meta.birthday_hash.parse::<bdk_wallet::bitcoin::BlockHash>().is_ok());
+        assert!(
+            meta.birthday_hash
+                .parse::<bdk_wallet::bitcoin::BlockHash>()
+                .is_ok()
+        );
 
         std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
     }
@@ -1507,20 +1560,42 @@ mod tests {
         let first = {
             let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
             let mut a = accounts::Account::create(
-                xprv, accounts::ScriptType::Taproot, &dir.join("a.sqlite"), DEFAULT_NETWORK, 25
-            ).unwrap();
-            a.wallet.next_unused_address(KeychainKind::External).address.to_string()
+                xprv,
+                accounts::ScriptType::Taproot,
+                &dir.join("a.sqlite"),
+                DEFAULT_NETWORK,
+                25,
+            )
+            .unwrap();
+            a.wallet
+                .next_unused_address(KeychainKind::External)
+                .address
+                .to_string()
         };
         let second = {
             let xprv = xprv_from_mnemonic(phrase, None, DEFAULT_NETWORK).unwrap();
             let mut b = accounts::Account::create(
-                xprv, accounts::ScriptType::Taproot, &dir.join("b.sqlite"), DEFAULT_NETWORK, 25
-            ).unwrap();
-            b.wallet.next_unused_address(KeychainKind::External).address.to_string()
+                xprv,
+                accounts::ScriptType::Taproot,
+                &dir.join("b.sqlite"),
+                DEFAULT_NETWORK,
+                25,
+            )
+            .unwrap();
+            b.wallet
+                .next_unused_address(KeychainKind::External)
+                .address
+                .to_string()
         };
 
-        assert_eq!(first, second, "the same phrase must derive the same address");
-        assert!(first.starts_with("tb1p"), "expected a signet taproot address, got {first}");
+        assert_eq!(
+            first, second,
+            "the same phrase must derive the same address"
+        );
+        assert!(
+            first.starts_with("tb1p"),
+            "expected a signet taproot address, got {first}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1826,8 +1901,7 @@ pub fn remove(paths: &Paths) -> Result<()> {
         anyhow::bail!("{} does not look like a wallet", dir.display());
     }
 
-    std::fs::remove_dir_all(&dir)
-        .with_context(|| format!("could not remove {}", dir.display()))?;
+    std::fs::remove_dir_all(&dir).with_context(|| format!("could not remove {}", dir.display()))?;
     tracing::info!(wallet = %dir.display(), "removed a wallet");
     Ok(())
 }
@@ -1839,7 +1913,8 @@ mod removal_tests {
     /// The guard that stands between a wrong path and `remove_dir_all`.
     #[test]
     fn only_wallet_directories_can_be_removed() {
-        let outside = std::env::temp_dir().join(format!("sieve-not-a-wallet-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("sieve-not-a-wallet-{}", std::process::id()));
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("something-precious"), b"keep me").unwrap();
 
@@ -1852,7 +1927,10 @@ mod removal_tests {
 
         // Outside the wallets directory: refused whatever it contains.
         assert!(remove(&paths).is_err());
-        assert!(outside.join("something-precious").exists(), "it deleted it anyway");
+        assert!(
+            outside.join("something-precious").exists(),
+            "it deleted it anyway"
+        );
 
         // Inside, but with nothing that makes it a wallet: still refused.
         let empty = wallets_root().join(format!("sieve-empty-{}", std::process::id()));

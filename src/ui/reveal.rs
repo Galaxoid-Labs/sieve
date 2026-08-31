@@ -43,7 +43,9 @@ impl Held {
     /// count of nothing but letters; a key or a descriptor is neither.
     fn of(secret: &str) -> Self {
         let words = secret.split_whitespace().count();
-        let letters_only = secret.chars().all(|c| c.is_ascii_alphabetic() || c.is_whitespace());
+        let letters_only = secret
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c.is_whitespace());
         if matches!(words, 12 | 15 | 18 | 21 | 24) && letters_only {
             Held::Phrase
         } else {
@@ -262,7 +264,9 @@ impl Component for Reveal {
             }
 
             RevealMsg::Submit(password) => {
-                let Some(paths) = self.paths.clone() else { return };
+                let Some(paths) = self.paths.clone() else {
+                    return;
+                };
                 if self.busy {
                     return;
                 }

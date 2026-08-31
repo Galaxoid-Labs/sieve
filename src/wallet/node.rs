@@ -146,7 +146,10 @@ impl Progress {
             // the bar beside it, which knows the wallet's starting point and
             // can estimate where the chain ends. This says where it is now.
             Progress::Headers(height) => {
-                format!("Downloading block headers — at block {}", thousands(*height))
+                format!(
+                    "Downloading block headers — at block {}",
+                    thousands(*height)
+                )
             }
             // Two phases behind one number, and they are nothing alike. The
             // first quarter of kyoto's figure is filter *headers* — thirty-two
@@ -237,8 +240,7 @@ impl Session {
         let network = meta.network();
         let dir = paths.db.parent().unwrap_or(&paths.db).to_path_buf();
 
-        let portfolio =
-            Portfolio::load(&dir, &meta.script_types, meta.primary, network)?;
+        let portfolio = Portfolio::load(&dir, &meta.script_types, meta.primary, network)?;
         if portfolio.is_empty() {
             anyhow::bail!("no wallet databases found — unlock first");
         }
@@ -400,7 +402,11 @@ impl Session {
         }
 
         let client: LightClient<_, Multiple> = builder
-            .required_peers(if tor.is_some() { REQUIRED_PEERS_OVER_TOR } else { REQUIRED_PEERS })
+            .required_peers(if tor.is_some() {
+                REQUIRED_PEERS_OVER_TOR
+            } else {
+                REQUIRED_PEERS
+            })
             .data_dir(headers)
             .build_with_wallets(wallets)
             .map_err(|e| anyhow!("could not build the light client: {e}"))?;
@@ -418,7 +424,11 @@ impl Session {
             warnings: Arc::new(AsyncMutex::new(logging.warning_subscriber)),
             requester: client.requester(),
             last_progress: std::sync::Mutex::new(None),
-            quiet: if tor.is_some() { QUIET_OVER_TOR } else { QUIET_BEFORE_WAITING },
+            quiet: if tor.is_some() {
+                QUIET_OVER_TOR
+            } else {
+                QUIET_BEFORE_WAITING
+            },
             median_time: std::sync::Mutex::new(None),
             synced: Arc::new(AtomicBool::new(false)),
             scanning: Arc::new(AtomicBool::new(false)),
@@ -489,7 +499,10 @@ impl Session {
         // it runs, so if it is the expensive part it is worth knowing.
         let summarising = std::time::Instant::now();
         let summary = Summary::from_portfolio(&mut portfolio);
-        tracing::debug!(summarised_ms = summarising.elapsed().as_millis(), "summary built");
+        tracing::debug!(
+            summarised_ms = summarising.elapsed().as_millis(),
+            "summary built"
+        );
         summary
     }
 
@@ -537,8 +550,9 @@ impl Session {
         script_type: super::accounts::ScriptType,
         fee_rate: bdk_wallet::bitcoin::FeeRate,
     ) -> Result<super::send::Plan> {
-        let txid: bdk_wallet::bitcoin::Txid =
-            txid.parse().map_err(|_| anyhow!("that is not a transaction id"))?;
+        let txid: bdk_wallet::bitcoin::Txid = txid
+            .parse()
+            .map_err(|_| anyhow!("that is not a transaction id"))?;
 
         let mut portfolio = self.portfolio.lock().await;
         let account = portfolio
@@ -558,10 +572,7 @@ impl Session {
             .calculate_fee(&original.tx_node.tx)
             .map(|fee| fee.to_sat())
             .unwrap_or(0);
-        let (spend, change) = super::send::split_outputs_of(
-            &original.tx_node.tx,
-            &account.wallet,
-        );
+        let (spend, change) = super::send::split_outputs_of(&original.tx_node.tx, &account.wallet);
 
         let psbt = {
             let mut builder = account
@@ -646,9 +657,7 @@ impl Session {
                 // Otherwise the message reports less money than the balance
                 // above it shows, with no explanation for the difference.
                 if waiting_on_a_block {
-                    anyhow!(
-                        "{e}. Coins from a payment that has not confirmed yet cannot be spent."
-                    )
+                    anyhow!("{e}. Coins from a payment that has not confirmed yet cannot be spent.")
                 } else {
                     anyhow!("{e}")
                 }
@@ -660,7 +669,9 @@ impl Session {
         // see afterwards.
         account.persist()?;
 
-        let fee = psbt.fee().map_err(|e| anyhow!("could not work out the fee: {e}"))?;
+        let fee = psbt
+            .fee()
+            .map_err(|e| anyhow!("could not work out the fee: {e}"))?;
         let (spend, change) = super::send::split_outputs(&psbt, &script);
 
         Ok(super::send::Plan {
@@ -798,81 +809,81 @@ impl Session {
     pub async fn next_progress(&self) -> Option<Progress> {
         let mut info = self.info.lock().await;
         loop {
-        let event = match tokio::time::timeout(self.quiet, info.recv()).await {
-            Ok(Some(event)) => event,
-            Ok(None) => return None,
-            Err(_elapsed) => {
-                // Silence after the first sync is the normal resting state —
-                // the node is simply waiting for the next block. Reporting
-                // that as "waiting for peers" made a finished wallet look
-                // broken.
-                if self.synced.load(Ordering::Relaxed) {
-                    return Some(Progress::Synced);
+            let event = match tokio::time::timeout(self.quiet, info.recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => return None,
+                Err(_elapsed) => {
+                    // Silence after the first sync is the normal resting state —
+                    // the node is simply waiting for the next block. Reporting
+                    // that as "waiting for peers" made a finished wallet look
+                    // broken.
+                    if self.synced.load(Ordering::Relaxed) {
+                        return Some(Progress::Synced);
+                    }
+                    // Mid-scan silence is not the same thing. The node is working
+                    // through filters and simply has nothing to announce; saying
+                    // "waiting for peers" claims a problem that is not there, and
+                    // hides the progress already made.
+                    if self.scanning.load(Ordering::Relaxed)
+                        && let Some(last) = self.last_progress.lock().unwrap().clone()
+                    {
+                        return Some(last);
+                    }
+                    return Some(Progress::Waiting);
                 }
-                // Mid-scan silence is not the same thing. The node is working
-                // through filters and simply has nothing to announce; saying
-                // "waiting for peers" claims a problem that is not there, and
-                // hides the progress already made.
-                if self.scanning.load(Ordering::Relaxed)
-                    && let Some(last) = self.last_progress.lock().unwrap().clone()
+            };
+            // Peer churn is constant and orthogonal to scan progress. Once
+            // scanning has started, a handshake must not overwrite the status with
+            // something that reads like going backwards — the peer count has its
+            // own row for that.
+            let scanning = self.scanning.load(Ordering::Relaxed);
+            return Some(match event {
+                // The tail of a scan: the filters are all in and what remains is
+                // fetching the blocks they matched, which is the only work left
+                // and the only thing worth saying.
+                Info::BlockReceived(hash)
+                    if scanning && self.filters_done.load(Ordering::Relaxed) =>
                 {
-                    return Some(last);
+                    let read = self.blocks_read.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::debug!(%hash, read, "reading a block that matched a filter");
+                    Progress::Blocks(read)
                 }
-                return Some(Progress::Waiting);
-            }
-        };
-        // Peer churn is constant and orthogonal to scan progress. Once
-        // scanning has started, a handshake must not overwrite the status with
-        // something that reads like going backwards — the peer count has its
-        // own row for that.
-        let scanning = self.scanning.load(Ordering::Relaxed);
-        return Some(match event {
-            // The tail of a scan: the filters are all in and what remains is
-            // fetching the blocks they matched, which is the only work left
-            // and the only thing worth saying.
-            Info::BlockReceived(hash)
-                if scanning && self.filters_done.load(Ordering::Relaxed) =>
-            {
-                let read = self.blocks_read.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::debug!(%hash, read, "reading a block that matched a filter");
-                Progress::Blocks(read)
-            }
-            Info::SuccessfulHandshake | Info::ConnectionsMet | Info::BlockReceived(_)
-                if scanning =>
-            {
-                // Mid-scan a matched block is one of many and arrives between
-                // filters; letting it speak would flicker against the bar.
-                if matches!(event, Info::BlockReceived(_)) {
-                    self.blocks_read.fetch_add(1, Ordering::Relaxed);
+                Info::SuccessfulHandshake | Info::ConnectionsMet | Info::BlockReceived(_)
+                    if scanning =>
+                {
+                    // Mid-scan a matched block is one of many and arrives between
+                    // filters; letting it speak would flicker against the bar.
+                    if matches!(event, Info::BlockReceived(_)) {
+                        self.blocks_read.fetch_add(1, Ordering::Relaxed);
+                    }
+                    continue;
                 }
-                continue;
-            }
-            Info::SuccessfulHandshake => Progress::Connecting,
-            Info::ConnectionsMet => Progress::Connected,
-            Info::Progress(p) => {
-                self.scanning.store(true, Ordering::Relaxed);
-                let fraction = p.fraction_complete() as f64;
-                // What separates "a block matched along the way" from "the
-                // filters are done and this is the last of the work".
-                self.filters_done.store(fraction >= 1.0, Ordering::Relaxed);
-                // A zero fraction means no filter header has arrived yet, so
-                // the node is still walking the header chain. Reporting that as
-                // "scanning filters, 0%" reads as stuck when it is not.
-                if fraction <= 0.0 {
-                    Progress::Headers(p.chain_height())
-                } else if fraction >= 1.0 {
-                    Progress::Synced
-                } else {
-                    Progress::Scanning(fraction)
+                Info::SuccessfulHandshake => Progress::Connecting,
+                Info::ConnectionsMet => Progress::Connected,
+                Info::Progress(p) => {
+                    self.scanning.store(true, Ordering::Relaxed);
+                    let fraction = p.fraction_complete() as f64;
+                    // What separates "a block matched along the way" from "the
+                    // filters are done and this is the last of the work".
+                    self.filters_done.store(fraction >= 1.0, Ordering::Relaxed);
+                    // A zero fraction means no filter header has arrived yet, so
+                    // the node is still walking the header chain. Reporting that as
+                    // "scanning filters, 0%" reads as stuck when it is not.
+                    if fraction <= 0.0 {
+                        Progress::Headers(p.chain_height())
+                    } else if fraction >= 1.0 {
+                        Progress::Synced
+                    } else {
+                        Progress::Scanning(fraction)
+                    }
                 }
-            }
-            Info::BlockReceived(_) => Progress::Connected,
-        })
-        // Remembered, so a quiet spell can report the last real state rather
-        // than inventing a problem.
-        .inspect(|progress| {
-            *self.last_progress.lock().unwrap() = Some(progress.clone());
-        });
+                Info::BlockReceived(_) => Progress::Connected,
+            })
+            // Remembered, so a quiet spell can report the last real state rather
+            // than inventing a problem.
+            .inspect(|progress| {
+                *self.last_progress.lock().unwrap() = Some(progress.clone());
+            });
         }
     }
 
@@ -888,9 +899,13 @@ impl Session {
             // A peer count is information, not an alarm. Dropping and
             // re-establishing connections is ordinary behaviour on a network
             // where most nodes do not serve filters.
-            bdk_kyoto::Warning::NeedConnections { connected, required } => {
-                Notice::Peers { connected, required }
-            }
+            bdk_kyoto::Warning::NeedConnections {
+                connected,
+                required,
+            } => Notice::Peers {
+                connected,
+                required,
+            },
             // Nothing a person can act on, and constant during normal peer
             // churn. Showing these as a standing message trains people to
             // ignore the row that will one day matter.
@@ -900,12 +915,12 @@ impl Session {
             | bdk_kyoto::Warning::UnsolicitedMessage
             | bdk_kyoto::Warning::EvaluatingFork => Notice::Ignorable,
 
-            bdk_kyoto::Warning::PotentialStaleTip => Notice::Problem(
-                "No new blocks for a while. The connection may be stale.".into(),
-            ),
-            bdk_kyoto::Warning::TransactionRejected { payload } => {
-                Notice::Problem(format!("A transaction was rejected by the network: {payload:?}"))
+            bdk_kyoto::Warning::PotentialStaleTip => {
+                Notice::Problem("No new blocks for a while. The connection may be stale.".into())
             }
+            bdk_kyoto::Warning::TransactionRejected { payload } => Notice::Problem(format!(
+                "A transaction was rejected by the network: {payload:?}"
+            )),
             // Per-peer and self-healing: the node drops that peer and carries
             // on. Surfacing it trains people to ignore the row that will one
             // day carry something they can act on.
@@ -1036,7 +1051,11 @@ pub struct ChainInfo {
 /// way the schedule is.
 pub fn subsidy_sats(height: u32) -> u64 {
     let epoch = height / HALVING_INTERVAL;
-    if epoch >= 33 { 0 } else { 50 * 100_000_000 >> epoch }
+    if epoch >= 33 {
+        0
+    } else {
+        50 * 100_000_000 >> epoch
+    }
 }
 
 /// The height of the next halving after this one.
@@ -1137,7 +1156,10 @@ async fn resolve_seeds_directly(
 
 /// One entry per machine, from kyoto's one entry per connection.
 fn distinct_peers(
-    peers: Vec<(bdk_wallet::bitcoin::p2p::address::AddrV2, bdk_wallet::bitcoin::p2p::ServiceFlags)>,
+    peers: Vec<(
+        bdk_wallet::bitcoin::p2p::address::AddrV2,
+        bdk_wallet::bitcoin::p2p::ServiceFlags,
+    )>,
 ) -> Vec<PeerInfo> {
     // Every connection as the node describes it, before deduplication. When
     // eight connections collapse into one row, this is the only way to tell
@@ -1158,9 +1180,8 @@ fn distinct_peers(
             address,
             // `NONE` is "not reported", which is most of the time — not "does
             // not serve filters". Saying otherwise would libel the peer.
-            serves_filters: (services != bdk_wallet::bitcoin::p2p::ServiceFlags::NONE).then(
-                || services.has(bdk_wallet::bitcoin::p2p::ServiceFlags::COMPACT_FILTERS),
-            ),
+            serves_filters: (services != bdk_wallet::bitcoin::p2p::ServiceFlags::NONE)
+                .then(|| services.has(bdk_wallet::bitcoin::p2p::ServiceFlags::COMPACT_FILTERS)),
         })
         .collect()
 }
@@ -1271,8 +1292,7 @@ impl Session {
         // was interrupted, which is how a wallet ends up with no pinned peers
         // at all.
         if self.scanning.load(Ordering::Relaxed) && !info.peers.is_empty() {
-            let addresses: Vec<String> =
-                info.peers.iter().map(|p| p.address.clone()).collect();
+            let addresses: Vec<String> = info.peers.iter().map(|p| p.address.clone()).collect();
             tracing::debug!(count = addresses.len(), "remembering filter-serving peers");
             crate::peers::remember(self.network, &addresses);
         }
@@ -1289,7 +1309,9 @@ impl Session {
             _ => {
                 let mut recent = Vec::with_capacity(11);
                 for back in 0..11u32 {
-                    let Some(height) = tip.height.checked_sub(back) else { break };
+                    let Some(height) = tip.height.checked_sub(back) else {
+                        break;
+                    };
                     match self.requester.get_header(height).await {
                         Ok(Some(header)) => recent.push(header.header.time as u64),
                         _ => break,

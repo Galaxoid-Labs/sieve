@@ -76,7 +76,9 @@ impl Labels {
             }
             match serde_json::from_str::<Entry>(line) {
                 Ok(entry) => {
-                    labels.entries.insert((entry.kind, entry.reference.clone()), entry);
+                    labels
+                        .entries
+                        .insert((entry.kind, entry.reference.clone()), entry);
                 }
                 // One bad line must not cost the rest of the file.
                 Err(e) => tracing::warn!(line = number + 1, %e, "skipping an unreadable label"),
@@ -174,7 +176,8 @@ impl Labels {
             }
             let entry: Entry = serde_json::from_str(line)
                 .with_context(|| format!("line {} is not a BIP-329 label", number + 1))?;
-            self.entries.insert((entry.kind, entry.reference.clone()), entry);
+            self.entries
+                .insert((entry.kind, entry.reference.clone()), entry);
             read += 1;
         }
         Ok(read)
@@ -231,9 +234,8 @@ mod tests {
     fn fields_sieve_does_not_use_survive_a_round_trip() {
         // A file from another wallet may carry more than Sieve shows. Dropping
         // it would quietly damage someone's labels on the way through.
-        let line = format!(
-            r#"{{"type":"output","ref":"{TXID}:0","label":"Change","spendable":false}}"#
-        );
+        let line =
+            format!(r#"{{"type":"output","ref":"{TXID}:0","label":"Change","spendable":false}}"#);
         let mut labels = Labels::default();
         labels.import(&line).unwrap();
         assert!(labels.to_jsonl().unwrap().contains(r#""spendable":false"#));

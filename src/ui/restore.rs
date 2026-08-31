@@ -107,7 +107,10 @@ pub struct Restore {
 
 /// Networks offered, signet first so the safe option is the default.
 fn networks() -> [bdk_wallet::bitcoin::Network; 2] {
-    [bdk_wallet::bitcoin::Network::Signet, bdk_wallet::bitcoin::Network::Bitcoin]
+    [
+        bdk_wallet::bitcoin::Network::Signet,
+        bdk_wallet::bitcoin::Network::Bitcoin,
+    ]
 }
 
 impl Restore {
@@ -147,13 +150,17 @@ impl Restore {
             CredentialKind::Mnemonic => "The 12 or 24 words, separated by spaces",
             CredentialKind::ExtendedKey => "An xprv, tprv or vprv. No recovery phrase needed",
             CredentialKind::Wif => "A single private key in Wallet Import Format",
-            CredentialKind::Descriptor => "Paste an exported descriptor or extended \
+            CredentialKind::Descriptor => {
+                "Paste an exported descriptor or extended \
                                             public key. Watch-only: no password, and Sieve \
-                                            cannot sign",
-            CredentialKind::Hardware => "Plug the device in and unlock it. On a Ledger, open \
+                                            cannot sign"
+            }
+            CredentialKind::Hardware => {
+                "Plug the device in and unlock it. On a Ledger, open \
                                          the Bitcoin app. Nothing secret crosses the cable: \
                                          Sieve takes a public key and the device keeps the \
-                                         rest",
+                                         rest"
+            }
         }
     }
 
@@ -194,7 +201,8 @@ impl Restore {
     fn fill_birthdays(&self) {
         let choices = self.birthday_choices();
         let refs: Vec<&str> = choices.iter().map(String::as_str).collect();
-        self.birthday_model.splice(0, self.birthday_model.n_items(), &refs);
+        self.birthday_model
+            .splice(0, self.birthday_model.n_items(), &refs);
     }
 
     /// The choices offered, straight from the checkpoints they select.
@@ -546,8 +554,7 @@ impl Component for Restore {
                         Some("Confirm you understand the risk before importing to Bitcoin.".into());
                     return;
                 }
-                if submission.kind == CredentialKind::Hardware && self.chosen_device().is_none()
-                {
+                if submission.kind == CredentialKind::Hardware && self.chosen_device().is_none() {
                     self.error = Some(if self.looked {
                         format!("No device found. {}", crate::hardware::udev_hint())
                     } else {
@@ -599,7 +606,9 @@ impl Component for Restore {
                 // A device has to be asked before there is anything to import,
                 // and that means waiting on somebody to press a button on it.
                 if submission.kind == CredentialKind::Hardware {
-                    let Some(device) = self.chosen_device() else { return };
+                    let Some(device) = self.chosen_device() else {
+                        return;
+                    };
                     let kind = device.kind;
                     self.pending = Some(PendingImport {
                         network,
@@ -613,9 +622,7 @@ impl Component for Restore {
                         RestoreCmd::FromDevice(
                             crate::hardware::account_descriptors(kind, network)
                                 .await
-                                .map(|found| {
-                                    found.into_iter().map(|(_, text)| text).collect()
-                                })
+                                .map(|found| found.into_iter().map(|(_, text)| text).collect())
                                 .map_err(|e| e.to_string()),
                         )
                     });

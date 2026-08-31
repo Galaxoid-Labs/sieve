@@ -2,19 +2,19 @@
 
 mod about;
 mod app;
-mod peers;
 mod fees;
 mod hardware;
-mod tor;
+mod peers;
 mod price;
 mod settings;
+mod tor;
 mod ui;
 mod vault;
 mod wallet;
 
+use relm4::RelmApp;
 use relm4::gtk;
 use relm4::gtk::prelude::*;
-use relm4::RelmApp;
 
 /// Reverse-DNS ID. Must match the .desktop file or GNOME won't associate the
 /// window with the app icon.
@@ -29,7 +29,10 @@ pub const APP_ID: &str = "com.galaxoidlabs.Sieve";
 /// the reliable answer to secrets reaching disk.
 fn harden() {
     unsafe {
-        let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let no_core = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         libc::setrlimit(libc::RLIMIT_CORE, &no_core);
 
         if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {

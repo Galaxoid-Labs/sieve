@@ -53,7 +53,10 @@ pub enum SendMsg {
     /// The lowest rate the connected peers said they would relay, in sat/vB.
     SetMinFee(Option<f64>),
     /// A rate to start from, and where it came from.
-    Suggest { rate: f64, source: String },
+    Suggest {
+        rate: f64,
+        source: String,
+    },
     /// This wallet holds no keys here.
     SetWatchOnly(bool),
     /// The fee field was changed.
@@ -146,7 +149,10 @@ impl SendForm {
     /// Paths with something to spend. A path holding nothing cannot be the
     /// source of a payment, and offering it as one is a dead end.
     fn fundable(&self) -> Vec<&AccountSummary> {
-        self.accounts.iter().filter(|a| a.balance_sats > 0).collect()
+        self.accounts
+            .iter()
+            .filter(|a| a.balance_sats > 0)
+            .collect()
     }
 
     fn source(&self) -> Option<&AccountSummary> {
@@ -189,7 +195,9 @@ impl SendForm {
     /// The same number without its unit, for a field that will be read back.
     fn available_amount(&self) -> String {
         let shown = self.available();
-        shown.rsplit_once(' ').map_or(shown.clone(), |(amount, _)| amount.to_string())
+        shown
+            .rsplit_once(' ')
+            .map_or(shown.clone(), |(amount, _)| amount.to_string())
     }
 
     fn unit(&self) -> &'static str {
@@ -299,17 +307,28 @@ impl SendForm {
 
             let confirmations = coin.confirmations(self.tip);
             let age = if coin.spendable() {
-                crate::ui::wallet_page::plural(confirmations as usize, "confirmation", "confirmations")
+                crate::ui::wallet_page::plural(
+                    confirmations as usize,
+                    "confirmation",
+                    "confirmations",
+                )
             } else {
                 "Unconfirmed — cannot be spent yet".to_string()
             };
-            let reuse = if coin.reused_address { " · reused address" } else { "" };
+            let reuse = if coin.reused_address {
+                " · reused address"
+            } else {
+                ""
+            };
             row.set_subtitle(&format!(
                 "<tt>{}</tt>\n<span size=\"small\" alpha=\"60%\">{}{reuse}</span>",
                 gtk::glib::markup_escape_text(&coin.address),
                 gtk::glib::markup_escape_text(&format!(
                     "{}{age}",
-                    coin.path.as_deref().map(|p| format!("{p} · ")).unwrap_or_default()
+                    coin.path
+                        .as_deref()
+                        .map(|p| format!("{p} · "))
+                        .unwrap_or_default()
                 )),
             ));
             row.set_subtitle_lines(4);
@@ -380,9 +399,7 @@ impl SendForm {
                 // an ordinary payment; draining has one, and is not measured
                 // against an amount anyway.
                 let fee = from
-                    .map(|from| {
-                        crate::wallet::send::estimated_fee(from, picked.len(), 2, fee_rate)
-                    })
+                    .map(|from| crate::wallet::send::estimated_fee(from, picked.len(), 2, fee_rate))
                     .unwrap_or(0);
 
                 let (mark, mark_class) = match (picked.is_empty(), wanted) {
@@ -517,8 +534,13 @@ impl SendForm {
 
     /// The coins on the path being spent from, largest first.
     fn coins_here(&self) -> Vec<&crate::wallet::CoinSummary> {
-        let Some(from) = self.from else { return Vec::new() };
-        self.available_coins.iter().filter(|coin| coin.script_type == from).collect()
+        let Some(from) = self.from else {
+            return Vec::new();
+        };
+        self.available_coins
+            .iter()
+            .filter(|coin| coin.script_type == from)
+            .collect()
     }
 
     /// What the Coins row says about itself.
@@ -564,7 +586,12 @@ impl SendForm {
 
     /// What is still missing, for the button that cannot be pressed.
     fn not_ready_because(&self) -> Option<&'static str> {
-        why_not_ready(self.to_filled, self.amount_filled, self.max, self.has_funds())
+        why_not_ready(
+            self.to_filled,
+            self.amount_filled,
+            self.max,
+            self.has_funds(),
+        )
     }
 
     fn has_funds(&self) -> bool {
@@ -631,7 +658,9 @@ impl SendForm {
                 format!(
                     "{} — {}",
                     a.script_type.label(),
-                    self.settings.denomination.format(a.balance_sats, &self.network)
+                    self.settings
+                        .denomination
+                        .format(a.balance_sats, &self.network)
                 )
             })
             .collect();
@@ -1101,10 +1130,7 @@ impl Component for SendForm {
                 // mean spending coins from a wallet that is no longer the one
                 // being spent from.
                 self.coins.clear();
-                self.from = self
-                    .fundable()
-                    .get(index as usize)
-                    .map(|a| a.script_type);
+                self.from = self.fundable().get(index as usize).map(|a| a.script_type);
             }
 
             SendMsg::ToggleMax(max) => {
@@ -1196,10 +1222,7 @@ impl Component for SendForm {
                 self.error = None;
                 let network = self.network();
 
-                let to = match crate::wallet::send::parse_address(
-                    &widgets.to_row.text(),
-                    network,
-                ) {
+                let to = match crate::wallet::send::parse_address(&widgets.to_row.text(), network) {
                     Ok(address) => address,
                     Err(e) => {
                         self.error = Some(capitalise(&e.to_string()));
@@ -1212,9 +1235,7 @@ impl Component for SendForm {
                     Sending::Everything
                 } else {
                     match self.settings.denomination.parse(&widgets.amount_row.text()) {
-                        Ok(sats) => Sending::Exact(
-                            bdk_wallet::bitcoin::Amount::from_sat(sats),
-                        ),
+                        Ok(sats) => Sending::Exact(bdk_wallet::bitcoin::Amount::from_sat(sats)),
                         Err(message) => {
                             self.error = Some(message);
                             self.update_view(widgets, sender);
@@ -1424,7 +1445,9 @@ fn why_not_ready(
 /// there. Connecting to the row itself compiles, runs, and does nothing —
 /// which is exactly what it did.
 fn install_amount_filter(row: &adw::EntryRow) {
-    let Some(delegate) = row.delegate() else { return };
+    let Some(delegate) = row.delegate() else {
+        return;
+    };
     delegate.connect_insert_text(|editable, text, _position| {
         if !text.chars().all(is_amount_character) {
             editable.stop_signal_emission_by_name("insert-text");
@@ -1468,8 +1491,8 @@ pub(crate) fn capitalise(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::capitalise;
+    use super::*;
     use adw::prelude::*;
     use relm4::adw;
 
@@ -1482,8 +1505,14 @@ mod tests {
             why_not_ready(false, false, false, true),
             Some("Enter who to pay and how much")
         );
-        assert_eq!(why_not_ready(true, false, false, true), Some("Enter an amount to send"));
-        assert_eq!(why_not_ready(false, true, false, true), Some("Enter an address to pay"));
+        assert_eq!(
+            why_not_ready(true, false, false, true),
+            Some("Enter an amount to send")
+        );
+        assert_eq!(
+            why_not_ready(false, true, false, true),
+            Some("Enter an address to pay")
+        );
         assert_eq!(why_not_ready(true, true, false, true), None);
 
         // Max is an amount before the field catches up with it.

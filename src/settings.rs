@@ -69,8 +69,10 @@ impl Denomination {
     pub fn parse(self, text: &str) -> Result<u64, String> {
         // Typed amounts get read back from a display that groups digits, so
         // separators are accepted rather than treated as an error.
-        let cleaned: String =
-            text.chars().filter(|c| !matches!(c, ',' | ' ' | '_' | '\'')).collect();
+        let cleaned: String = text
+            .chars()
+            .filter(|c| !matches!(c, ',' | ' ' | '_' | '\''))
+            .collect();
         let cleaned = cleaned.trim();
 
         if cleaned.is_empty() {
@@ -85,7 +87,9 @@ impl Denomination {
                 if cleaned.contains('.') {
                     return Err("Satoshis are whole numbers".into());
                 }
-                cleaned.parse::<u64>().map_err(|_| "That is not a number".to_string())?
+                cleaned
+                    .parse::<u64>()
+                    .map_err(|_| "That is not a number".to_string())?
             }
             Denomination::Btc => {
                 let (whole, fraction) = match cleaned.split_once('.') {
@@ -103,12 +107,15 @@ impl Denomination {
                 let whole: u64 = if whole.is_empty() {
                     0
                 } else {
-                    whole.parse().map_err(|_| "That is not a number".to_string())?
+                    whole
+                        .parse()
+                        .map_err(|_| "That is not a number".to_string())?
                 };
                 // Pad rather than scale: "0.1" is 10,000,000 satoshis, not 1.
                 let padded = format!("{fraction:0<8}");
-                let fraction: u64 =
-                    padded.parse().map_err(|_| "That is not a number".to_string())?;
+                let fraction: u64 = padded
+                    .parse()
+                    .map_err(|_| "That is not a number".to_string())?;
                 whole
                     .checked_mul(100_000_000)
                     .and_then(|w| w.checked_add(fraction))
@@ -270,7 +277,9 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        let Ok(bytes) = serde_json::to_vec_pretty(self) else { return };
+        let Ok(bytes) = serde_json::to_vec_pretty(self) else {
+            return;
+        };
         if let Err(e) = crate::vault::write_atomic(&path(), &bytes) {
             tracing::warn!(%e, "could not save settings");
         }
@@ -294,7 +303,10 @@ mod tests {
             .map(|d| d.as_secs() / 60)
             .collect();
         assert_eq!(minutes, vec![5, 15, 30, 60]);
-        assert!(minutes.windows(2).all(|pair| pair[0] < pair[1]), "must climb");
+        assert!(
+            minutes.windows(2).all(|pair| pair[0] < pair[1]),
+            "must climb"
+        );
 
         // The default locks. A wallet that ships with this off protects
         // nobody who never opens preferences.
@@ -351,16 +363,28 @@ mod tests {
         // Satoshis have no such convention, and inventing one is worse.
         assert_eq!(Denomination::Sats.label("signet"), "sats");
 
-        assert_eq!(Denomination::Btc.format(100_000_000, "signet"), "1.00000000 sBTC");
+        assert_eq!(
+            Denomination::Btc.format(100_000_000, "signet"),
+            "1.00000000 sBTC"
+        );
     }
 
     #[test]
     fn amounts_are_exact() {
         // Integer arithmetic, so no rounding artefact can move a satoshi.
         assert_eq!(Denomination::Sats.format(53_713, "bitcoin"), "53,713 sats");
-        assert_eq!(Denomination::Btc.format(53_713, "bitcoin"), "0.00053713 BTC");
-        assert_eq!(Denomination::Btc.format(100_000_000, "bitcoin"), "1.00000000 BTC");
-        assert_eq!(Denomination::Btc.format(2_100_000_000_000_000, "bitcoin"), "21,000,000.00000000 BTC");
+        assert_eq!(
+            Denomination::Btc.format(53_713, "bitcoin"),
+            "0.00053713 BTC"
+        );
+        assert_eq!(
+            Denomination::Btc.format(100_000_000, "bitcoin"),
+            "1.00000000 BTC"
+        );
+        assert_eq!(
+            Denomination::Btc.format(2_100_000_000_000_000, "bitcoin"),
+            "21,000,000.00000000 BTC"
+        );
         assert_eq!(Denomination::Btc.format(1, "bitcoin"), "0.00000001 BTC");
         assert_eq!(Denomination::Sats.format(0, "bitcoin"), "0 sats");
     }

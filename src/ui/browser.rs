@@ -26,7 +26,11 @@ pub fn open(url: &str, parent: &impl IsA<gtk::Widget>, report: impl Fn(String) +
             let Err(e) = result else { return };
             tracing::warn!(%e, "portal could not open the browser; trying xdg-open");
 
-            if std::process::Command::new("xdg-open").arg(&url).spawn().is_ok() {
+            if std::process::Command::new("xdg-open")
+                .arg(&url)
+                .spawn()
+                .is_ok()
+            {
                 return;
             }
             tracing::warn!("xdg-open failed too");

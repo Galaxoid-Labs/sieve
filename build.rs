@@ -7,9 +7,5 @@
 //! executable.
 
 fn main() {
-    glib_build_tools::compile_resources(
-        &["data"],
-        "data/sieve.gresource.xml",
-        "sieve.gresource",
-    );
+    glib_build_tools::compile_resources(&["data"], "data/sieve.gresource.xml", "sieve.gresource");
 }
