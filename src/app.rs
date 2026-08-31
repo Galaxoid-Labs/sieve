@@ -2599,7 +2599,10 @@ impl App {
         // Labels are written in BIP-329's format precisely so they can leave.
         // A wallet that holds your notes hostage is a wallet you cannot
         // replace, which is the opposite of what a recovery phrase is for.
-        if let Some(paths) = self.active.clone() {
+        //
+        // Behind the lock, though: a label is the name somebody gave their own
+        // payment, and exporting them all is reading the wallet.
+        if let Some(paths) = self.active.clone().filter(|_| self.unlocked) {
             let labels = adw::PreferencesGroup::new();
             labels.set_title("Labels");
             let count = wallet::labels::Labels::load(&paths.dir).len();
@@ -2644,6 +2647,36 @@ impl App {
 
         let this = adw::PreferencesGroup::new();
         this.set_title("This wallet");
+
+        // What is on this page divides cleanly: how Sieve looks and how it
+        // connects belong to the app and are nobody's secret, but a wallet's
+        // name, its phrase and its removal belong to the wallet — and the
+        // wallet is shut. Switching to another one stays available, since that
+        // is how you get somewhere you can act.
+        if self.active.is_some() && !self.unlocked {
+            let shut = adw::ActionRow::new();
+            shut.set_title("Locked");
+            shut.set_subtitle(
+                "Unlock this wallet to rename it, see its recovery phrase, export its \
+                 labels, or remove it.",
+            );
+            shut.set_subtitle_lines(3);
+            shut.set_activatable(true);
+            shut.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            {
+                let sender = sender.clone();
+                shut.connect_activated(move |_| sender.input(AppMsg::PromptUnlock));
+            }
+            this.add(&shut);
+            page.add(&this);
+            // Replace whatever was there, so reopening never stacks pages.
+            if let Some(existing) = self.prefs_page.take() {
+                self.prefs.remove(&existing);
+            }
+            self.prefs.add(&page);
+            self.prefs_page = Some(page);
+            return;
+        }
 
         if let Some(paths) = self.active.clone() {
             let id = paths
