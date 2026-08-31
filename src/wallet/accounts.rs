@@ -495,10 +495,15 @@ mod tests {
     fn the_import_window_clears_the_standard_gap_limit() {
         // BDK's default of 25 is barely above the gap limit every other wallet
         // uses, which leaves no room for a wallet that already has history.
-        assert!(
-            IMPORT_LOOKAHEAD > GAP_LIMIT * 4,
-            "an import window of {IMPORT_LOOKAHEAD} is too tight for a gap limit of {GAP_LIMIT}"
-        );
+        // A `const` block, so this fails the build rather than the test: two
+        // constants that have drifted apart are not a thing to find out about
+        // when somebody happens to run the suite.
+        const {
+            assert!(
+                IMPORT_LOOKAHEAD > GAP_LIMIT * 4,
+                "the import window is too tight for the gap limit"
+            )
+        };
         assert_eq!(GAP_LIMIT, 20, "the ecosystem standard");
     }
 

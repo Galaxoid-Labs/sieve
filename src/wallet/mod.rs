@@ -930,7 +930,7 @@ impl Summary {
 
             // Largest first: the coin that covers a payment on its own is the
             // one that leaks least, and it should be the easy answer.
-            coins.sort_by(|a, b| b.sats.cmp(&a.sats));
+            coins.sort_by_key(|coin| std::cmp::Reverse(coin.sats));
             summary.coins.extend(coins);
         }
 
@@ -1120,6 +1120,11 @@ pub fn import_xprv(
 }
 
 /// Import a single WIF key, watched under every requested script type.
+// Everything a wallet is made of, and each of them is decided somewhere
+// different: the key by the person, the KDF by this build, the network and
+// birthday by the import screen. A struct to carry them would be a struct with
+// one caller.
+#[allow(clippy::too_many_arguments)]
 pub fn import_wif(
     wif: &str,
     password: &[u8],

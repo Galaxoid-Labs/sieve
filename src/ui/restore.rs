@@ -58,12 +58,16 @@ pub enum RestoreMsg {
 }
 
 #[derive(Debug)]
+// Sent once, when an import finishes. See the note on `OnboardingOutput`.
+#[allow(clippy::large_enum_variant)]
 pub enum RestoreOutput {
     Imported { paths: Paths, summary: Summary },
     Cancelled,
 }
 
 #[derive(Debug)]
+// As above: these are results delivered once, not values kept in bulk.
+#[allow(clippy::large_enum_variant)]
 pub enum RestoreCmd {
     /// What a look for devices turned up.
     Devices(Vec<crate::hardware::Found>),

@@ -84,7 +84,7 @@ fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -1177,10 +1177,6 @@ mod tests {
     }
 }
 
-/// BDK's fee-bump refusals, said as sentences.
-///
-/// Each of these is a real situation somebody can be in, and the raw error
-
 /// What the chain looks like from here, derived from headers this node already
 /// holds.
 ///
@@ -1228,7 +1224,7 @@ pub fn subsidy_sats(height: u32) -> u64 {
     if epoch >= 33 {
         0
     } else {
-        50 * 100_000_000 >> epoch
+        (50 * 100_000_000) >> epoch
     }
 }
 

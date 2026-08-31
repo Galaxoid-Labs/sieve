@@ -50,6 +50,9 @@ pub struct ExtraPayee {
 }
 
 #[derive(Debug, Clone)]
+// Every variant sets something, because that is what a message to a row of
+// two fields does. Renaming them to avoid the prefix would make them worse.
+#[allow(clippy::enum_variant_names)]
 pub enum ExtraPayeeMsg {
     SetUnit(String),
     SetAddress(String),

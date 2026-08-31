@@ -150,6 +150,10 @@ impl std::fmt::Debug for Setup {
 }
 
 #[derive(Debug)]
+// The large variant is the one this enum exists for — a wallet was made —
+// and it is sent once. Boxing it would trade a clearer type for a saving
+// nobody can measure.
+#[allow(clippy::large_enum_variant)]
 pub enum OnboardingOutput {
     Created {
         paths: Paths,
@@ -827,16 +831,16 @@ impl Component for Onboarding {
                 // space, capital letter and trailing space are all part of the
                 // key, so trimming or lowercasing here would accept a copy
                 // that does not open the wallet.
-                if let Some(wanted) = self.passphrase.as_ref() {
-                    if **wanted != *passphrase.0 {
-                        self.error = Some(
-                            "That passphrase does not match the one you set. It is part \
-                             of the key, so it has to be exact — spaces and capitals \
-                             included."
-                                .into(),
-                        );
-                        return;
-                    }
+                if let Some(wanted) = self.passphrase.as_ref()
+                    && **wanted != *passphrase.0
+                {
+                    self.error = Some(
+                        "That passphrase does not match the one you set. It is part \
+                         of the key, so it has to be exact — spaces and capitals \
+                         included."
+                            .into(),
+                    );
+                    return;
                 }
 
                 let bip39 = self.passphrase.clone();

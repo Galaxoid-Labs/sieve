@@ -451,7 +451,7 @@ pub(crate) fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -2733,9 +2733,7 @@ impl WalletPage {
                 .is_some_and(|only| only != tx.script_type)
                 && matches_search(
                     tx,
-                    self.labels
-                        .get(crate::wallet::labels::Kind::Tx, &tx.txid)
-                        .as_deref(),
+                    self.labels.get(crate::wallet::labels::Kind::Tx, &tx.txid),
                     &self.search,
                     self.settings.denomination,
                     &summary.network,

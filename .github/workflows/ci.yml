@@ -1,0 +1,68 @@
+# What every push has to survive.
+#
+# The release workflow runs these same three checks before it builds anything,
+# which is the right place for a gate and the wrong place to find out. A tag is
+# pushed once and rarely; this runs on the way there, so a release fails for
+# reasons that are about the release.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel a run that a newer push has already made pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GTK 4 and libadwaita are needed to *compile*, not only to run: the
+      # bindings link against them. Ubuntu's libadwaita is well above the 1.5
+      # floor Sieve pins, so this checks the code and not the baseline —
+      # PACKAGING.md has the containers that check the baseline.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Keyed on the lock file, so a dependency change is the only thing that
+      # pays for a cold build.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # --locked, so a run cannot quietly resolve a different dependency than
+      # the one that was tested here.
+      - run: cargo test --locked
+
+  # Advisories move under a lock file that does not, so this can fail without
+  # anything in the repository changing. Kept separate for that reason: a
+  # security advisory should not read as a broken build.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - run: cargo audit
+      - run: cargo deny check

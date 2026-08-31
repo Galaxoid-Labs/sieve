@@ -154,7 +154,7 @@ mod tests {
     fn duplicates_are_not_remembered_repeatedly() {
         // Several connections to one peer report the same address, and a list
         // of one peer eight times is worse than an empty one.
-        let addresses = vec![
+        let addresses = [
             "1.2.3.4".to_string(),
             "1.2.3.4".to_string(),
             REAL_ONION.to_string(),

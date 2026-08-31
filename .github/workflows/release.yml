@@ -20,12 +20,17 @@ jobs:
     steps:
       - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl
       - uses: actions/checkout@v4
-      - name: The tag and the manifest must agree
+      - name: The tag, the manifest and the PKGBUILD must agree
         run: |
           manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          pkgver=$(grep -m1 '^pkgver=' packaging/aur/PKGBUILD | cut -d= -f2)
           tag="${GITHUB_REF_NAME#v}"
-          echo "manifest=$manifest tag=$tag"
+          echo "manifest=$manifest pkgver=$pkgver tag=$tag"
           test "$manifest" = "$tag"
+          # The PKGBUILD carries the version separately and is what the AUR
+          # publishes. One left behind builds a package whose name disagrees
+          # with what is inside it.
+          test "$pkgver" = "$tag"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
