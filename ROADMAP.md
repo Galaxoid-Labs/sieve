@@ -8,8 +8,6 @@ signing path rather than adding a step to it.
 and importing one both offer bitcoin first, behind a switch acknowledging that the software is
 unreviewed. See the note at M8 for why a signet default was a gate that gated nothing.
 
-A rendered version of this plan: https://claude.ai/code/artifact/27f20a16-bce2-44a6-aa84-da33aa11112d
-
 ## Decide before M1
 
 These get baked into the vault format, the descriptors, or both. Changing them later means
