@@ -883,6 +883,11 @@ impl Session {
     /// messages are gone, so a peer that will not relay simply does not, and
     /// nothing distinguishes that from being ignored.
     ///
+    /// Observed, not theorised: the first transaction Sieve sent carrying an
+    /// `OP_RETURN` never reached a mempool, and one press of this put it
+    /// there. Ordinary payments from the same wallet had always propagated on
+    /// the first attempt.
+    ///
     /// Each call is another peer told this transaction is probably ours, which
     /// is why this is asked for rather than done on a timer.
     pub async fn rebroadcast(
