@@ -148,14 +148,39 @@ const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(15);
 /// libadwaita defines in terms of `@accent_bg_color`, so one colour is the
 /// whole change.
 fn apply_palette(provider: &gtk::CssProvider) {
-    match crate::palette::desktop() {
+    // Replacing a theme moves several files, and the monitor reports each of
+    // them: one theme change arrived as five. Applying the same colour five
+    // times is harmless and reading it five times in a log is not, so the last
+    // one applied is remembered and an unchanged palette does nothing.
+    thread_local! {
+        static APPLIED: std::cell::RefCell<Option<crate::palette::Palette>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    let found = crate::palette::desktop();
+    let changed = APPLIED.with(|applied| {
+        let mut applied = applied.borrow_mut();
+        if *applied == found {
+            return false;
+        }
+        applied.clone_from(&found);
+        true
+    });
+    if !changed {
+        return;
+    }
+
+    match found {
         Some(palette) => {
             tracing::debug!(accent = %palette.accent, "following the desktop's accent");
             provider.load_from_string(&palette.css());
         }
         // Nothing published, or it stopped being readable: back to whatever
         // libadwaita would have done on its own.
-        None => provider.load_from_string(""),
+        None => {
+            tracing::debug!("no desktop palette; using libadwaita's own accent");
+            provider.load_from_string("");
+        }
     }
 }
 
