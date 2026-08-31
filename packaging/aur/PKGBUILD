@@ -1,0 +1,73 @@
+# Maintainer: Galaxoid Labs <ismyhc@gmail.com>
+
+pkgname=sieve
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A privacy-focused Bitcoin wallet that syncs with compact block filters"
+arch=('x86_64' 'aarch64')
+url="https://github.com/galaxoidlabs/sieve"
+license=('MIT' 'Apache-2.0')
+# GTK 4 and libadwaita are the interface; sqlite holds public descriptors and
+# transaction history; openssl is used by the HTTP client for prices and fees.
+depends=('gtk4' 'libadwaita' 'sqlite' 'openssl')
+makedepends=('cargo' 'git')
+# Sieve looks for tor on PATH as well as beside its own binary, so a system
+# Tor is all that is needed to route connections through it.
+optdepends=('tor: route every connection through Tor')
+# makepkg compiles C with -flto=auto by default (OPTIONS=(... lto) in
+# makepkg.conf). secp256k1 ships a bundled C library, and building it to LLVM
+# bitcode leaves rust-lld unable to resolve rustsecp256k1_* at link time:
+#
+#   rust-lld: error: undefined symbol: rustsecp256k1_v0_10_0_ec_pubkey_parse
+#
+# Rust's own LTO is unaffected and stays on — `cargo build --release` links
+# perfectly well outside makepkg. This switches off the *C* LTO that makepkg
+# adds, which is the standard measure for a Rust package with a C dependency.
+options=(!lto)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # Vendor everything the lock file names, so build() needs no network and
+  # resolves to exactly the versions that were tested.
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  # Needs no network and no display: the tests that do are marked ignored.
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  install -Dm0755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+  install -Dm0644 "data/com.galaxoidlabs.Sieve.desktop" \
+    "$pkgdir/usr/share/applications/com.galaxoidlabs.Sieve.desktop"
+
+  # The icon is compiled into the binary as a gresource for the app's own use,
+  # which does nothing for the desktop's icon theme: the desktop entry asks for
+  # `com.galaxoidlabs.Sieve`, and that name has to exist on disk under hicolor.
+  install -Dm0644 "data/icons/hicolor/scalable/apps/bitcoin-logo.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.galaxoidlabs.Sieve.svg"
+
+  # Without these a hardware signer is visible only to root, which is the whole
+  # of "it is plugged in and nothing happens" on Linux.
+  install -Dm0644 "packaging/udev/51-sieve-hardware.rules" \
+    "$pkgdir/usr/lib/udev/rules.d/51-sieve-hardware.rules"
+
+  install -Dm0644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm0644 "SECURITY.md" "$pkgdir/usr/share/doc/$pkgname/SECURITY.md"
+}

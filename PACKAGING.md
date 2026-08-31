@@ -127,6 +127,21 @@ release tarball, **`sieve-git`** from `master` for early testers, and
 **`sieve-bin`** last — a prebuilt binary is a trust decision, so it waits for
 signed tags and checksums.
 
+**`options=(!lto)` is not optional.** makepkg compiles C with `-flto=auto` by
+default — `OPTIONS=(... lto)` in `/etc/makepkg.conf` — and secp256k1 ships a
+bundled C library. Building it to LLVM bitcode leaves the Rust link unable to
+resolve its symbols:
+
+```
+rust-lld: error: undefined symbol: rustsecp256k1_v0_10_0_ec_pubkey_parse
+  >>> referenced by async_hwi::ledger::Ledger<TransportHID>::sign_tx
+```
+
+Rust's own LTO is untouched and stays on; `cargo build --release` links
+perfectly well outside makepkg. This is the standard measure for a Rust
+package with a C dependency, and it is the sort of thing that is only ever
+found by building the package rather than by reading the recipe.
+
 **The icon must be installed by hand.** It is compiled into the binary as a
 gresource for the app's own use, which does nothing for the desktop's icon
 theme: the `.desktop` file says `Icon=com.galaxoidlabs.Sieve`, and that name

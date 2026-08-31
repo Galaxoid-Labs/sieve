@@ -315,7 +315,14 @@ and the order of work.
 
 - [ ] udev rules for the hardware signers, shipped by the package — the thing a sandbox
       cannot do, and what `hardware::udev_hint()` already promises.
-- [ ] A PKGBUILD for Arch and Omarchy, built here with `makepkg -si`.
+- [x] A PKGBUILD for Arch and Omarchy, built with `makepkg` on an Omarchy machine: the
+      package installs the binary, the desktop entry, the icon under the name the entry asks
+      for, the udev rules and the docs, and the binary links against exactly the four declared
+      dependencies. `options=(!lto)` is load-bearing — see `PACKAGING.md`.
+- [x] `--version` and `--help`, answered before a display is opened, so a container can check
+      the package it just installed.
+- [ ] A release workflow: `.github/workflows/release.yml` is written and has never run, for
+      want of a remote.
 - [ ] Install the icon and desktop entry properly: the gresource is for the app's own use and
       does nothing for the desktop's icon theme.
 - [ ] `cargo-deb` and `cargo-generate-rpm` metadata, built in containers of the oldest target

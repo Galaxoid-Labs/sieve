@@ -43,7 +43,44 @@ fn harden() {
     }
 }
 
+/// Answer `--version` and `--help` before anything opens a display.
+///
+/// A packaged build has to be checkable without a session — that is how a
+/// container proves the binary it just installed is the one it meant to, and
+/// GTK's own argument parsing happens too late and rejects both.
+///
+/// Returns true when the answer has been given and there is nothing else to do.
+fn answered_on_the_command_line() -> bool {
+    for argument in std::env::args().skip(1) {
+        match argument.as_str() {
+            "--version" | "-V" => {
+                println!("sieve {}", env!("CARGO_PKG_VERSION"));
+                return true;
+            }
+            "--help" | "-h" => {
+                println!(
+                    "sieve {}\n{}\n\n\
+                     Usage: sieve [--version] [--help]\n\n\
+                     Sieve is a window, not a command. Everything it does is done in the \
+                     interface;\nthere are no subcommands and nothing to script.\n\n\
+                     Wallets and settings live in ~/.local/share/sieve.\n\
+                     Set RUST_LOG=sieve=debug for a running commentary.",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("CARGO_PKG_DESCRIPTION"),
+                );
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn main() {
+    if answered_on_the_command_line() {
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

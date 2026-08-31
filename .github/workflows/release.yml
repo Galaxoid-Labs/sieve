@@ -1,0 +1,143 @@
+# Everything a tag produces, and nothing a branch does.
+#
+# One trigger, on purpose: a release that can be started by hand is a release
+# somebody eventually starts from the wrong commit.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # First, and everything depends on it: a tag that disagrees with Cargo.toml
+  # produces packages whose filenames lie about their contents.
+  check:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl
+      - uses: actions/checkout@v4
+      - name: The tag and the manifest must agree
+        run: |
+          manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tag="${GITHUB_REF_NAME#v}"
+          echo "manifest=$manifest tag=$tag"
+          test "$manifest" = "$tag"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+      # A tag that fails an audit must not produce packages. The advisory
+      # database moves under a lock file that does not, so this is the check
+      # that goes stale between releases and has to run at each one.
+      - run: |
+          pacman -S --noconfirm --needed cargo-audit cargo-deny
+          cargo audit
+          cargo deny check
+
+  # The AUR package is built by the person installing it, not here. So this
+  # job's purpose is not an artefact: it is proving the PKGBUILD still works
+  # before it is pushed, because a broken one is broken for everybody who
+  # tries until somebody notices.
+  arch:
+    needs: check
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl namcap sudo
+      - uses: actions/checkout@v4
+      - name: makepkg refuses to run as root, so it gets a user
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chown -R builder .
+      - name: Build the package from the tag
+        run: |
+          cd packaging/aur
+          sudo -u builder makepkg --syncdeps --noconfirm --cleanbuild
+      - name: Install it, and run what was installed
+        run: |
+          pacman -U --noconfirm packaging/aur/*.pkg.tar.zst
+          test "$(sieve --version)" = "sieve ${GITHUB_REF_NAME#v}"
+          test -f /usr/share/applications/com.galaxoidlabs.Sieve.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/com.galaxoidlabs.Sieve.svg
+          test -f /usr/lib/udev/rules.d/51-sieve-hardware.rules
+          desktop-file-validate /usr/share/applications/com.galaxoidlabs.Sieve.desktop
+          udevadm verify /usr/lib/udev/rules.d/51-sieve-hardware.rules
+      - name: What a reviewer would say about it
+        run: namcap packaging/aur/*.pkg.tar.zst || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: packaging/aur/*.pkg.tar.zst
+
+  # Built in a container of the oldest supported release of each family: glibc
+  # is forwards compatible and not backwards, so a binary linked on a newer one
+  # will not run on an older.
+  deb:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ['debian:trixie', 'ubuntu:24.04']
+    container: ${{ matrix.image }}
+    steps:
+      - run: |
+          apt-get update
+          apt-get install -y curl build-essential pkg-config libgtk-4-dev \
+            libadwaita-1-dev libsqlite3-dev libssl-dev
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      - uses: actions/checkout@v4
+      - run: |
+          . "$HOME/.cargo/env"
+          cargo install cargo-deb --locked
+          cargo deb --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ strategy.job-index }}
+          path: target/debian/*.deb
+
+  rpm:
+    needs: check
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - run: dnf install -y cargo rust gtk4-devel libadwaita-devel sqlite-devel openssl-devel
+      - uses: actions/checkout@v4
+      - run: |
+          cargo install cargo-generate-rpm --locked
+          cargo build --release --locked
+          cargo generate-rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: target/generate-rpm/*.rpm
+
+  publish:
+    needs: [arch, deb, rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: One signature, over the checksums
+        run: |
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.zst' \) \
+            -exec sha256sum {} + | sed 's|artifacts/[^/]*/||' > SHA256SUMS
+          cat SHA256SUMS
+      # The key lives in repository secrets and nowhere else. Rotating it is a
+      # release note rather than a silent event.
+      - name: Sign
+        if: ${{ env.SIGNING_KEY != '' }}
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          echo "$SIGNING_KEY" | gpg --batch --import
+          gpg --batch --detach-sign --armor SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*
+            SHA256SUMS
+            SHA256SUMS.asc
