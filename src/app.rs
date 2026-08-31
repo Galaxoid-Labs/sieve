@@ -155,7 +155,6 @@ fn apply_palette(provider: &gtk::CssProvider) {
     // them: one theme change arrived as five. Applying the same colour five
     // times is harmless and reading it five times in a log is not, so the last
     // one applied is remembered and an unchanged palette does nothing.
-    #[allow(clippy::type_complexity)]
     thread_local! {
         static APPLIED: std::cell::RefCell<Option<(Option<crate::palette::Palette>, bool)>> =
             const { std::cell::RefCell::new(None) };
