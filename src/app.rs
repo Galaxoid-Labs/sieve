@@ -2520,6 +2520,20 @@ impl App {
              clear.",
         );
         tor.set_active(self.settings.tor);
+        // Readable while locked, not settable. The node keeps syncing behind
+        // the lock, so turning Tor off at an unattended machine would put that
+        // sync on the clear and hand a peer the IP address — a real change to
+        // how this wallet reaches the network, made without the password.
+        // Everything else on this page only describes the app.
+        tor.set_sensitive(self.unlocked);
+        if !self.unlocked {
+            tor.set_subtitle(
+                "Unlock the wallet to change this. It is left as it is because the wallet \
+                 keeps syncing while locked, and switching Tor off would put that on the \
+                 clear.",
+            );
+            tor.set_subtitle_lines(3);
+        }
         let toggled = {
             let sender = sender.clone();
             tor.connect_active_notify(move |row| {
@@ -2554,6 +2568,9 @@ impl App {
 
             let address = adw::EntryRow::new();
             address.set_title("Proxy address");
+            // Same rule as the switch above: where Sieve connects is not
+            // changed from behind the lock.
+            address.set_sensitive(self.unlocked);
             address.set_text(
                 self.settings
                     .tor_proxy
