@@ -362,6 +362,7 @@ pub enum AppMsg {
         txid: String,
         from: wallet::accounts::ScriptType,
         fee_rate: f64,
+        cancel: bool,
     },
     /// Write every label out as a BIP-329 file, or read one in.
     ExportLabels,
@@ -559,10 +560,12 @@ impl Component for App {
                         txid,
                         from,
                         fee_rate,
+                        cancel,
                     } => AppMsg::PlanBump {
                         txid,
                         from,
                         fee_rate,
+                        cancel,
                     },
                     crate::ui::wallet_page::WalletPageOutput::SetLabel {
                         kind,
@@ -1190,6 +1193,7 @@ impl Component for App {
                 txid,
                 from,
                 fee_rate,
+                cancel,
             } => {
                 let Some(session) = self.session.clone() else {
                     self.wallet.emit(WalletPageMsg::BumpPlanned(Box::new(Err(
@@ -1209,11 +1213,12 @@ impl Component for App {
                 };
                 sender.oneshot_command(async move {
                     AppCmd::PlannedBump(
-                        session
-                            .plan_bump(&txid, from, rate)
-                            .await
-                            .map(Box::new)
-                            .map_err(|e| crate::ui::send::capitalise(&e.to_string())),
+                        match cancel {
+                            true => session.plan_cancel(&txid, from, rate).await,
+                            false => session.plan_bump(&txid, from, rate).await,
+                        }
+                        .map(Box::new)
+                        .map_err(|e| crate::ui::send::capitalise(&e.to_string())),
                     )
                 });
             }

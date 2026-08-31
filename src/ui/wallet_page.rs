@@ -26,11 +26,13 @@ pub enum WalletPageOutput {
     },
     /// TEMPORARY — show the welcome screen for a look at it.
     ShowWelcome,
-    /// Rebuild an unconfirmed payment at a higher fee.
+    /// Rebuild an unconfirmed payment at a higher fee — either paying the
+    /// same people, or paying nobody, which is what cancelling one means.
     PlanBump {
         txid: String,
         from: crate::wallet::accounts::ScriptType,
         fee_rate: f64,
+        cancel: bool,
     },
     ShowPreferences,
     /// Ask for the password again — the wallet is on screen but locked.
@@ -601,12 +603,18 @@ pub enum WalletPageMsg {
         txid: String,
         text: String,
     },
-    /// Ask for a new fee rate for an unconfirmed payment.
-    AskBump(String),
+    /// Ask for a new fee rate for an unconfirmed payment. `cancel` decides
+    /// whether the replacement pays the same people or pays nobody; both go
+    /// through one path so the two can never drift apart.
+    AskBump {
+        txid: String,
+        cancel: bool,
+    },
     /// Build the replacement at this rate.
     Bump {
         txid: String,
         fee_rate: f64,
+        cancel: bool,
     },
     /// The replacement, built and waiting for a password.
     BumpPlanned(Box<Result<crate::wallet::send::Plan, String>>),
@@ -2233,9 +2241,13 @@ impl Component for WalletPage {
             }
             WalletPageMsg::ShowAddresses => self.show_addresses(root, &sender),
 
-            WalletPageMsg::AskBump(txid) => self.ask_bump(&txid, root, &sender),
+            WalletPageMsg::AskBump { txid, cancel } => self.ask_bump(&txid, cancel, root, &sender),
 
-            WalletPageMsg::Bump { txid, fee_rate } => {
+            WalletPageMsg::Bump {
+                txid,
+                fee_rate,
+                cancel,
+            } => {
                 let Some(from) = self
                     .summary
                     .as_ref()
@@ -2244,12 +2256,16 @@ impl Component for WalletPage {
                 else {
                     return;
                 };
-                self.toaster
-                    .add_toast(adw::Toast::new("Building the replacement…"));
+                self.toaster.add_toast(adw::Toast::new(if cancel {
+                    "Building the cancellation…"
+                } else {
+                    "Building the replacement…"
+                }));
                 let _ = sender.output(WalletPageOutput::PlanBump {
                     txid,
                     from,
                     fee_rate,
+                    cancel,
                 });
             }
 
@@ -2647,10 +2663,34 @@ impl WalletPage {
                     let sender = sender.clone();
                     let txid = tx.txid.clone();
                     raise.connect_activated(move |_| {
-                        sender.input(WalletPageMsg::AskBump(txid.clone()));
+                        sender.input(WalletPageMsg::AskBump {
+                            txid: txid.clone(),
+                            cancel: false,
+                        });
                     });
                 }
                 status.add(&raise);
+
+                // Bitcoin has no undo. What it has is a second payment that
+                // spends the same coins and pays nobody, which the network may
+                // prefer — so the row says "try", and the dialog behind it
+                // says why that word is the honest one.
+                let call_off = adw::ActionRow::new();
+                call_off.set_title("Try to cancel it");
+                call_off.set_subtitle("Replace it with one that pays nobody");
+                call_off.set_activatable(true);
+                call_off.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                {
+                    let sender = sender.clone();
+                    let txid = tx.txid.clone();
+                    call_off.connect_activated(move |_| {
+                        sender.input(WalletPageMsg::AskBump {
+                            txid: txid.clone(),
+                            cancel: true,
+                        });
+                    });
+                }
+                status.add(&call_off);
             }
         }
         if let Some(hash) = &tx.block_hash {
@@ -2980,7 +3020,13 @@ impl WalletPage {
     /// pay the original's fee *and* at least a satoshi per virtual byte for
     /// its own size. Below that it is dropped by every node it reaches, which
     /// looks exactly like the network ignoring you.
-    fn ask_bump(&self, txid: &str, root: &adw::BreakpointBin, sender: &ComponentSender<Self>) {
+    fn ask_bump(
+        &self,
+        txid: &str,
+        cancel: bool,
+        root: &adw::BreakpointBin,
+        sender: &ComponentSender<Self>,
+    ) {
         let Some(summary) = &self.summary else { return };
         let Some(tx) = summary.transactions.iter().find(|t| t.txid == txid) else {
             return;
@@ -2990,16 +3036,43 @@ impl WalletPage {
         let was = tx.fee_rate().unwrap_or(1.0);
         let floor = (was + 1.0).max(2.0);
 
-        let body = format!(
-            "This payment is paying {was:.2} sat/vB. A replacement spends the same coins, so \
-             only one of them can ever confirm — and if the original confirms first, the \
-             replacement simply never happens and costs nothing.\n\nSieve cannot see the \
-             mempool, so it cannot tell you which one the network prefers. The chain decides."
-        );
+        let body = match cancel {
+            false => format!(
+                "This payment is paying {was:.2} sat/vB. A replacement spends the same coins, \
+                 so only one of them can ever confirm — and if the original confirms first, \
+                 the replacement simply never happens and costs nothing.\n\nSieve cannot see \
+                 the mempool, so it cannot tell you which one the network prefers. The chain \
+                 decides."
+            ),
+            // Said plainly, because the word "cancel" promises something
+            // Bitcoin cannot give. A sent payment is out on the network and
+            // anybody can mine it.
+            true => format!(
+                "This does not undo the payment. It sends the same coins back to your own \
+                 wallet at a higher fee, and the two cannot both confirm — so if the network \
+                 prefers this one, the original never happens.\n\nIt may not. The original is \
+                 paying {was:.2} sat/vB and is already out there; if it is mined first the \
+                 money is gone as it was meant to be, and this costs nothing. Sieve cannot \
+                 see the mempool, so it cannot tell you which way it will go.\n\nYou pay the \
+                 fee either way if this one wins."
+            ),
+        };
 
-        let dialog = adw::AlertDialog::new(Some("Raise the fee?"), Some(&body));
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("bump", "Replace it");
+        let dialog = adw::AlertDialog::new(
+            Some(match cancel {
+                false => "Raise the fee?",
+                true => "Try to cancel this payment?",
+            }),
+            Some(&body),
+        );
+        dialog.add_response("cancel", "Back");
+        dialog.add_response(
+            "bump",
+            match cancel {
+                false => "Replace it",
+                true => "Try to cancel it",
+            },
+        );
         dialog.set_response_appearance("bump", adw::ResponseAppearance::Suggested);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
@@ -3027,6 +3100,7 @@ impl WalletPage {
                     sender.input(WalletPageMsg::Bump {
                         txid: txid.clone(),
                         fee_rate: rate.value(),
+                        cancel,
                     });
                 }
             });
@@ -3056,34 +3130,74 @@ impl WalletPage {
             .fee_rate()
             .map(|rate| format!(" · about {:.1} sat/vB", rate.to_sat_per_vb_ceil()))
             .unwrap_or_default();
-        let mut body = format!(
-            "The recipient still gets {}.\n\nFee was {}\nFee becomes {}{rate}\nThat is {} \
-             more.",
-            unit.format(plan.spend.to_sat(), network),
-            unit.format(was, network),
-            unit.format(now, network),
-            unit.format(now.saturating_sub(was), network),
-        );
-        // Where the extra comes from, which is the part somebody would want to
-        // check: normally the change, and if there is none, another coin.
-        match plan.change {
-            Some(change) => body.push_str(&format!(
-                "\n\nComing back to you {}",
-                unit.format(change.to_sat(), network)
-            )),
-            None => body.push_str(
-                "\n\nNothing comes back to you from this one — the fee is taking what change \
-                 there was.",
-            ),
-        }
-        body.push_str(
-            "\n\nThe replacement spends the same coins as the original, so only one of them \
-             can confirm.",
-        );
+        let mut body = if plan.cancels {
+            // The kept amount leads, because it is the number this is for.
+            // The fee follows, because it is what the attempt costs whether or
+            // not anybody thinks of it as a cost.
+            format!(
+                "{} stops being paid to {}.\n\nFee was {}\nFee becomes {}{rate}\nComing \
+                 back to you {}",
+                unit.format(plan.spend.to_sat(), network),
+                crate::ui::send::shorten(&plan.to),
+                unit.format(was, network),
+                unit.format(now, network),
+                unit.format(
+                    plan.change.map(|change| change.to_sat()).unwrap_or(0),
+                    network
+                ),
+            )
+        } else {
+            let mut body = format!(
+                "The recipient still gets {}.\n\nFee was {}\nFee becomes {}{rate}\nThat is {} \
+                 more.",
+                unit.format(plan.spend.to_sat(), network),
+                unit.format(was, network),
+                unit.format(now, network),
+                unit.format(now.saturating_sub(was), network),
+            );
+            // Where the extra comes from, which is the part somebody would want
+            // to check: normally the change, and if there is none, another coin.
+            match plan.change {
+                Some(change) => body.push_str(&format!(
+                    "\n\nComing back to you {}",
+                    unit.format(change.to_sat(), network)
+                )),
+                None => body.push_str(
+                    "\n\nNothing comes back to you from this one — the fee is taking what \
+                     change there was.",
+                ),
+            }
+            body
+        };
+        body.push_str(match plan.cancels {
+            false => {
+                "\n\nThe replacement spends the same coins as the original, so only one of \
+                 them can confirm."
+            }
+            // Repeated here on purpose. This is the last screen before it is
+            // signed, and "cancel" is a word that promises more than this can
+            // do.
+            true => {
+                "\n\nBoth spend the same coins, so only one can confirm. If the original is \
+                 mined first, it stands and this costs nothing."
+            }
+        });
 
-        let dialog = adw::AlertDialog::new(Some("Replace this payment?"), Some(&body));
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("send", "Replace");
+        let dialog = adw::AlertDialog::new(
+            Some(match plan.cancels {
+                false => "Replace this payment?",
+                true => "Try to cancel this payment?",
+            }),
+            Some(&body),
+        );
+        dialog.add_response("cancel", "Back");
+        dialog.add_response(
+            "send",
+            match plan.cancels {
+                false => "Replace",
+                true => "Try to cancel it",
+            },
+        );
         dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");

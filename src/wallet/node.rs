@@ -580,16 +580,13 @@ impl Session {
             .unwrap_or(0);
         let (spend, change) = super::send::split_outputs_of(&original.tx_node.tx, &account.wallet);
 
-        let psbt = {
-            let mut builder = account
-                .wallet
-                .build_fee_bump(txid)
-                .map_err(|e| anyhow!("{}", explain_bump(e)))?;
-            builder.fee_rate(fee_rate);
-            builder
-                .finish()
-                .map_err(|e| anyhow!("the replacement could not be built: {e}"))?
-        };
+        let psbt = super::send::build_replacement(
+            &mut account.wallet,
+            txid,
+            fee_rate,
+            bdk_wallet::bitcoin::Amount::from_sat(was),
+            None,
+        )?;
 
         let fee = psbt
             .fee()
@@ -603,6 +600,82 @@ impl Session {
             fee,
             replaces: Some(txid.to_string()),
             was_fee: Some(was),
+            cancels: false,
+            psbt,
+        })
+    }
+
+    /// Replace an unconfirmed payment with one that pays nobody.
+    ///
+    /// The same coins, back to this wallet, at a higher fee — so the two
+    /// conflict and only one can confirm. This is the closest thing to
+    /// cancelling a payment that Bitcoin has, and it is not a guarantee: if
+    /// the original is mined first the money is gone as intended, and nothing
+    /// here can promise otherwise. What it does is give the network a better
+    /// reason to prefer the replacement.
+    ///
+    /// The money returns on the *change* keychain rather than a receive
+    /// address. It is not a payment from anybody — nobody sent it — and using
+    /// a receive address would consume one that was meant to be handed out.
+    pub async fn plan_cancel(
+        &self,
+        txid: &str,
+        script_type: super::accounts::ScriptType,
+        fee_rate: bdk_wallet::bitcoin::FeeRate,
+    ) -> Result<super::send::Plan> {
+        let txid: bdk_wallet::bitcoin::Txid = txid
+            .parse()
+            .map_err(|_| anyhow!("that is not a transaction id"))?;
+
+        let mut portfolio = self.portfolio.lock().await;
+        let account = portfolio
+            .accounts
+            .iter_mut()
+            .find(|a| a.script_type == script_type)
+            .context("that derivation path is not part of this wallet")?;
+
+        let original = account
+            .wallet
+            .get_tx(txid)
+            .context("this wallet does not hold that transaction")?;
+        let was = account
+            .wallet
+            .calculate_fee(&original.tx_node.tx)
+            .map(|fee| fee.to_sat())
+            .unwrap_or(0);
+        // What the original was paying out, which is what cancelling keeps.
+        let (spend, _) = super::send::split_outputs_of(&original.tx_node.tx, &account.wallet);
+
+        let back = account
+            .wallet
+            .reveal_next_address(bdk_wallet::KeychainKind::Internal)
+            .address;
+        account.persist()?;
+
+        let psbt = super::send::build_replacement(
+            &mut account.wallet,
+            txid,
+            fee_rate,
+            bdk_wallet::bitcoin::Amount::from_sat(was),
+            Some(back.script_pubkey()),
+        )?;
+
+        let fee = psbt
+            .fee()
+            .map_err(|e| anyhow!("the cancellation has no readable fee: {e}"))?;
+
+        Ok(super::send::Plan {
+            from: script_type,
+            // Who was being paid, kept so the screen can name what is being
+            // called off rather than describing a payment to nobody.
+            to: spend.0,
+            spend: spend.1,
+            // Everything the replacement holds comes back here.
+            change: Some(psbt.unsigned_tx.output.iter().map(|o| o.value).sum()),
+            fee,
+            replaces: Some(txid.to_string()),
+            was_fee: Some(was),
+            cancels: true,
             psbt,
         })
     }
@@ -690,6 +763,7 @@ impl Session {
             // An ordinary payment replaces nothing.
             replaces: None,
             was_fee: None,
+            cancels: false,
         })
     }
 
@@ -995,25 +1069,6 @@ mod tests {
 /// BDK's fee-bump refusals, said as sentences.
 ///
 /// Each of these is a real situation somebody can be in, and the raw error
-/// names the internal state rather than what happened.
-fn explain_bump(error: bdk_wallet::error::BuildFeeBumpError) -> String {
-    use bdk_wallet::error::BuildFeeBumpError as E;
-    match error {
-        E::TransactionConfirmed(_) => {
-            "that payment is already in a block, so it cannot be replaced".into()
-        }
-        E::IrreplaceableTransaction(_) => {
-            "that payment did not signal that it could be replaced, so the network will not \
-             take a replacement for it"
-                .into()
-        }
-        E::TransactionNotFound(_) => {
-            "this wallet does not hold that payment, so it cannot rebuild it".into()
-        }
-        E::FeeRateUnavailable => "the original payment's fee cannot be worked out".into(),
-        other => format!("that payment cannot be replaced: {other}"),
-    }
-}
 
 /// What the chain looks like from here, derived from headers this node already
 /// holds.

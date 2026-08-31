@@ -70,12 +70,23 @@ pub struct Plan {
     /// What that payment was paying, so the increase can be shown rather than
     /// only the new figure.
     pub was_fee: Option<u64>,
+    /// Whether this replacement pays nobody — the same coins back to this
+    /// wallet, to call the original off. Every screen has to say so: the
+    /// numbers alone read as a payment to yourself, and `total()` would
+    /// otherwise claim money is leaving when only the fee is.
+    pub cancels: bool,
 }
 
 impl Plan {
     /// What leaves the wallet: the payment plus the fee.
+    ///
+    /// A cancellation pays nobody, so the fee is the whole of it.
     pub fn total(&self) -> Amount {
-        self.spend + self.fee
+        if self.cancels {
+            self.fee
+        } else {
+            self.spend + self.fee
+        }
     }
 
     /// The rate actually achieved, for showing back to the person who chose it.
@@ -166,6 +177,114 @@ fn hd_signer(xprv: Xpriv, script_type: ScriptType, network: Network) -> Result<W
         .network(network)
         .create_wallet_no_persist()
         .map_err(|e| anyhow!("could not derive the signing key: {e}"))
+}
+
+/// names the internal state rather than what happened.
+pub(super) fn explain_bump(error: bdk_wallet::error::BuildFeeBumpError) -> String {
+    use bdk_wallet::error::BuildFeeBumpError as E;
+    match error {
+        E::TransactionConfirmed(_) => {
+            "that payment is already in a block, so it cannot be replaced".into()
+        }
+        E::IrreplaceableTransaction(_) => {
+            "that payment did not signal that it could be replaced, so the network will not \
+             take a replacement for it"
+                .into()
+        }
+        E::TransactionNotFound(_) => {
+            "this wallet does not hold that payment, so it cannot rebuild it".into()
+        }
+        E::FeeRateUnavailable => "the original payment's fee cannot be worked out".into(),
+        other => format!("that payment cannot be replaced: {other}"),
+    }
+}
+
+/// Rebuild an unconfirmed payment: at a higher fee, or paying nobody.
+///
+/// `back` is what separates the two. `None` keeps the original's recipients
+/// and only raises the fee; `Some(script)` drops them and drains everything to
+/// that script, which is a cancellation — the same coins, so the two conflict,
+/// and only one can ever confirm.
+///
+/// The rate asked for is a floor, not the answer. BDK enforces only that a
+/// replacement's *rate* beats the original's by a satoshi per virtual byte,
+/// but the network's rule is about the *absolute* fee: a replacement must pay
+/// what the original paid plus a satoshi for every virtual byte of its own
+/// size. Those come to the same thing when the replacement is the same size,
+/// which is why a fee bump has never tripped over it — and not when it is
+/// smaller, which a cancellation always is, having one output where the
+/// original had two. Paying under that is not an error anybody sees: every
+/// node drops the transaction, and it looks exactly like being ignored. So the
+/// rate is raised here until the fee clears the rule.
+pub(super) fn build_replacement(
+    wallet: &mut Wallet,
+    txid: bdk_wallet::bitcoin::Txid,
+    fee_rate: FeeRate,
+    previous_fee: Amount,
+    back: Option<ScriptBuf>,
+) -> Result<Psbt> {
+    let what = match back {
+        Some(_) => "cancellation",
+        None => "replacement",
+    };
+    let mut rate = fee_rate;
+
+    // Twice is enough: raising the rate does not change the size, so the
+    // second attempt pays what the first one worked out it was short of. The
+    // extra rounds are slack, not a search.
+    for _ in 0..4 {
+        let psbt = {
+            let mut builder = wallet
+                .build_fee_bump(txid)
+                .map_err(|e| anyhow!("{}", explain_bump(e)))?;
+            if let Some(back) = back.clone() {
+                // The original's outputs go, its inputs stay. BDK permits a
+                // transaction with no recipients in exactly this case: a drain
+                // address, and inputs that must be spent.
+                builder.set_recipients(Vec::new());
+                builder.drain_to(back);
+            }
+            builder.fee_rate(rate);
+            match builder.finish() {
+                Ok(psbt) => psbt,
+                // BDK works the original's rate out to a fraction of a
+                // satoshi, which the screen that offered a floor rounded. Ask
+                // for a rate a hundredth under what it wants and it refuses,
+                // having just said what it wants — so take it rather than
+                // handing somebody an arithmetic complaint about a number they
+                // did not choose.
+                Err(bdk_wallet::error::CreateTxError::FeeRateTooLow { required })
+                    if required > rate =>
+                {
+                    rate = required;
+                    continue;
+                }
+                Err(e) => bail!("the {what} could not be built: {e}"),
+            }
+        };
+
+        let fee = psbt
+            .fee()
+            .map_err(|e| anyhow!("the {what} has no readable fee: {e}"))?;
+        let vsize = psbt.unsigned_tx.vsize() as u64;
+        // What the network asks: the original's fee, plus a satoshi per
+        // virtual byte of the replacement.
+        let required = previous_fee + Amount::from_sat(vsize);
+        if fee >= required {
+            return Ok(psbt);
+        }
+
+        let needed = required.to_sat().div_ceil(vsize) + 1;
+        let Some(higher) = FeeRate::from_sat_per_vb(needed) else {
+            break;
+        };
+        if higher <= rate {
+            break;
+        }
+        rate = higher;
+    }
+
+    bail!("the {what} cannot be built at a fee this network would relay")
 }
 
 /// Refuse a signer that derives a different wallet than the one being spent.
@@ -667,6 +786,201 @@ mod tests {
 
     /// A signer derived with a different BIP-39 passphrase is a different
     /// wallet. Caught before signing rather than after broadcasting nothing.
+    /// The claim a cancellation makes: the same coins, none of them going
+    /// anywhere but back, and the original's recipient paid nothing.
+    #[test]
+    fn a_cancellation_pays_nobody_and_spends_the_same_coins() {
+        let network = Network::Signet;
+        let script_type = ScriptType::NativeSegwit;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let mut wallet = hd_signer(xprv, script_type, network).unwrap();
+
+        let funded = wallet.reveal_next_address(KeychainKind::External).address;
+        let funding = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(
+                    "0000000000000000000000000000000000000000000000000000000000000001"
+                        .parse::<Txid>()
+                        .unwrap(),
+                    0,
+                ),
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: funded.script_pubkey(),
+            }],
+        };
+        wallet.apply_unconfirmed_txs([(funding, 0u64)]);
+
+        // A payment out, unconfirmed, of the kind somebody would want back.
+        let stranger =
+            parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+        let payment = {
+            let mut builder = wallet.build_tx();
+            builder.add_recipient(stranger.script_pubkey(), Amount::from_sat(40_000));
+            builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+            builder.finish().unwrap().unsigned_tx
+        };
+        let original = payment.compute_txid();
+        let spent: Vec<OutPoint> = payment.input.iter().map(|i| i.previous_output).collect();
+        wallet.apply_unconfirmed_txs([(payment, 1u64)]);
+
+        let back = wallet
+            .reveal_next_address(KeychainKind::Internal)
+            .address
+            .script_pubkey();
+        let original_fee = wallet
+            .calculate_fee(&wallet.get_tx(original).unwrap().tx_node.tx)
+            .unwrap();
+        let psbt = build_replacement(
+            &mut wallet,
+            original,
+            FeeRate::from_sat_per_vb(10).unwrap(),
+            original_fee,
+            Some(back.clone()),
+        )
+        .expect("a cancellation must build");
+        let fee = psbt.fee().unwrap();
+        let cancellation = psbt.unsigned_tx;
+
+        // The same coins, which is the only reason the two conflict at all.
+        let now: Vec<OutPoint> = cancellation
+            .input
+            .iter()
+            .map(|i| i.previous_output)
+            .collect();
+        assert_eq!(now, spent, "a cancellation must spend the original's coins");
+
+        // And nothing paid to the person the original was paying.
+        assert!(
+            !cancellation
+                .output
+                .iter()
+                .any(|out| out.script_pubkey == stranger.script_pubkey()),
+            "the original's recipient must be paid nothing"
+        );
+        assert!(
+            cancellation
+                .output
+                .iter()
+                .all(|out| wallet.is_mine(out.script_pubkey.clone())),
+            "every output must come back to this wallet"
+        );
+
+        // The fee is the whole cost: everything else returns.
+        let put_in = Amount::from_sat(100_000);
+        let came_back: Amount = cancellation.output.iter().map(|out| out.value).sum();
+        assert_eq!(came_back + fee, put_in, "only the fee may leave");
+        assert!(
+            fee > Amount::from_sat(0),
+            "a replacement has to outbid the original"
+        );
+    }
+
+    #[test]
+    fn a_cancellation_pays_what_the_network_asks_even_at_a_low_rate() {
+        // BDK enforces only that the replacement's *rate* beats the
+        // original's by a satoshi per virtual byte. The network's rule is
+        // about the absolute fee, and a cancellation is smaller than what it
+        // replaces — one output where there were two — so the rate that
+        // satisfies BDK can still leave the fee short. Nothing reports that:
+        // every node drops the transaction and it looks like being ignored.
+        let network = Network::Signet;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let mut wallet = hd_signer(xprv, ScriptType::NativeSegwit, network).unwrap();
+
+        let funded = wallet.reveal_next_address(KeychainKind::External).address;
+        wallet.apply_unconfirmed_txs([(
+            Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(
+                        "0000000000000000000000000000000000000000000000000000000000000002"
+                            .parse::<Txid>()
+                            .unwrap(),
+                        0,
+                    ),
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: funded.script_pubkey(),
+                }],
+            },
+            0u64,
+        )]);
+
+        let stranger =
+            parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+        let payment = {
+            let mut builder = wallet.build_tx();
+            builder.add_recipient(stranger.script_pubkey(), Amount::from_sat(40_000));
+            builder.fee_rate(FeeRate::from_sat_per_vb(5).unwrap());
+            builder.finish().unwrap().unsigned_tx
+        };
+        let original = payment.compute_txid();
+        wallet.apply_unconfirmed_txs([(payment, 1u64)]);
+        let was = wallet
+            .calculate_fee(&wallet.get_tx(original).unwrap().tx_node.tx)
+            .unwrap();
+
+        let back = wallet
+            .reveal_next_address(KeychainKind::Internal)
+            .address
+            .script_pubkey();
+
+        // One satoshi per virtual byte over the original: exactly what BDK
+        // accepts, and on a smaller transaction not necessarily enough.
+        let psbt = build_replacement(
+            &mut wallet,
+            original,
+            FeeRate::from_sat_per_vb(6).unwrap(),
+            was,
+            Some(back),
+        )
+        .expect("a cancellation must build");
+
+        let fee = psbt.fee().unwrap();
+        let vsize = psbt.unsigned_tx.vsize() as u64;
+        assert!(
+            fee >= was + Amount::from_sat(vsize),
+            "a replacement paying {fee} against an original paying {was} over {vsize} vB \
+             would be dropped by every node"
+        );
+    }
+
+    #[test]
+    fn a_cancellation_costs_only_its_fee() {
+        // `total()` is what the screens call "leaving the wallet". For an
+        // ordinary payment that is the amount plus the fee; for a
+        // cancellation nothing is being paid, so claiming the amount leaves
+        // would say the opposite of what is happening.
+        let plan = |cancels: bool| Plan {
+            psbt: Psbt::from_unsigned_tx(Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: Vec::new(),
+            })
+            .unwrap(),
+            from: ScriptType::NativeSegwit,
+            to: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into(),
+            spend: Amount::from_sat(40_000),
+            fee: Amount::from_sat(900),
+            change: Some(Amount::from_sat(59_100)),
+            replaces: Some("an id".into()),
+            was_fee: Some(300),
+            cancels,
+        };
+
+        assert_eq!(plan(false).total(), Amount::from_sat(40_900));
+        assert_eq!(plan(true).total(), Amount::from_sat(900));
+    }
+
     #[test]
     fn a_signer_for_another_wallet_is_refused() {
         let network = Network::Signet;

@@ -1500,7 +1500,7 @@ fn is_amount_character(c: char) -> bool {
 /// Both ends, not the first sixteen characters: an address or a transaction id
 /// is checked against another screen, and the differences that matter are as
 /// likely to be at the end.
-fn shorten(text: &str) -> String {
+pub(crate) fn shorten(text: &str) -> String {
     let count = text.chars().count();
     if count <= 20 {
         return text.to_string();
