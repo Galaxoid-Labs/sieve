@@ -34,7 +34,6 @@ Then, in rough order:
   descriptors cannot be got out — and that is the backup that recreates this wallet
   watch-only somewhere else without putting a coin at risk.
 - **Amounts cannot be typed in dollars.** [M5] They can be read in dollars.
-- **One recipient per transaction.** [M4]
 - **No search in the activity list.** [M5] It filters by derivation path now; not by amount,
   address or transaction id.
 - **Nothing the node downloads is kept.** [M2] `bip157::Node::new` destructures its config
@@ -263,12 +262,28 @@ crosses a component boundary as a message.
 - [x] Unconfirmed coins excluded from selection.
 - [x] BIP-21 payment requests read on paste, including the amount and who is being paid.
 - [x] Fee bump, with the race against the original explained rather than hidden.
+- [x] Both replacement paths go through one builder, which enforces the rule BDK does not.
+      BDK checks that a replacement's *rate* beats the original's by a satoshi per virtual
+      byte; the network's rule is about the absolute fee — the original's, plus a satoshi for
+      every virtual byte of the replacement. Those agree only when the sizes do, which is why
+      a fee bump never tripped over it and a cancellation always would, having one output
+      where there were two. Paying under it is invisible: every node drops the transaction and
+      it looks exactly like being ignored.
 - [x] Coin control, on its own screen, with the linking it avoids stated in plain words.
-- [ ] Cancel a payment by replacing it with one that pays yourself.
+- [x] Cancel a payment by replacing it with one that pays yourself — a row beside "Raise
+      the fee". Called "Try to cancel it" everywhere, because a sent payment is already out on
+      the network and anybody can mine it; if the original wins, the money is gone as intended
+      and the attempt costs nothing. The money returns on the *change* keychain: nobody sent
+      it, so it is not a payment, and a receive address meant to be handed out should not be
+      spent on it.
 - [ ] Pay a silent payment address (BIP-352). Contained, needs no server, and the ordering
       falls out of coin control — see `SILENT_PAYMENTS.md`, which also records why *receiving*
       is blocked on tweak data a filter wallet cannot compute.
-- [ ] More than one recipient in a transaction.
+- [x] More than one recipient in a transaction. The first keeps its own row — it carries a
+      pasted BIP-21 request and Max, which only means something with one person to send
+      everything to — and the rest are "Also pay" rows that can be taken away again. Adding one
+      releases Max and says why. The review dialog names every recipient with its own amount:
+      a total without the addresses is a number nobody can check.
 
 Exercised end to end on signet: built, signed, broadcast, shown as pending, and confirmed on
 its own through ordinary filter sync — no explorer, no server told which transaction to watch.
