@@ -276,6 +276,10 @@ crosses a component boundary as a message.
       and the attempt costs nothing. The money returns on the *change* keychain: nobody sent
       it, so it is not a payment, and a receive address meant to be handed out should not be
       spent on it.
+- [ ] Data outputs (`OP_RETURN`), on a payment or on a transaction that pays nobody. Designed
+      but deliberately not built — see `OP_RETURN.md`, which is as much an argument against it
+      as a plan for it: a transaction that pays nobody proves which of its outputs are yours,
+      where a payment only lets somebody guess.
 - [ ] Pay a silent payment address (BIP-352). Contained, needs no server, and the ordering
       falls out of coin control — see `SILENT_PAYMENTS.md`, which also records why *receiving*
       is blocked on tweak data a filter wallet cannot compute.
