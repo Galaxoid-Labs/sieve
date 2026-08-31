@@ -781,7 +781,12 @@ impl Component for App {
                 // The words are in memory only while they are on screen.
                 self.reveal.emit(RevealMsg::Clear);
             }
-            AppMsg::UnlockClosed => self.unlock_open = false,
+            AppMsg::UnlockClosed => {
+                self.unlock_open = false;
+                // Dismissed without unlocking: the notice behind it is the
+                // only thing left saying why the wallet is empty.
+                self.wallet.emit(WalletPageMsg::SetAskingToUnlock(false));
+            }
 
             AppMsg::ToggleDenomination => {
                 self.settings.denomination = self.settings.denomination.toggled();
@@ -1454,6 +1459,7 @@ impl Component for App {
                 if let Some(root) = self.nav.root().and_then(|r| r.root()) {
                     self.unlock_dialog.present(Some(&root));
                     self.unlock_open = true;
+                    self.wallet.emit(WalletPageMsg::SetAskingToUnlock(true));
                 }
             }
 
@@ -2512,6 +2518,7 @@ impl App {
         if self.unlock_open {
             self.unlock_dialog.close();
             self.unlock_open = false;
+            self.wallet.emit(WalletPageMsg::SetAskingToUnlock(false));
         }
     }
 

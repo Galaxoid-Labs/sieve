@@ -521,6 +521,10 @@ pub struct WalletPage {
     labels: crate::wallet::labels::Labels,
     /// This wallet holds no keys, so nothing here may offer to sign.
     watch_only: bool,
+    /// Whether the password prompt is on screen. The locked notice and the
+    /// dialog say the same thing, and saying it twice at once makes the page
+    /// behind the dialog look like a page that failed.
+    asking_to_unlock: bool,
     /// Which network this wallet is on, held separately from the summary.
     ///
     /// A summary arrives only when a scan produces one, which on a long sync is
@@ -573,6 +577,8 @@ pub enum WalletPageMsg {
     /// Which network it is on, known from metadata before any scan has
     /// produced a summary.
     SetNetwork(String),
+    /// The password prompt has appeared, or gone away without unlocking.
+    SetAskingToUnlock(bool),
     /// How many blocks the last scan of this wallet had to read.
     SetMatchedBlocks(Option<u32>),
     /// The wallet's labels, freshly read from disk.
@@ -1317,7 +1323,7 @@ impl Component for WalletPage {
                             // the top, the locked screen looked like content
                             // that had failed to load.
                             #[watch]
-                            set_valign: if model.locked {
+                            set_valign: if model.locked && !model.asking_to_unlock {
                                 gtk::Align::Center
                             } else {
                                 gtk::Align::Start
@@ -1330,7 +1336,7 @@ impl Component for WalletPage {
                                     "Unlock to see balances and addresses."
                                 ),
                                 #[watch]
-                                set_visible: model.locked,
+                                set_visible: model.locked && !model.asking_to_unlock,
 
                                 #[wrap(Some)]
                                 set_child = &gtk::Button {
@@ -2049,6 +2055,7 @@ impl Component for WalletPage {
             birthday: None,
             network: None,
             watch_only: false,
+            asking_to_unlock: false,
             matched_blocks: None,
             labels: crate::wallet::labels::Labels::default(),
             tor_problem: None,
@@ -2199,6 +2206,7 @@ impl Component for WalletPage {
 
             WalletPageMsg::SetBirthday(height) => self.birthday = Some(height),
             WalletPageMsg::SetNetwork(network) => self.network = Some(network),
+            WalletPageMsg::SetAskingToUnlock(asking) => self.asking_to_unlock = asking,
             WalletPageMsg::SetMatchedBlocks(blocks) => self.matched_blocks = blocks,
             WalletPageMsg::NameTransaction { txid, text } => {
                 let _ = sender.output(WalletPageOutput::SetLabel {
