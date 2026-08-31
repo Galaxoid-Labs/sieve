@@ -1208,33 +1208,56 @@ impl Component for App {
                     text.push_str(&format!("{}\n", pair.change));
                 }
 
-                let dialog = gtk::FileDialog::builder()
-                    .title("Save descriptors")
-                    .modal(true)
-                    .build();
-                dialog.set_initial_name(Some("descriptors.txt"));
+                tracing::debug!(lines = text.lines().count(), "saving descriptors");
 
+                // Deferred by one turn of the loop, because this runs from
+                // the response of the dialog that offered it and that dialog
+                // is still closing. Not what was keeping the chooser off the
+                // screen — see `Inspectable` for that — but presenting a
+                // window into the middle of another one's close is worth not
+                // doing either way.
                 let sender = sender.clone();
-                dialog.save(Some(&window), gtk::gio::Cancellable::NONE, move |file| {
-                    if let Ok(file) = file
-                        && let Some(path) = file.path()
-                    {
-                        sender.input(match std::fs::write(&path, &text) {
-                            Ok(()) => AppMsg::PrefsToast(format!(
-                                "Saved {} descriptors",
-                                text.lines().count()
-                            )),
-                            Err(e) => AppMsg::PrefsToast(format!("Could not save: {e}")),
-                        });
-                    }
+                gtk::glib::idle_add_local_once(move || {
+                    let inspectable = crate::Inspectable::while_choosing_a_file();
+                    let dialog = gtk::FileDialog::builder()
+                        .title("Save descriptors")
+                        .modal(true)
+                        .build();
+                    dialog.set_initial_name(Some("descriptors.txt"));
+                    dialog.save(Some(&window), gtk::gio::Cancellable::NONE, move |file| {
+                        let _inspectable = &inspectable;
+                        match file {
+                            Ok(file) => {
+                                if let Some(path) = file.path() {
+                                    sender.input(match std::fs::write(&path, &text) {
+                                        Ok(()) => AppMsg::PrefsToast(format!(
+                                            "Saved {} descriptors",
+                                            text.lines().count()
+                                        )),
+                                        Err(e) => {
+                                            AppMsg::PrefsToast(format!("Could not save: {e}"))
+                                        }
+                                    });
+                                }
+                            }
+                            // Cancelling is a choice and says nothing; a
+                            // failure to even ask is a fault worth seeing.
+                            Err(e) if !e.matches(gtk::DialogError::Dismissed) => {
+                                tracing::warn!(%e, "the save dialog could not be opened");
+                            }
+                            Err(_) => {}
+                        }
+                    });
                 });
             }
 
             AppMsg::ExportLabels | AppMsg::ImportLabels => {
                 let importing = matches!(msg, AppMsg::ImportLabels);
                 let Some(window) = self.nav.root().and_downcast::<gtk::Window>() else {
+                    tracing::warn!("no window to hang the file dialog on");
                     return;
                 };
+                tracing::debug!(importing, "opening the label file dialog");
 
                 let filter = gtk::FileFilter::new();
                 filter.set_name(Some("BIP-329 labels"));
@@ -1252,8 +1275,12 @@ impl Component for App {
                     .modal(true)
                     .build();
 
+                // Held until the dialog is finished with, then dropped —
+                // see `Inspectable`. Without it the chooser never opens.
+                let inspectable = crate::Inspectable::while_choosing_a_file();
                 let sender = sender.clone();
                 let chosen = move |file: Result<gtk::gio::File, _>| {
+                    let _inspectable = &inspectable;
                     if let Ok(file) = file
                         && let Some(path) = file.path()
                     {
@@ -3103,55 +3130,6 @@ impl App {
         sending.add(&mempool);
         page.add(&sending);
 
-        // Labels are written in BIP-329's format precisely so they can leave.
-        // A wallet that holds your notes hostage is a wallet you cannot
-        // replace, which is the opposite of what a recovery phrase is for.
-        //
-        // Behind the lock, though: a label is the name somebody gave their own
-        // payment, and exporting them all is reading the wallet.
-        if let Some(paths) = self.active.clone().filter(|_| self.unlocked) {
-            let labels = adw::PreferencesGroup::new();
-            labels.set_title("Labels");
-            let count = wallet::labels::Labels::load(&paths.dir).len();
-            labels.set_description(Some(&match count {
-                0 => "Names you give transactions and addresses are stored beside this wallet, unencrypted, readable only by you."
-                    .to_string(),
-                1 => "1 label, stored beside this wallet, unencrypted and readable only by you."
-                    .to_string(),
-                n => format!(
-                    "{n} labels, stored beside this wallet, unencrypted and readable only by you."
-                ),
-            }));
-
-            let export = adw::ActionRow::new();
-            export.set_title("Export labels…");
-            export.set_subtitle("A BIP-329 file any wallet that reads the standard can import");
-            export.set_subtitle_lines(2);
-            export.set_activatable(true);
-            export.set_sensitive(count > 0);
-            export.add_suffix(&gtk::Image::from_icon_name("document-save-symbolic"));
-            {
-                let sender = sender.clone();
-                export.connect_activated(move |_| sender.input(AppMsg::ExportLabels));
-            }
-            labels.add(&export);
-
-            let import = adw::ActionRow::new();
-            import.set_title("Import labels…");
-            import.set_subtitle(
-                "Merges a BIP-329 file into this wallet. Where both name the same thing, the imported name wins.",
-            );
-            import.set_subtitle_lines(3);
-            import.set_activatable(true);
-            import.add_suffix(&gtk::Image::from_icon_name("document-open-symbolic"));
-            {
-                let sender = sender.clone();
-                import.connect_activated(move |_| sender.input(AppMsg::ImportLabels));
-            }
-            labels.add(&import);
-            page.add(&labels);
-        }
-
         let this = adw::PreferencesGroup::new();
         // Titled only when there is something under it. "This wallet" over a
         // single row saying the wallet is locked is a heading for a section
@@ -3290,6 +3268,61 @@ impl App {
                 descriptors.connect_activated(move |_| sender.input(AppMsg::ShowDescriptors));
             }
             this.add(&descriptors);
+
+            // A label is the name somebody gave their own payment, so these
+            // belong to the wallet rather than to the app — which is what the
+            // locked message has always said. One row that opens, rather than
+            // two more in a list that is already long.
+            if self.unlocked
+                && let Some(paths) = self.active.clone()
+            {
+                let count = wallet::labels::Labels::load(&paths.dir).len();
+                let labels = adw::ExpanderRow::new();
+                labels.set_title("Labels");
+                labels.set_subtitle(&match count {
+                    0 => "Names you give transactions and addresses, stored beside this \
+                          wallet, unencrypted and readable only by you"
+                        .to_string(),
+                    1 => "1 label, stored beside this wallet, unencrypted and readable only \
+                          by you"
+                        .to_string(),
+                    n => format!(
+                        "{n} labels, stored beside this wallet, unencrypted and readable \
+                         only by you"
+                    ),
+                });
+                labels.set_subtitle_lines(3);
+
+                let export = adw::ActionRow::new();
+                export.set_title("Export labels…");
+                export.set_subtitle("A BIP-329 file any wallet that reads the standard can import");
+                export.set_subtitle_lines(2);
+                export.set_activatable(true);
+                export.set_sensitive(count > 0);
+                export.add_suffix(&gtk::Image::from_icon_name("document-save-symbolic"));
+                {
+                    let sender = sender.clone();
+                    export.connect_activated(move |_| sender.input(AppMsg::ExportLabels));
+                }
+                labels.add_row(&export);
+
+                let import = adw::ActionRow::new();
+                import.set_title("Import labels…");
+                import.set_subtitle(
+                    "Merges a BIP-329 file into this wallet. Where both name the same \
+                     thing, the imported name wins.",
+                );
+                import.set_subtitle_lines(3);
+                import.set_activatable(true);
+                import.add_suffix(&gtk::Image::from_icon_name("document-open-symbolic"));
+                {
+                    let sender = sender.clone();
+                    import.connect_activated(move |_| sender.input(AppMsg::ImportLabels));
+                }
+                labels.add_row(&import);
+
+                this.add(&labels);
+            }
 
             // A wallet with no keys still has a balance and a history, and
             // until now nothing shut them: opening Sieve showed everything.

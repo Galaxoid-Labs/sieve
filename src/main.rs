@@ -27,6 +27,34 @@ pub const APP_ID: &str = "com.galaxoidlabs.Sieve";
 /// out of memory. Core dumps are disabled for the same reason. `mlockall` is
 /// attempted but routinely fails against `RLIMIT_MEMLOCK`; encrypted swap is
 /// the reliable answer to secrets reaching disk.
+/// Let this process be inspected again, for as long as the value is held.
+///
+/// `PR_SET_DUMPABLE(0)` does more than stop core dumps: the kernel re-owns
+/// `/proc/<pid>` to root, and `xdg-desktop-portal` reads `/proc/<pid>/root` to
+/// work out who is calling it. Unable to, it refuses everything — including
+/// the file chooser, which then never appears and reports nothing. Every file
+/// dialog in Sieve was silently doing nothing, and the portal warnings on
+/// every start were this and not the session.
+///
+/// So it is lifted around a file dialog and put back when the dialog is done.
+/// The exposure is a window somebody opened on purpose, during which Sieve is
+/// handling public data — labels, descriptors, a PSBT — and no secret is
+/// decrypted. Signing, which is the moment that matters, is never inside it.
+pub struct Inspectable;
+
+impl Inspectable {
+    pub fn while_choosing_a_file() -> Self {
+        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) };
+        Self
+    }
+}
+
+impl Drop for Inspectable {
+    fn drop(&mut self) {
+        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    }
+}
+
 fn harden() {
     unsafe {
         let no_core = libc::rlimit {
