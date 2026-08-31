@@ -1,7 +1,7 @@
 # Data outputs
 
-A design, not an implementation. Nothing in this file exists yet, and the
-privacy section below is a real argument against building it at all.
+Built. The privacy section is why the warning on the screen says what it says,
+and is worth reading before deciding to use the field.
 
 An `OP_RETURN` output carries up to eighty bytes of arbitrary data and can
 never be spent. It is how a transaction says something rather than pays
@@ -140,8 +140,10 @@ Then:
   stops being a reason to block. A *half*-filled recipient still blocks, since
   an address with no amount is somebody mid-thought rather than a data-only
   transaction, and that difference is worth keeping.
-- **Max needs a recipient.** "Everything" has nowhere to go without one, so it
-  greys out and says why — the same shape as the rule for several recipients.
+- **Max needs a recipient.** "Everything" has nowhere to go without one. This
+  is enforced by the readiness rule rather than by greying the button out:
+  turning Max off until an address is typed would punish the habit of pressing
+  it first, and "Enter an address to pay" already says the right thing.
 - **The review dialog** shows the data as text *and* as hex. Text alone hides
   what is really being written; hex alone is unreadable.
 - **The transaction detail** should show the message on a transaction that

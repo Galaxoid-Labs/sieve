@@ -276,10 +276,14 @@ crosses a component boundary as a message.
       and the attempt costs nothing. The money returns on the *change* keychain: nobody sent
       it, so it is not a payment, and a receive address meant to be handed out should not be
       spent on it.
-- [ ] Data outputs (`OP_RETURN`), on a payment or on a transaction that pays nobody. Designed
-      but deliberately not built — see `OP_RETURN.md`, which is as much an argument against it
-      as a plan for it: a transaction that pays nobody proves which of its outputs are yours,
-      where a payment only lets somebody guess.
+- [x] Data outputs (`OP_RETURN`), on a payment or on a transaction that pays nobody — one
+      folded-away field, so the two cases fall out of whether a recipient was filled in rather
+      than being a mode to choose. Capped at 80 bytes, counted in *bytes* rather than
+      characters, because an emoji is four of them. Submitted exactly as typed and never
+      trimmed: silently altering something somebody is about to make permanent is the one
+      thing the field must not do. The warning changes with the form, since the two cases are
+      not equally bad and the worse one looks safer — a transaction that pays nobody proves
+      which outputs are yours, where a payment only lets somebody guess. See `OP_RETURN.md`.
 - [ ] Pay a silent payment address (BIP-352). Contained, needs no server, and the ordering
       falls out of coin control — see `SILENT_PAYMENTS.md`, which also records why *receiving*
       is blocked on tweak data a filter wallet cannot compute.

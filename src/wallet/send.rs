@@ -47,12 +47,46 @@ pub struct Draft {
     /// same payments made separately and tells anybody reading the chain that
     /// the same person made all of them.
     pub payees: Vec<Payee>,
+    /// Bytes to publish in an `OP_RETURN` output, if any. Exactly what was
+    /// typed, as UTF-8 — not trimmed, not normalised. Altering a payload
+    /// somebody is about to make permanent is the one thing this must not do.
+    pub data: Option<Vec<u8>>,
     pub fee_rate: FeeRate,
     /// Which coins to spend. Empty means "choose for me", which is what most
     /// payments should be; a non-empty list means exactly these and nothing
     /// else, because the point of choosing is that nothing is added behind
     /// your back.
     pub coins: Vec<bdk_wallet::bitcoin::OutPoint>,
+}
+
+/// The most data an `OP_RETURN` can carry and still relay everywhere.
+///
+/// Not a consensus rule, and Bitcoin Core 30 relaxed its own default well past
+/// it — but the network is mixed, Knots restricts data carriage by default and
+/// older nodes still enforce the old cap. Eighty is what relays everywhere.
+/// Above it is a bet on which peers you happen to have, and losing that bet is
+/// silent: a node that will not relay simply does not.
+pub const MAX_DATA: usize = 80;
+
+/// The bytes a transaction publishes, if it publishes any.
+///
+/// Read back off the transaction rather than remembered, so a replacement of
+/// somebody else's making reports what it actually carries.
+pub(super) fn data_in(tx: &bdk_wallet::bitcoin::Transaction) -> Option<Vec<u8>> {
+    tx.output
+        .iter()
+        .find(|out| out.script_pubkey.is_op_return())
+        .and_then(|out| {
+            out.script_pubkey
+                .instructions()
+                .flatten()
+                .find_map(|instruction| match instruction {
+                    bdk_wallet::bitcoin::script::Instruction::PushBytes(bytes) => {
+                        Some(bytes.as_bytes().to_vec())
+                    }
+                    _ => None,
+                })
+        })
 }
 
 /// One recipient of a payment.
@@ -79,6 +113,10 @@ pub struct Plan {
     /// What that payment was paying, so the increase can be shown rather than
     /// only the new figure.
     pub was_fee: Option<u64>,
+    /// What this transaction publishes, if anything. Kept so the review
+    /// dialog can show it: it is about to become permanent and public, and
+    /// this is the last screen on which it can be read before that.
+    pub data: Option<Vec<u8>>,
     /// Whether this replacement pays nobody — the same coins back to this
     /// wallet, to call the original off. Every screen has to say so: the
     /// numbers alone read as a payment to yourself, and `total()` would
@@ -420,6 +458,13 @@ pub(super) fn split_outputs_of(
     let mut change = Amount::ZERO;
 
     for out in &tx.output {
+        // A data output is not a recipient. Left in, it reaches the review
+        // dialog — the one screen whose job is letting somebody check what
+        // they are signing — as "an unusual script, not an address" being paid
+        // nothing.
+        if out.script_pubkey.is_op_return() {
+            continue;
+        }
         if wallet.is_mine(out.script_pubkey.clone()) {
             change += out.value;
             continue;
@@ -1047,6 +1092,7 @@ mod tests {
             payees,
             fee: Amount::from_sat(500),
             change: None,
+            data: None,
             replaces: None,
             was_fee: None,
             cancels: false,
@@ -1063,6 +1109,91 @@ mod tests {
         assert_eq!(many.to(), "2 recipients");
         assert_eq!(many.spend(), Amount::from_sat(3_500));
         assert_eq!(many.total(), Amount::from_sat(4_000));
+    }
+
+    #[test]
+    fn a_data_output_is_not_a_recipient() {
+        // Left in the payee split it reaches the review dialog as "an unusual
+        // script, not an address" being paid nothing — on the one screen whose
+        // whole job is letting somebody check what they are signing.
+        let network = Network::Signet;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let mut wallet = hd_signer(xprv, ScriptType::NativeSegwit, network).unwrap();
+        let funded = wallet.reveal_next_address(KeychainKind::External).address;
+        wallet.apply_unconfirmed_txs([(
+            Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(
+                        "0000000000000000000000000000000000000000000000000000000000000004"
+                            .parse::<Txid>()
+                            .unwrap(),
+                        0,
+                    ),
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: funded.script_pubkey(),
+                }],
+            },
+            0u64,
+        )]);
+
+        let message = b"sieve was here";
+        let bytes: &bdk_wallet::bitcoin::script::PushBytes = message.as_slice().try_into().unwrap();
+
+        // Data and nobody paid: the change is the only other output.
+        let psbt = {
+            let mut builder = wallet.build_tx();
+            builder.add_data(&bytes);
+            builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+            builder.finish().unwrap()
+        };
+        let (payees, change) = split_outputs_of(&psbt.unsigned_tx, &wallet);
+        assert_eq!(
+            payees,
+            vec![("yourself".to_string(), Amount::ZERO)],
+            "a data output must not be reported as somebody being paid"
+        );
+        assert!(change.is_some(), "the money came back");
+        assert_eq!(data_in(&psbt.unsigned_tx).as_deref(), Some(&message[..]));
+
+        // And with somebody paid, they are the only payee.
+        let stranger =
+            parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+        let psbt = {
+            let mut builder = wallet.build_tx();
+            builder.add_recipient(stranger.script_pubkey(), Amount::from_sat(20_000));
+            builder.add_data(&bytes);
+            builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+            builder.finish().unwrap()
+        };
+        let (payees, _) = split_outputs_of(&psbt.unsigned_tx, &wallet);
+        assert_eq!(payees.len(), 1, "{payees:?}");
+        assert_eq!(payees[0].0, stranger.to_string());
+        assert_eq!(payees[0].1, Amount::from_sat(20_000));
+    }
+
+    #[test]
+    fn a_transaction_carrying_nothing_reports_no_data() {
+        let network = Network::Signet;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let wallet = hd_signer(xprv, ScriptType::NativeSegwit, network).unwrap();
+        let _ = &wallet;
+        let plain = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network)
+                    .unwrap()
+                    .script_pubkey(),
+            }],
+        };
+        assert_eq!(data_in(&plain), None);
     }
 
     #[test]
@@ -1086,6 +1217,7 @@ mod tests {
             )],
             fee: Amount::from_sat(900),
             change: Some(Amount::from_sat(59_100)),
+            data: None,
             replaces: Some("an id".into()),
             was_fee: Some(300),
             cancels,

@@ -597,6 +597,9 @@ impl Session {
             payees,
             change,
             fee,
+            // A replacement rebuilds from the original's outputs, so whatever
+            // it published is still there and the screen should say so.
+            data: super::send::data_in(&psbt.unsigned_tx),
             replaces: Some(txid.to_string()),
             was_fee: Some(was),
             cancels: false,
@@ -671,6 +674,8 @@ impl Session {
             // Everything the replacement holds comes back here.
             change: Some(psbt.unsigned_tx.output.iter().map(|o| o.value).sum()),
             fee,
+            // A cancellation drops the original's outputs, data included.
+            data: None,
             replaces: Some(txid.to_string()),
             was_fee: Some(was),
             cancels: true,
@@ -716,6 +721,12 @@ impl Session {
                 builder.manually_selected_only();
             }
 
+            if let Some(bytes) = draft.data.as_deref() {
+                let data: &bdk_wallet::bitcoin::script::PushBytes = bytes
+                    .try_into()
+                    .map_err(|_| anyhow!("that is more data than a transaction can carry"))?;
+                builder.add_data(&data);
+            }
             for payee in &draft.payees {
                 match payee.amount {
                     Sending::Exact(amount) => {
@@ -755,12 +766,15 @@ impl Session {
         // and a payee paid twice on one transaction appears once here.
         let (payees, change) = super::send::split_outputs_of(&psbt.unsigned_tx, &account.wallet);
 
+        let data = super::send::data_in(&psbt.unsigned_tx);
+
         Ok(super::send::Plan {
             psbt,
             from: draft.from,
             payees,
             fee,
             change,
+            data,
             // An ordinary payment replaces nothing.
             replaces: None,
             was_fee: None,

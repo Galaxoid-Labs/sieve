@@ -146,6 +146,9 @@ pub enum SendMsg {
     /// An extra recipient's address or amount changed, so Review has to be
     /// re-decided.
     PayeeEdited,
+    /// The data field changed, which can turn a form with no recipient into a
+    /// payment and back again.
+    DataEdited,
     /// The "Pay to" field holds a `bitcoin:` URI: take it apart and fill the
     /// form in from it.
     UnpackUri(String),
@@ -265,6 +268,12 @@ pub struct SendForm {
     /// Kept so the form can be emptied after a payment goes out.
     /// Everybody after the first. The first has its own row on the form.
     extras: FactoryVecDeque<ExtraPayee>,
+    /// Exactly what is typed in the data field, held so the form can decide
+    /// whether it describes a transaction and so the byte count can be shown.
+    /// Never trimmed: a trailing space is part of what somebody asked to
+    /// publish.
+    data: String,
+    data_row: Option<adw::EntryRow>,
     to_row: Option<adw::EntryRow>,
     amount_row: Option<adw::EntryRow>,
 }
@@ -710,12 +719,68 @@ impl SendForm {
 
     /// What is still missing, for the button that cannot be pressed.
     fn not_ready_because(&self) -> Option<&'static str> {
+        if self.data_too_long() {
+            return Some("The message is longer than 80 bytes");
+        }
         why_not_ready(
             self.to_filled,
             self.amount_filled,
             self.max,
             self.has_funds(),
             self.extra_payees().is_ok(),
+            self.data_bytes().is_some(),
+        )
+    }
+
+    /// The bytes to publish, or `None` when the switch is off or nothing has
+    /// been typed. Exactly what is in the field, encoded as UTF-8 — not
+    /// trimmed, not normalised.
+    fn data_bytes(&self) -> Option<Vec<u8>> {
+        let bytes = self.data.as_bytes();
+        (!bytes.is_empty()).then(|| bytes.to_vec())
+    }
+
+    fn data_too_long(&self) -> bool {
+        self.data.len() > crate::wallet::send::MAX_DATA
+    }
+
+    /// Bytes, not characters. An emoji is four of them and a letter with an
+    /// accent is two, so a count of characters would be a count of the wrong
+    /// thing at exactly the moment it matters.
+    fn data_count(&self) -> String {
+        format!(
+            "{} of {} bytes",
+            self.data.len(),
+            crate::wallet::send::MAX_DATA
+        )
+    }
+
+    /// What this costs, said differently for the two cases — because the one
+    /// that looks safer is the worse one.
+    fn data_warning(&self) -> Option<&'static str> {
+        if self.data_too_long() {
+            return Some(
+                "Longer than 80 bytes. Not every node will pass this on, and one that will \
+                 not simply drops it — which looks exactly like being ignored.",
+            );
+        }
+        if self.data.is_empty() {
+            return Some(
+                "Anything written here is public and permanent, and can be searched for by \
+                 anyone who knows what it says.",
+            );
+        }
+        if self.to_filled {
+            return Some(
+                "Public and permanent. Anyone who knows what this says can find this \
+                 payment, and from it the change that came back to you.",
+            );
+        }
+        // No recipient: the worst case, and the one that reads as private.
+        Some(
+            "Public and permanent — and with nobody being paid, this proves which outputs \
+             are yours rather than leaving anyone to guess. Choosing which coin pays for it \
+             is the only thing that limits that.",
         )
     }
 
@@ -1120,6 +1185,48 @@ impl Component for SendForm {
                             connect_clicked => SendMsg::AddPayee,
                         },
 
+                        // Optional, and folded away, because almost nobody
+                        // wants it and the ones who do know what it is.
+                        adw::PreferencesGroup {
+                            set_margin_top: 12,
+
+                            #[name(data_expander)]
+                            adw::ExpanderRow {
+                                set_title: "Attach data",
+                                set_subtitle: "Advanced. Writes a short message into the \
+                                               transaction itself",
+                                set_show_enable_switch: true,
+                                set_enable_expansion: false,
+                                #[watch]
+                                set_sensitive: !model.busy,
+                                connect_enable_expansion_notify => SendMsg::DataEdited,
+
+                                #[name(data_row)]
+                                add_row = &adw::EntryRow {
+                                    set_title: "Message",
+                                    connect_changed => SendMsg::DataEdited,
+                                },
+
+                                add_row = &adw::ActionRow {
+                                    #[watch]
+                                    set_title: &model.data_count(),
+                                    // What this costs that cannot be undone.
+                                    // It changes with the form because the
+                                    // two cases are not equally bad, and the
+                                    // worse one is the one that looks safer.
+                                    #[watch]
+                                    set_subtitle: model.data_warning().unwrap_or_default(),
+                                    set_subtitle_lines: 4,
+                                    #[watch]
+                                    set_css_classes: if model.data_too_long() {
+                                        &["error"]
+                                    } else {
+                                        &["dim-label"]
+                                    },
+                                },
+                            },
+                        },
+
                         adw::PreferencesGroup {
                             #[name(fee_row)]
                             adw::SpinRow {
@@ -1176,6 +1283,8 @@ impl Component for SendForm {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let mut model = SendForm {
+            data: String::new(),
+            data_row: None,
             extras: FactoryVecDeque::builder()
                 .launch(gtk::Box::default())
                 .forward(sender.input_sender(), |out| match out {
@@ -1219,6 +1328,7 @@ impl Component for SendForm {
         // than the last one, which is how a payment gets sent twice.
         model.to_row = Some(widgets.to_row.clone());
         model.amount_row = Some(widgets.amount_row.clone());
+        model.data_row = Some(widgets.data_row.clone());
 
         // A field that only holds numbers should only take numbers, refused at
         // the keystroke rather than explained afterwards.
@@ -1358,6 +1468,11 @@ impl Component for SendForm {
 
             SendMsg::PayeeEdited => self.recount_payees(widgets),
 
+            SendMsg::DataEdited => {
+                self.data = widgets.data_row.text().to_string();
+                self.error = None;
+            }
+
             SendMsg::ToggleMax(max) => {
                 self.max = max;
                 // Filled in on the way up, and left alone on the way down: the
@@ -1447,26 +1562,36 @@ impl Component for SendForm {
                 self.error = None;
                 let network = self.network();
 
-                let to = match crate::wallet::send::parse_address(&widgets.to_row.text(), network) {
-                    Ok(address) => address,
-                    Err(e) => {
-                        self.error = Some(capitalise(&e.to_string()));
-                        self.update_view(widgets, sender);
-                        return;
-                    }
-                };
+                // A form with data and nobody to pay is a transaction that
+                // publishes and pays nobody. Everywhere else an empty "Pay to"
+                // is somebody who has not finished.
+                let paying = !widgets.to_row.text().trim().is_empty();
+                let first = if paying {
+                    let to =
+                        match crate::wallet::send::parse_address(&widgets.to_row.text(), network) {
+                            Ok(address) => address,
+                            Err(e) => {
+                                self.error = Some(capitalise(&e.to_string()));
+                                self.update_view(widgets, sender);
+                                return;
+                            }
+                        };
 
-                let amount = if self.max {
-                    Sending::Everything
-                } else {
-                    match self.settings.denomination.parse(&widgets.amount_row.text()) {
-                        Ok(sats) => Sending::Exact(bdk_wallet::bitcoin::Amount::from_sat(sats)),
-                        Err(message) => {
-                            self.error = Some(message);
-                            self.update_view(widgets, sender);
-                            return;
+                    let amount = if self.max {
+                        Sending::Everything
+                    } else {
+                        match self.settings.denomination.parse(&widgets.amount_row.text()) {
+                            Ok(sats) => Sending::Exact(bdk_wallet::bitcoin::Amount::from_sat(sats)),
+                            Err(message) => {
+                                self.error = Some(message);
+                                self.update_view(widgets, sender);
+                                return;
+                            }
                         }
-                    }
+                    };
+                    Some(crate::wallet::send::Payee { to, amount })
+                } else {
+                    None
                 };
 
                 let Some(source) = self.source().map(|a| a.script_type) else {
@@ -1493,12 +1618,13 @@ impl Component for SendForm {
                         return;
                     }
                 };
-                let mut payees = vec![crate::wallet::send::Payee { to, amount }];
+                let mut payees: Vec<_> = first.into_iter().collect();
                 payees.extend(extras);
 
                 let _ = sender.output(SendOutput::Plan(Box::new(Draft {
                     from: source,
                     payees,
+                    data: self.data_bytes(),
                     fee_rate,
                     coins: self.coins.clone(),
                 })));
@@ -1581,8 +1707,11 @@ impl Component for SendForm {
                 widgets.amount_row.set_text("");
                 // Everybody after the first goes too. A second payment sent by
                 // accident is bad enough without it carrying the last one's
-                // other recipients.
+                // other recipients — or its message.
                 self.extras.guard().clear();
+                self.data.clear();
+                widgets.data_row.set_text("");
+                widgets.data_expander.set_enable_expansion(false);
                 self.request = None;
                 self.request_label = None;
                 self.to_filled = false;
@@ -1613,6 +1742,9 @@ impl SendForm {
         // addresses left off would be a number nobody could check, and this is
         // the screen where checking is the entire point.
         let mut body = match plan.payees.as_slice() {
+            // Nobody paid: the transaction exists to publish, and the screen
+            // should lead with that rather than with a total of nothing.
+            [] => "This pays nobody. It publishes:".to_string(),
             [(address, _)] => {
                 let to = format!("<tt>{}</tt>", escape(address));
                 match self.fiat(plan.spend().to_sat()) {
@@ -1634,6 +1766,20 @@ impl SendForm {
                 body
             }
         };
+        // Shown both ways on purpose. The text is what somebody meant; the
+        // hex is what actually goes on the chain, and the two differ whenever
+        // an invisible character or an encoding surprise is involved. This is
+        // the last screen on which either can be read.
+        if let Some(data) = plan.data.as_deref() {
+            let hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
+            body.push_str(&format!(
+                "\n\n<tt>{}</tt>\n<tt>{}</tt>\n{} bytes, public and permanent",
+                escape(&String::from_utf8_lossy(data)),
+                escape(&hex),
+                data.len(),
+            ));
+        }
+
         body.push_str(&format!(
             "\n\nFee {}\nLeaving this wallet {}",
             escape(&fee),
@@ -1643,7 +1789,13 @@ impl SendForm {
             body.push_str(&format!("\nFrom {}", escape(plan.from.label())));
         }
 
-        let dialog = adw::AlertDialog::new(Some("Send this payment?"), Some(&body));
+        let dialog = adw::AlertDialog::new(
+            Some(match plan.payees.is_empty() {
+                true => "Publish this?",
+                false => "Send this payment?",
+            }),
+            Some(&body),
+        );
         // The address is monospaced, so the body is markup — which is why
         // every part of it above is escaped.
         dialog.set_body_use_markup(true);
@@ -1703,6 +1855,7 @@ fn why_not_ready(
     max: bool,
     has_funds: bool,
     extras_ready: bool,
+    has_data: bool,
 ) -> Option<&'static str> {
     if !has_funds {
         return Some("There is nothing on this path to send");
@@ -1711,6 +1864,11 @@ fn why_not_ready(
         return Some("Finish the other recipients, or remove them");
     }
     match (to_filled, max || amount_filled) {
+        // Data and nobody to pay is a transaction in its own right. A
+        // half-filled recipient still is not: an address with no amount is
+        // somebody mid-thought, and sending without them would be the worst
+        // available reading of it.
+        (false, false) if has_data => None,
         (false, false) => Some("Enter who to pay and how much"),
         (false, true) => Some("Enter an address to pay"),
         (true, false) => Some("Enter an amount to send"),
@@ -1775,16 +1933,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn data_alone_is_a_transaction_but_half_a_recipient_is_not() {
+        // Publishing without paying anybody is a real thing to want. An
+        // address typed with no amount beside it is not that — it is somebody
+        // mid-thought, and sending without them would be the worst available
+        // reading of an empty box.
+        assert_eq!(why_not_ready(false, false, false, true, true, true), None);
+        assert_eq!(
+            why_not_ready(false, false, false, true, true, false),
+            Some("Enter who to pay and how much")
+        );
+        assert_eq!(
+            why_not_ready(true, false, false, true, true, true),
+            Some("Enter an amount to send")
+        );
+        // Max with nobody to send everything to is still nothing.
+        assert_eq!(
+            why_not_ready(false, true, true, true, true, true),
+            Some("Enter an address to pay")
+        );
+    }
+
+    #[test]
     fn an_unfinished_extra_recipient_blocks_review() {
         // Half a recipient is somebody's payment, typed and abandoned.
         // Sending the rest and saying nothing about it would be the worst
         // possible reading of an empty box.
         assert_eq!(
-            why_not_ready(true, true, false, true, false),
+            why_not_ready(true, true, false, true, false, false),
             Some("Finish the other recipients, or remove them")
         );
         // And with them finished, nothing is in the way.
-        assert_eq!(why_not_ready(true, true, false, true, true), None);
+        assert_eq!(why_not_ready(true, true, false, true, true, false), None);
     }
 
     #[test]
@@ -1793,25 +1973,25 @@ mod tests {
         // over an empty form and answering with an error is a worse way of
         // saying "not yet".
         assert_eq!(
-            why_not_ready(false, false, false, true, true),
+            why_not_ready(false, false, false, true, true, false),
             Some("Enter who to pay and how much")
         );
         assert_eq!(
-            why_not_ready(true, false, false, true, true),
+            why_not_ready(true, false, false, true, true, false),
             Some("Enter an amount to send")
         );
         assert_eq!(
-            why_not_ready(false, true, false, true, true),
+            why_not_ready(false, true, false, true, true, false),
             Some("Enter an address to pay")
         );
-        assert_eq!(why_not_ready(true, true, false, true, true), None);
+        assert_eq!(why_not_ready(true, true, false, true, true, false), None);
 
         // Max is an amount before the field catches up with it.
-        assert_eq!(why_not_ready(true, false, true, true, true), None);
+        assert_eq!(why_not_ready(true, false, true, true, true, false), None);
 
         // And an empty path has nothing to send, whatever the fields say.
         assert_eq!(
-            why_not_ready(true, true, true, false, true),
+            why_not_ready(true, true, true, false, true, false),
             Some("There is nothing on this path to send")
         );
     }

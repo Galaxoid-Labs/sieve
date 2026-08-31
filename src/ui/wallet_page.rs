@@ -2693,6 +2693,19 @@ impl WalletPage {
                 status.add(&call_off);
             }
         }
+        // What it published, if it published anything. Both ways, as the
+        // review dialog showed them: the text is what somebody meant and the
+        // hex is what is actually on the chain, and this is the only screen
+        // where either can be read again.
+        if let Some((text, hex)) = &tx.data {
+            // Escaped by `mono`, which matters more here than anywhere else in
+            // the app: this is the one field carrying bytes somebody else
+            // chose into markup.
+            let message = mono_row("Message", &format!("{text}\n{hex}"));
+            message.set_subtitle_lines(4);
+            message.add_css_class("full-contrast");
+            status.add(&message);
+        }
         if let Some(hash) = &tx.block_hash {
             status.add(&mono_row("Block hash", hash));
         }

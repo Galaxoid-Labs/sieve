@@ -688,6 +688,10 @@ pub struct TxSummary {
     pub account_path: Option<String>,
     /// Whether any input signals it may be replaced while unconfirmed.
     pub replaceable: bool,
+    /// What this transaction published, if anything, as it was written and as
+    /// the bytes actually are. The detail page is the only place a message
+    /// ever becomes readable again after it is sent.
+    pub data: Option<(String, String)>,
     /// Payments this one replaced, by transaction id.
     ///
     /// Read back from the transaction graph rather than remembered separately:
@@ -836,6 +840,12 @@ impl Summary {
                     // BIP-125: any input below the final sequence number says
                     // this may still be replaced.
                     replaceable: tx.input.iter().any(|i| i.sequence.is_rbf()),
+                    data: send::data_in(tx).map(|bytes| {
+                        (
+                            String::from_utf8_lossy(&bytes).into_owned(),
+                            bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+                        )
+                    }),
                     replaces: account
                         .wallet
                         .tx_graph()
