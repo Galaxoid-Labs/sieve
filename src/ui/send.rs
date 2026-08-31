@@ -1469,7 +1469,14 @@ impl Component for SendForm {
             SendMsg::PayeeEdited => self.recount_payees(widgets),
 
             SendMsg::DataEdited => {
-                self.data = widgets.data_row.text().to_string();
+                // The switch decides, not the field. A row that has been
+                // folded away still holds whatever was typed into it, so
+                // reading the text alone would publish a message somebody
+                // changed their mind about.
+                self.data = match widgets.data_expander.enables_expansion() {
+                    true => widgets.data_row.text().to_string(),
+                    false => String::new(),
+                };
                 self.error = None;
             }
 
