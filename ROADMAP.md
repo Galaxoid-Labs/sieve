@@ -284,10 +284,10 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       with the proxy verified as actually being Tor (the `RESOLVE` extension), and kyoto's
       unproxied DNS seeding replaced by seeds resolved through Tor.
 - [x] Tor without asking the user to install it — Sieve starts one itself when nothing is
-      listening, and `packaging/com.galaxoidlabs.Sieve.yml` builds Tor into the app so there is
-      something to start. The manifest has never been built; there is no flatpak-builder on
-      the development machine.
-- [ ] Build and test that Flatpak, add the AppStream metainfo Flathub requires (M8).
+      listening, and `tor::daemon::find` looks on `PATH` as well as beside the binary, so a
+      distribution's own `tor` package is all it takes. With no Flatpak in the plan, nothing
+      bundles Tor any more: `packaging/com.galaxoidlabs.Sieve.yml` and `scripts/fetch-tor.sh`
+      are dead and `PACKAGING.md` says when to delete them.
 - [ ] `arti` instead of a child process, if its embedding story stabilises: today its SOCKS
       listener is behind `experimental-api` and outside semver, and an arti client terminates
       the process on an obsolete consensus.
@@ -303,6 +303,10 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
 ### M7 — Lock and key hygiene
 - [x] Idle auto-lock, with the interval a preference and a "Lock now" beside it.
 - [x] Lock on suspend, via logind `PrepareForSleep` over the D-Bus GIO already provides.
+- [ ] One password for the app, or one per wallet, chosen at first run — and a lock for
+      watch-only wallets, which have none at all today. `PASSWORDS.md` has the design; the
+      vault format already separates the key that is derived from the key that is wrapped, so
+      this needs no format change.
 - [ ] Opt-in Secret Service storage, labelled as convenience and not as a boundary.
 - [ ] FIDO2 `hmac-secret` as a second wrap.
 - [ ] Lock on screensaver as well as on sleep — a locked session is the other ordinary way a

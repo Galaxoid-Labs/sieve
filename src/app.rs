@@ -250,6 +250,8 @@ pub enum AppMsg {
     /// lives in one place.
     Back,
     ShowOnboarding,
+    /// TEMPORARY — see the welcome screen without starting over.
+    PreviewWelcome,
     ShowRestore,
     ShowPreferences,
     /// Re-read what the header chain can tell us.
@@ -480,6 +482,8 @@ impl Component for App {
                     }
                     crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
                     crate::ui::wallet_page::WalletPageOutput::AskRescan => AppMsg::AskRescan,
+                    // TEMPORARY — remove with the menu entry that sends it.
+                    crate::ui::wallet_page::WalletPageOutput::ShowWelcome => AppMsg::PreviewWelcome,
                     crate::ui::wallet_page::WalletPageOutput::PlanBump {
                         txid,
                         from,
@@ -718,6 +722,13 @@ impl Component for App {
             // Both are reached from the wallet list inside preferences, and
             // both take over the window. Leave the dialog first, or the window
             // visibly changes underneath a dialog that is still up.
+            // TEMPORARY — the welcome step itself, which EnteredByChoice skips.
+            AppMsg::PreviewWelcome => {
+                self.close_prefs();
+                self.onboarding.emit(OnboardingMsg::PreviewWelcome);
+                self.nav.push_by_tag("onboarding");
+            }
+
             AppMsg::ShowOnboarding => {
                 self.close_prefs();
                 // Always: this is only reachable from the wallet list, where

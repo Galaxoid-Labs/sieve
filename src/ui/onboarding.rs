@@ -111,6 +111,10 @@ pub enum OnboardingMsg {
     /// Entered from the wallet list rather than as a first run: there is
     /// somewhere to go back to, and the welcome step has already been answered.
     EnteredByChoice,
+    /// TEMPORARY — put the screen back to its first step for a look at it.
+    /// `EnteredByChoice` deliberately skips the welcome, since somebody who
+    /// already has a wallet has already been welcomed.
+    PreviewWelcome,
     /// Whether a wallet list sits behind this screen.
     Back,
     SetPassword(Secret, Secret, String),
@@ -508,6 +512,13 @@ impl Component for Onboarding {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         self.error = None;
         match msg {
+            // TEMPORARY — remove with the menu entry that sends it.
+            OnboardingMsg::PreviewWelcome => {
+                self.can_cancel = true;
+                self.skip_welcome = false;
+                self.step = Step::Welcome;
+            }
+
             OnboardingMsg::EnteredByChoice => {
                 self.can_cancel = true;
                 self.skip_welcome = true;
