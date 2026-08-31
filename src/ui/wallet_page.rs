@@ -2700,9 +2700,13 @@ impl WalletPage {
         // Numbered only when there is more than one, so the ordinary case
         // does not read as an excerpt from a longer list.
         for (position, (text, hex)) in tx.data.iter().enumerate() {
+            // Named for the mechanism rather than for the intent. Every
+            // other row on this page is the technical fact — block hash,
+            // virtual size, derivation path — and somebody reading a
+            // transaction here wants to know what carried the bytes.
             let title = match tx.data.len() {
-                1 => "Message".to_string(),
-                _ => format!("Message {}", position + 1),
+                1 => "OP_RETURN".to_string(),
+                _ => format!("OP_RETURN {}", position + 1),
             };
             // Escaped by `mono`, which matters more here than anywhere else in
             // the app: this is the one field carrying bytes somebody else

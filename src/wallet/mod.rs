@@ -2019,15 +2019,15 @@ fn split_outputs(
     let mut theirs = Vec::new();
 
     for out in &tx.output {
+        // A data output is not somebody being paid. It has its own row on the
+        // detail page, carrying what it actually says; listing it here as well
+        // both repeats it and calls it a recipient, which it is not.
+        if out.script_pubkey.is_op_return() {
+            continue;
+        }
         let address = bdk_wallet::bitcoin::Address::from_script(&out.script_pubkey, network)
             .map(|address| address.to_string())
-            .unwrap_or_else(|_| {
-                if out.script_pubkey.is_op_return() {
-                    "Data, not an address (OP_RETURN)".into()
-                } else {
-                    "An unusual script, not an address".into()
-                }
-            });
+            .unwrap_or_else(|_| "An unusual script, not an address".into());
 
         if wallet.is_mine(out.script_pubkey.clone()) {
             ours.push(OwnOutput {
