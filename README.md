@@ -139,6 +139,7 @@ Then unplug the device and plug it in again.
 | `ROADMAP.md` | what is missing, in the order it hurts |
 | `PACKAGING.md` | how this reaches other people's machines |
 | `PSBT.md` | air-gapped signing, designed and not built |
+| `SILENT_PAYMENTS.md` | why sending is buildable and receiving is not |
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh

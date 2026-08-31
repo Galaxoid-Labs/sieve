@@ -219,6 +219,9 @@ crosses a component boundary as a message.
 - [x] Fee bump, with the race against the original explained rather than hidden.
 - [x] Coin control, on its own screen, with the linking it avoids stated in plain words.
 - [ ] Cancel a payment by replacing it with one that pays yourself.
+- [ ] Pay a silent payment address (BIP-352). Contained, needs no server, and the ordering
+      falls out of coin control — see `SILENT_PAYMENTS.md`, which also records why *receiving*
+      is blocked on tweak data a filter wallet cannot compute.
 - [ ] More than one recipient in a transaction.
 
 Exercised end to end on signet: built, signed, broadcast, shown as pending, and confirmed on
