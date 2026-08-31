@@ -1310,10 +1310,21 @@ impl Component for WalletPage {
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 12,
                             set_margin_all: 18,
-                            set_valign: gtk::Align::Start,
+                            // A list begins at the top; a single status page
+                            // sits in the middle of what it is filling. Which
+                            // of those this is depends on whether the wallet
+                            // is open, so the alignment does too — pinned to
+                            // the top, the locked screen looked like content
+                            // that had failed to load.
+                            #[watch]
+                            set_valign: if model.locked {
+                                gtk::Align::Center
+                            } else {
+                                gtk::Align::Start
+                            },
 
                             adw::StatusPage {
-                                set_icon_name: Some("channel-secure-symbolic"),
+                                set_icon_name: Some("changes-prevent-symbolic"),
                                 set_title: "Wallet locked",
                                 set_description: Some(
                                     "Unlock to see balances and addresses."
