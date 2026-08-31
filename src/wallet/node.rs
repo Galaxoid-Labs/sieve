@@ -245,9 +245,15 @@ impl Session {
             anyhow::bail!("no wallet databases found — unlock first");
         }
 
-        // Headers are public chain data and identical for every wallet, so a
-        // second wallet on a network Sieve has already seen starts with the
-        // chain already downloaded instead of fetching it again.
+        // Handed over, and thrown away by this version of the node:
+        // `bip157::Node::new` destructures its config with `data_path: _`.
+        // Nothing is written here and nothing is read back, so headers and
+        // filters are downloaded again on every start and a second wallet on
+        // this network gains nothing from the first.
+        //
+        // Kept because it costs nothing and is where a future version would
+        // put its store — but it is a promise the library does not currently
+        // keep, and the comment that used to sit here claimed otherwise.
         let headers = super::chain_dir(network);
         std::fs::create_dir_all(&headers)?;
 

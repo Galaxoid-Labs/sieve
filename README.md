@@ -16,8 +16,6 @@ behaves like the rest of the desktop rather than like a browser in a window.
 **Sync without disclosure**
 - Compact block filters (BIP157/158) downloaded from ordinary peers and
   matched locally. There is no server, no Electrum, no API key, no account.
-- The chain of block headers is shared between wallets on the same network, so
-  a second wallet does not download it again.
 - Scans resume where they were interrupted rather than starting over, and can
   be started again from the wallet's birthday on demand.
 - Honest progress: headers, filters and the final phase — fetching the blocks
@@ -83,8 +81,11 @@ Stated plainly, because a wallet that overstates itself is dangerous:
 - **Multisig.** Single-signature only.
 - **More than one recipient** per payment.
 - **Amounts typed in dollars.** They can be read in dollars.
-- **A local filter store**, so a deep rescan downloads filters that were
-  downloaded before.
+- **Storing anything the node downloads.** The version of kyoto Sieve uses
+  discards the data directory it is given — `data_path: _` in its own
+  `node.rs` — so block headers and filters are fetched again on every start,
+  and a second wallet on the same network gains nothing from the first. This
+  is the largest single thing between Sieve and feeling quick.
 - **Packages.** There is no `.deb`, `.rpm` or AUR package yet — see
   `PACKAGING.md` for the plan.
 

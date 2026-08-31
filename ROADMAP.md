@@ -37,8 +37,13 @@ Then, in rough order:
 - **One recipient per transaction.** [M4]
 - **No search in the activity list.** [M5] It filters by derivation path now; not by amount,
   address or transaction id.
-- **No local filter store.** [M2] Every deep rescan re-downloads gigabytes of filters that
-  were downloaded last time. Blocks headers are already shared per network; filters are not.
+- **Nothing the node downloads is kept.** [M2] Not filters, and not block headers either —
+  `bip157::Node::new` destructures its config with `data_path: _`, so the data directory Sieve
+  hands it is discarded. Every start re-downloads the header chain, every deep rescan
+  re-downloads gigabytes of filters, and a second wallet on a network gains nothing from the
+  first. An earlier attempt to keep headers ourselves failed for a different reason —
+  `build_with_wallets` overwrites the chain state — and the note about that is in `node.rs`
+  where somebody would otherwise try it again.
 
 ## Closed since that list was written
 
@@ -181,13 +186,13 @@ crosses a component boundary as a message.
 - `ScanType::Recovery` with lookahead sized to wallet history — undersizing silently misses
   transactions rather than erroring
 - Progress from the `Info` stream; `Warning` stream to an `adw::Banner`
-- [x] Block headers shared per network, so a second wallet on a chain Sieve has already seen
-      does not download it again.
 - [x] A resume point (`Meta.scanned_to`), so an interrupted scan restarts where it stopped
       rather than at the birthday.
 - [x] Rescan on demand, behind a dialog that says what it costs.
-- [ ] A local filter store. Headers are shared; filters are not, so a deep rescan still
-      re-downloads gigabytes.
+- [ ] Somewhere to keep what the node downloads. The library's own data directory is
+      discarded, so this means either a newer kyoto that honours it, or taking over the glue
+      between filters and wallet updates — which `node.rs` argues against, and which the
+      arithmetic may eventually justify.
 
 ### M3 — Receive — DONE
 - [x] `reveal_next_address` with persistence, and a QR rendered in-process — handing an address
