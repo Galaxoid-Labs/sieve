@@ -132,6 +132,77 @@ gresource for the app's own use, which does nothing for the desktop's icon
 theme: the `.desktop` file says `Icon=com.galaxoidlabs.Sieve`, and that name
 has to exist in hicolor on disk. Cargo installs no data files.
 
+## Being found on Omarchy
+
+Installing and being discovered are different problems, and Omarchy has four
+surfaces for the second. They are a ladder: each rung needs the one below it,
+and only the first is self-serve.
+
+Read off the machine rather than guessed — the catalogue is
+`/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc`, the repo is
+configured in `/etc/pacman.conf`.
+
+### 1. The AUR, which needs nobody's permission
+
+Publishing `sieve` makes it findable immediately:
+
+```
+yay -Ss bitcoin wallet
+```
+
+Omarchy's own menu has a generic **Install → AUR** entry
+(`omarchy-pkg-aur-install`) that drops into an AUR search, so this rung alone
+means somebody looking for a Bitcoin wallet on Omarchy can find one. Search
+matches on `pkgdesc`, so it is worth writing for a person rather than for a
+manifest.
+
+### 2. The Omarchy menu, which is the real path
+
+`Super+Alt+Space` → **Install** → a category. The catalogue is curated JSONC
+and an entry is one line:
+
+```jsonc
+"install.ai.lm-studio": {"icon":"","label":"LM Studio",
+  "when":"! omarchy-pkg-present lmstudio-bin",
+  "action":"omarchy-install-app 'LM Studio' lmstudio-bin"}
+```
+
+Sieve's would be the same shape, guarded by `! omarchy-pkg-present sieve` so
+it disappears once installed. Getting there is a **pull request to Omarchy**,
+which is a human decision and wants a package that already exists and works.
+
+The categories today are `ai`, `browser`, `development`, `editor`, `gaming`,
+`service`, `style`, `terminal`, `tui`, `webapp`, `windows`. There is no
+finance category, so the PR either proposes one or argues for a home in an
+existing one — and being the reason a category exists is a harder sell than
+being the third entry in one.
+
+### 3. The `[omarchy]` binary repository
+
+```
+[omarchy]
+Server = https://pkgs.omarchy.org/stable/$arch
+```
+
+Already configured on every Omarchy machine. A package there installs as fast
+as any system package with no AUR build, and it is where most menu entries
+point. Also a curation decision, and the top rung rather than the first.
+
+### 4. The launcher, after installation
+
+`data/com.galaxoidlabs.Sieve.desktop` already carries
+`Categories=GNOME;GTK;Office;Finance;` and `Keywords=Bitcoin;Wallet;Privacy;`,
+so Sieve answers a launcher search for "bitcoin" or "wallet" — **provided the
+package installs the desktop entry and the icon under the name the entry
+asks for**. That is the gap noted above, and it is what makes this rung work
+at all.
+
+### The order
+
+Publish to the AUR → install it on Omarchy from the AUR and confirm the menu,
+launcher and udev rules all behave → open a pull request adding one line to
+the menu → and if it earns a place, the binary repository follows.
+
 ## Channels two and three — `.deb` and `.rpm`
 
 Both generated from `Cargo.toml` metadata rather than hand-written packaging

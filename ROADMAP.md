@@ -318,6 +318,8 @@ and the order of work.
 - [ ] Verify the libadwaita 1.5 floor against real containers. Ubuntu 22.04 and Debian 12 are
       expected to fail it, and there is no fix short of lowering the baseline.
 - [ ] A signed tag, GitHub Releases and a `SHA256SUMS`.
+- [ ] Publish to the AUR, then a pull request adding one line to Omarchy's install menu —
+      `PACKAGING.md` has the shape of the entry and why the category is the awkward part.
 - [ ] Delete the Flatpak manifest and `scripts/fetch-tor.sh` once the AUR package is proven.
 - [ ] `org.freedesktop.portal.Secret`, reproducible builds, and external review of the vault
       format and the signing path.
