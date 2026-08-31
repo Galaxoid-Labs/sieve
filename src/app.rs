@@ -2453,53 +2453,58 @@ impl App {
         page.add(&display);
 
         // Its own group rather than an entry under Display: this is not about
-        // how the wallet looks.
+        // how the wallet looks. Hidden while locked, because every row on it
+        // describes when to shut a wallet that is already shut.
         let privacy = adw::PreferencesGroup::new();
-        privacy.set_title("Locking");
+        if self.unlocked {
+            privacy.set_title("Locking");
 
-        let idle = adw::ComboRow::new();
-        idle.set_title("Lock when untouched");
-        // On the row rather than on the group: a paragraph in a group
-        // description sits above every row in it and pushes the controls off
-        // the screen. What is worth saying fits in a sentence.
-        idle.set_subtitle(
-            "Shuts the balance and history. Your recovery phrase is sealed either way — it is \
+            let idle = adw::ComboRow::new();
+            idle.set_title("Lock when untouched");
+            // On the row rather than on the group: a paragraph in a group
+            // description sits above every row in it and pushes the controls off
+            // the screen. What is worth saying fits in a sentence.
+            idle.set_subtitle(
+                "Shuts the balance and history. Your recovery phrase is sealed either way — it is \
              only ever decrypted at the moment of signing.",
-        );
-        idle.set_subtitle_lines(3);
-        idle.set_model(Some(&gtk::StringList::new(
-            &crate::settings::IdleLock::ALL.map(|i| i.label()),
-        )));
-        idle.set_selected(
-            crate::settings::IdleLock::ALL
-                .iter()
-                .position(|i| *i == self.settings.idle_lock)
-                .unwrap_or(0) as u32,
-        );
-        // Connected after the initial selection, so setting it does not fire.
-        {
-            let sender = sender.clone();
-            idle.connect_selected_notify(move |row| {
-                if let Some(choice) = crate::settings::IdleLock::ALL.get(row.selected() as usize) {
-                    sender.input(AppMsg::SetIdleLock(*choice));
-                }
-            });
-        }
-        privacy.add(&idle);
+            );
+            idle.set_subtitle_lines(3);
+            idle.set_model(Some(&gtk::StringList::new(
+                &crate::settings::IdleLock::ALL.map(|i| i.label()),
+            )));
+            idle.set_selected(
+                crate::settings::IdleLock::ALL
+                    .iter()
+                    .position(|i| *i == self.settings.idle_lock)
+                    .unwrap_or(0) as u32,
+            );
+            // Connected after the initial selection, so setting it does not fire.
+            {
+                let sender = sender.clone();
+                idle.connect_selected_notify(move |row| {
+                    if let Some(choice) =
+                        crate::settings::IdleLock::ALL.get(row.selected() as usize)
+                    {
+                        sender.input(AppMsg::SetIdleLock(*choice));
+                    }
+                });
+            }
+            privacy.add(&idle);
 
-        // The same thing, now, without waiting.
-        let now = adw::ActionRow::new();
-        now.set_title("Lock now");
-        now.set_subtitle("Shut the wallet and ask for the password again");
-        now.set_activatable(true);
-        now.set_sensitive(self.unlocked);
-        now.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-        {
-            let sender = sender.clone();
-            now.connect_activated(move |_| sender.input(AppMsg::Lock(LockReason::Asked)));
+            // The same thing, now, without waiting.
+            let now = adw::ActionRow::new();
+            now.set_title("Lock now");
+            now.set_subtitle("Shut the wallet and ask for the password again");
+            now.set_activatable(true);
+            now.set_sensitive(self.unlocked);
+            now.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+            {
+                let sender = sender.clone();
+                now.connect_activated(move |_| sender.input(AppMsg::Lock(LockReason::Asked)));
+            }
+            privacy.add(&now);
+            page.add(&privacy);
         }
-        privacy.add(&now);
-        page.add(&privacy);
 
         // Connections first among the privacy settings: it changes what every
         // other one discloses.
@@ -2598,6 +2603,7 @@ impl App {
 
         let mempool = adw::SwitchRow::new();
         mempool.set_title("Fee rates from mempool.space");
+        mempool.set_sensitive(self.unlocked);
         mempool.set_subtitle(
             "A better estimate, bought with a disclosure. It sends no wallet data, but asking \
              for fee rates tells the server your IP address and that you are about to send a \
