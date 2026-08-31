@@ -432,6 +432,10 @@ and the order of work.
       of each family.
 - [ ] Verify the libadwaita 1.5 floor against real containers. Ubuntu 22.04 and Debian 12 are
       expected to fail it, and there is no fix short of lowering the baseline.
+- [ ] Make the signing key: a primary kept offline and a signing subkey in repository
+      secrets, so a compromised runner costs a subkey rather than the identity. GPG rather
+      than anything nicer, because `makepkg` verifies OpenPGP and nothing else — see
+      `PACKAGING.md` for the commands and for what the secret is actually worth.
 - [ ] A signed tag, GitHub Releases and a signed `SHA256SUMS`, produced by a tag-triggered
       workflow rather than by hand — including installing each artefact in a clean container
       and running it, which is the only test the dependency lists ever get. Blocking on

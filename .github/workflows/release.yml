@@ -124,6 +124,13 @@ jobs:
   publish:
     needs: [arch, deb, rpm]
     runs-on: ubuntu-latest
+    # Job level, not step level: a step's own `env:` is not in scope for that
+    # step's `if:`, so the guard below was reading an empty string and the
+    # signature was never made. A release that quietly ships unsigned is worse
+    # than one that fails.
+    env:
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      SIGNING_KEY_PASSPHRASE: ${{ secrets.SIGNING_KEY_PASSPHRASE }}
     steps:
       - uses: actions/download-artifact@v4
         with: { path: artifacts }
@@ -134,15 +141,31 @@ jobs:
           cat SHA256SUMS
       # The key lives in repository secrets and nowhere else. Rotating it is a
       # release note rather than a silent event.
-      - name: Sign
-        if: ${{ env.SIGNING_KEY != '' }}
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      #
+      # Sign a *subkey*, with the primary kept offline: if this runner is ever
+      # compromised the subkey is revoked and the identity survives, where a
+      # leaked primary means starting again and telling everybody to trust
+      # something new.
+      - name: Sign the checksums
+        if: env.SIGNING_KEY != ''
         run: |
-          echo "$SIGNING_KEY" | gpg --batch --import
-          gpg --batch --detach-sign --armor SHA256SUMS
+          echo "$SIGNING_KEY" | gpg --batch --yes --import
+          # Loopback, because there is no terminal here to ask on. A key with
+          # no passphrase would sign just as well and be worth less.
+          gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$SIGNING_KEY_PASSPHRASE" \
+              --detach-sign --armor SHA256SUMS
+          gpg --verify SHA256SUMS.asc SHA256SUMS
+
+      # Said out loud rather than discovered by whoever downloads it.
+      - name: Say that this release is unsigned
+        if: env.SIGNING_KEY == ''
+        run: echo "::warning::No SIGNING_KEY set — publishing without a signature"
+
       - uses: softprops/action-gh-release@v2
         with:
+          # `SHA256SUMS.asc` only exists when the step above ran, and a missing
+          # file is not an error to this action.
           files: |
             artifacts/**/*
             SHA256SUMS

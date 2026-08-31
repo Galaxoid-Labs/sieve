@@ -318,8 +318,71 @@ quietly:
   its own dependencies is a release nobody can reproduce.
 - **Sign the checksums, not the files.** One signature over `SHA256SUMS` is
   what `sieve-bin`'s PKGBUILD verifies and what a person can check by hand.
-  The key lives in repository secrets and nowhere else; rotating it is a
-  release note, not a silent event.
+
+## The signing key
+
+**GPG, and not because it is pleasant.** minisign is simpler and Sigstore
+needs no long-lived key at all, but `makepkg` verifies OpenPGP signatures and
+nothing else: `validpgpkeys` in a PKGBUILD is the mechanism, so GPG is what an
+AUR package can actually check. A signature nobody's tooling verifies is
+decoration.
+
+**One key, two halves.** Make a primary key and keep it offline — on a machine
+that is not this one, or on paper. Give it a signing **subkey**, and put only
+that in CI. If a runner is ever compromised the subkey is revoked and the
+identity survives; a leaked primary means starting again and asking everybody
+to trust something new.
+
+```sh
+# On your own machine, not in CI.
+gpg --quick-generate-key "Galaxoid Labs <ismyhc@gmail.com>" ed25519 sign 2y
+gpg --list-secret-keys --keyid-format=long        # note the primary's fingerprint
+gpg --quick-add-key <FINGERPRINT> ed25519 sign 1y # the subkey CI will hold
+
+# Export the subkey alone. The `!` is what makes it the subkey and not
+# everything below the primary — without it you have just exported the key
+# you meant to keep.
+gpg --export-secret-subkeys --armor <SUBKEY-ID>! > release-subkey.asc
+
+# And the public half, for anybody verifying a download.
+gpg --export --armor <FINGERPRINT> > sieve-signing-key.asc
+```
+
+Then, in the repository's **Settings → Secrets and variables → Actions**:
+
+| Secret | What goes in it |
+|---|---|
+| `SIGNING_KEY` | the contents of `release-subkey.asc` |
+| `SIGNING_KEY_PASSPHRASE` | the passphrase protecting it |
+
+A key with no passphrase would sign just as well and be worth less: the file
+alone would be enough for anybody who read it.
+
+**What the secret is worth is what the signature claims.** Anybody who can push
+to this repository can write a workflow that prints that secret, so the key is
+as protected as write access is. Three things narrow that, and none of them
+cost anything:
+
+- Put the secrets in a GitHub **Environment** with required reviewers, so a run
+  has to be approved before it can read them, rather than leaving them readable
+  by every workflow in the repository.
+- **Protect the tags.** `v*` should be pushable by you and nothing else; the
+  release only runs on a tag, so that is the whole trigger surface.
+- **Never use `pull_request_target`.** A `pull_request` from a fork gets no
+  secrets, which is the behaviour you want; `pull_request_target` runs with
+  them and with the fork's code in reach.
+
+If that is not enough for you — and for a wallet it reasonably might not be —
+the alternative is to sign `SHA256SUMS` on your own machine after CI publishes
+it and attach the `.asc` by hand. Slower, and the key never touches a server.
+That is a decision to make once and write down here, because changing it later
+looks identical to a compromise.
+
+**Publish the fingerprint where it is not the release.** In the README, and in
+the repository description. A fingerprint that only ever appears next to the
+files it signs is one an attacker can replace along with them.
+
+Rotating is a release note, not a silent event.
 
 **The AUR step is different from the others** and worth separating. CI does
 not build the AUR package — the AUR builds it, on the user's machine, from
