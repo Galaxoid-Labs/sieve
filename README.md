@@ -190,6 +190,33 @@ cargo clippy -- -D warnings
 Mainnet and signet. Signet is the one to learn on: real block times, real
 peers, coins worth nothing.
 
+## Verifying a release
+
+Releases carry one signature, over `SHA256SUMS`. Check the checksums against
+it, then check your download against the checksums:
+
+```sh
+gpg --recv-keys 15C1CCED12599960355812BC1A9E0F864D412FB7
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+The signing key is:
+
+```
+15C1 CCED 1259 9960 3558  12BC 1A9E 0F86 4D41 2FB7
+Galaxoid Labs
+```
+
+Read that fingerprint from here rather than from the release page. A
+fingerprint that only ever appears beside the files it signs is one an attacker
+can replace along with them — the point of it being in the repository, in the
+history, is that it is somewhere else.
+
+Releases are signed by a subkey; the key above is the primary that certifies
+it, and is the one to compare against. If a signature ever fails to verify,
+that is a reason to stop rather than a reason to download it again.
+
 ## Licence
 
 MIT. No warranty of any kind — see `LICENSE`.
