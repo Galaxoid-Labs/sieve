@@ -192,6 +192,13 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
+          # A draft: the tag runs everything, the artefacts and the signature
+          # land on it, and nobody can install any of it until a person has
+          # looked and pressed publish. The argument for one trigger — that a
+          # release started by hand starts from the wrong commit — is about
+          # what gets built. What gets published is worth a pair of eyes,
+          # especially the first time this path has ever run.
+          draft: true
           # `SHA256SUMS.asc` only exists when the step above ran, and a missing
           # file is not an error to this action.
           files: |
