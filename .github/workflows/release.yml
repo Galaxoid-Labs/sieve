@@ -1,12 +1,17 @@
-# Everything a tag produces, and nothing a branch does.
+# Everything a tag produces.
 #
-# One trigger, on purpose: a release that can be started by hand is a release
-# somebody eventually starts from the wrong commit.
+# Two triggers, and only one of them can publish. A tag builds, signs and
+# releases. `workflow_dispatch` builds and signs and stops there — a rehearsal,
+# which is worth having because six package builds, a container each, and a GPG
+# import are a lot of machinery to meet for the first time on the day it
+# matters. What it cannot do is publish, so the original point stands: a
+# release nobody tagged is a release started from the wrong commit.
 name: release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,7 +25,10 @@ jobs:
     steps:
       - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl systemd-libs
       - uses: actions/checkout@v7
+      # Skipped on a rehearsal, where the ref is a branch and there is no
+      # version in it to agree with anything.
       - name: The tag, the manifest and the PKGBUILD must agree
+        if: github.ref_type == 'tag'
         run: |
           manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           pkgver=$(grep -m1 '^pkgver=' packaging/aur/PKGBUILD | cut -d= -f2)
@@ -185,12 +193,21 @@ jobs:
               --detach-sign --armor SHA256SUMS
           gpg --verify SHA256SUMS.asc SHA256SUMS
 
+      - name: Say what a rehearsal did and did not do
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::notice::Built, packaged and signed. No release was made — \
+                push a v* tag for that."
+
       # Said out loud rather than discovered by whoever downloads it.
       - name: Say that this release is unsigned
         if: env.SIGNING_KEY == ''
         run: echo "::warning::No SIGNING_KEY set — publishing without a signature"
 
+      # Everything above this line runs on a rehearsal, the signature
+      # included. This is where the two part company.
       - uses: softprops/action-gh-release@v3
+        if: github.ref_type == 'tag'
         with:
           # A draft: the tag runs everything, the artefacts and the signature
           # land on it, and nobody can install any of it until a person has
