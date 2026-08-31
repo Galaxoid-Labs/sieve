@@ -138,10 +138,12 @@ pub fn present(parent: &impl IsA<gtk::Widget>) {
          connection can be routed through Tor, including the ones for prices and fees.",
     );
 
-    // Dual-licensed, which no single `License` value says.
+    // Custom rather than `License::MitX11`, which would render the standard
+    // text and drop the sentence after it — and that sentence is the one worth
+    // reading here.
     about.set_license_type(gtk::License::Custom);
     about.set_license(
-        "Sieve is offered under your choice of the MIT licence or the Apache Licence 2.0.\n\n\
+        "Sieve is offered under the MIT licence.\n\n\
          It comes with no warranty of any kind. It is software that handles money; read the \
          source, and do not trust it with more than you can afford to lose.",
     );

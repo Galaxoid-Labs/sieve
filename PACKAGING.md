@@ -104,7 +104,7 @@ container, because a binary linked against newer glibc will not run on older.
 pkgname=sieve
 pkgdesc="A privacy-focused Bitcoin wallet"
 arch=('x86_64')
-license=('MIT' 'Apache-2.0')
+license=('MIT')
 depends=('gtk4' 'libadwaita' 'sqlite' 'openssl')
 makedepends=('cargo' 'git')
 optdepends=('tor: route every connection through Tor')

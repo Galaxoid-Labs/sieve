@@ -192,4 +192,4 @@ peers, coins worth nothing.
 
 ## Licence
 
-MIT OR Apache-2.0, at your option. No warranty of any kind.
+MIT. No warranty of any kind — see `LICENSE`.
