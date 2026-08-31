@@ -137,11 +137,11 @@ packages. libadwaita must be **1.5 or newer** (GNOME 46).
 
 ```sh
 # Arch, Omarchy
-sudo pacman -S --needed rust gtk4 libadwaita sqlite openssl
+sudo pacman -S --needed rust gtk4 libadwaita sqlite openssl systemd-libs
 # Debian, Ubuntu
-sudo apt install cargo libgtk-4-dev libadwaita-1-dev libsqlite3-dev libssl-dev
+sudo apt install cargo libgtk-4-dev libadwaita-1-dev libsqlite3-dev libssl-dev libudev-dev
 # Fedora
-sudo dnf install cargo gtk4-devel libadwaita-devel sqlite-devel openssl-devel
+sudo dnf install cargo gtk4-devel libadwaita-devel sqlite-devel openssl-devel systemd-devel
 
 cargo run --release
 ```

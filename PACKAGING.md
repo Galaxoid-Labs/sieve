@@ -105,7 +105,7 @@ pkgname=sieve
 pkgdesc="A privacy-focused Bitcoin wallet"
 arch=('x86_64')
 license=('MIT')
-depends=('gtk4' 'libadwaita' 'sqlite' 'openssl')
+depends=('gtk4' 'libadwaita' 'sqlite' 'openssl' 'systemd-libs')
 makedepends=('cargo' 'git')
 optdepends=('tor: route every connection through Tor')
 

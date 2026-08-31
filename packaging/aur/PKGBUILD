@@ -9,7 +9,10 @@ url="https://github.com/Galaxoid-Labs/sieve"
 license=('MIT')
 # GTK 4 and libadwaita are the interface; sqlite holds public descriptors and
 # transaction history; openssl is used by the HTTP client for prices and fees.
-depends=('gtk4' 'libadwaita' 'sqlite' 'openssl')
+# systemd-libs is libudev, which the hardware-signer support links through
+# async-hwi. It is installed on any Arch system, which is exactly why leaving
+# it out went unnoticed: the package built here and would have built anywhere.
+depends=('gtk4' 'libadwaita' 'sqlite' 'openssl' 'systemd-libs')
 makedepends=('cargo' 'git')
 # Sieve looks for tor on PATH as well as beside its own binary, so a system
 # Tor is all that is needed to route connections through it.

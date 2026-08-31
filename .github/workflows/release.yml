@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl
+      - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl systemd-libs
       - uses: actions/checkout@v4
       - name: The tag, the manifest and the PKGBUILD must agree
         run: |
@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl namcap sudo
+      - run: pacman -Sy --noconfirm --needed git rust gtk4 libadwaita sqlite openssl systemd-libs namcap sudo
       - uses: actions/checkout@v4
       - name: makepkg refuses to run as root, so it gets a user
         run: |
@@ -93,7 +93,7 @@ jobs:
       - run: |
           apt-get update
           apt-get install -y curl build-essential pkg-config libgtk-4-dev \
-            libadwaita-1-dev libsqlite3-dev libssl-dev
+            libadwaita-1-dev libsqlite3-dev libssl-dev libudev-dev
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
       - uses: actions/checkout@v4
       - run: |
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     container: fedora:41
     steps:
-      - run: dnf install -y cargo rust gtk4-devel libadwaita-devel sqlite-devel openssl-devel
+      - run: dnf install -y cargo rust gtk4-devel libadwaita-devel sqlite-devel openssl-devel systemd-devel
       - uses: actions/checkout@v4
       - run: |
           cargo install cargo-generate-rpm --locked
