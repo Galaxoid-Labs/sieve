@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::keys::bip39::{Language, Mnemonic, WordCount};
 use bdk_wallet::keys::{DerivableKey, ExtendedKey, GeneratableKey, GeneratedKey};
@@ -401,6 +401,15 @@ pub struct Meta {
     /// returned.
     #[serde(default)]
     pub scanned_hash: Option<String>,
+    /// Whether a BIP-39 passphrase is part of this wallet's key.
+    ///
+    /// The passphrase itself is never stored — storing it beside the vault
+    /// would undo the only thing it is for. This is the *fact* that one
+    /// exists, which signing needs in order to ask for it: without it the
+    /// vault decrypts perfectly, derives a different and empty wallet, and the
+    /// only sign of trouble is a refusal at the moment of spending.
+    #[serde(default)]
+    pub bip39_passphrase: bool,
     /// No keys here: the descriptors are public and there is no vault.
     ///
     /// Such a wallet opens without a password — there is nothing to decrypt —
@@ -431,9 +440,11 @@ impl Meta {
         script_types: Vec<accounts::ScriptType>,
         primary: accounts::ScriptType,
         name: Option<String>,
+        bip39_passphrase: bool,
     ) -> Self {
         Self {
             name,
+            bip39_passphrase,
             network: network.to_string(),
             birthday_height: birthday.height,
             birthday_hash: birthday.hash.to_owned(),
@@ -501,7 +512,14 @@ impl Meta {
     ) -> Self {
         Self {
             watch_only: true,
-            ..Self::new(network, birthday, vec![script_type], script_type, name)
+            ..Self::new(
+                network,
+                birthday,
+                vec![script_type],
+                script_type,
+                name,
+                false,
+            )
         }
     }
 
@@ -529,6 +547,7 @@ impl Meta {
         tracing::info!("upgrading a wallet from the first metadata format");
         let upgraded = Meta {
             name: None,
+            bip39_passphrase: false,
             network: Network::Signet.to_string(),
             birthday_height: legacy.height,
             birthday_hash: legacy.hash,
@@ -918,14 +937,39 @@ impl Summary {
     }
 }
 
-/// A fresh 12-word English mnemonic.
+/// How long a generated recovery phrase is.
+///
+/// Both are beyond brute force — 128 bits is not a number anybody searches —
+/// so this is not a security decision so much as a preference, and some people
+/// arrive with one. The cost of the longer phrase is real and falls on the
+/// person: twice as many words to copy down correctly, and transcription is
+/// the way phrases are actually lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhraseLength {
+    Twelve,
+    TwentyFour,
+}
+
+impl PhraseLength {
+    pub fn words(self) -> usize {
+        match self {
+            PhraseLength::Twelve => 12,
+            PhraseLength::TwentyFour => 24,
+        }
+    }
+}
+
+/// A fresh English mnemonic of the requested length.
 ///
 /// Returned in a `Zeroizing<String>` and never logged. The caller shows it once
 /// and drops it.
-pub fn generate_mnemonic() -> Result<Zeroizing<String>> {
-    let generated: GeneratedKey<Mnemonic, Tap> =
-        Mnemonic::generate((WordCount::Words12, Language::English))
-            .map_err(|e| anyhow!("could not generate a recovery phrase: {e:?}"))?;
+pub fn generate_mnemonic(length: PhraseLength) -> Result<Zeroizing<String>> {
+    let count = match length {
+        PhraseLength::Twelve => WordCount::Words12,
+        PhraseLength::TwentyFour => WordCount::Words24,
+    };
+    let generated: GeneratedKey<Mnemonic, Tap> = Mnemonic::generate((count, Language::English))
+        .map_err(|e| anyhow!("could not generate a recovery phrase: {e:?}"))?;
     Ok(Zeroizing::new(generated.to_string()))
 }
 
@@ -986,7 +1030,18 @@ pub fn create(
 
     // Recorded before the vault is written, so a wallet that exists at all has
     // a network and a birthday, and never falls back to scanning from genesis.
-    Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
+    // The passphrase is recorded as a fact, never as a value: signing has to
+    // know to ask for it, and a wallet that forgot would refuse to spend with
+    // no way for anybody to work out why.
+    Meta::new(
+        network,
+        birthday,
+        script_types.to_vec(),
+        primary,
+        name,
+        bip39_passphrase.is_some(),
+    )
+    .save(paths)?;
 
     let sealed = vault::seal(mnemonic.as_bytes(), password, &network.to_string(), kdf)?;
     vault::write_atomic(&paths.vault, &sealed)?;
@@ -1023,7 +1078,17 @@ pub fn import_xprv(
         network,
         accounts::IMPORT_LOOKAHEAD,
     )?;
-    Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
+    // An extended key is already past the seed, so a BIP-39 passphrase has no
+    // meaning here: whatever one was used is baked into the key itself.
+    Meta::new(
+        network,
+        birthday,
+        script_types.to_vec(),
+        primary,
+        name,
+        false,
+    )
+    .save(paths)?;
 
     let sealed = vault::seal(
         xprv_text.trim().as_bytes(),
@@ -1050,7 +1115,17 @@ pub fn import_wif(
 ) -> Result<Summary> {
     let mut portfolio =
         accounts::Portfolio::create_from_wif(wif, data_dir(paths), script_types, primary, network)?;
-    Meta::new(network, birthday, script_types.to_vec(), primary, name).save(paths)?;
+    // A WIF is one key with no derivation, so there is no seed for a
+    // passphrase to be part of.
+    Meta::new(
+        network,
+        birthday,
+        script_types.to_vec(),
+        primary,
+        name,
+        false,
+    )
+    .save(paths)?;
 
     let sealed = vault::seal(wif.as_bytes(), password, &network.to_string(), kdf)?;
     vault::write_atomic(&paths.vault, &sealed)?;
@@ -1078,6 +1153,20 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
     // The databases hold no unrecoverable state, so losing them costs a rescan
     // rather than the wallet. Rebuild from the secret we just decrypted.
     if portfolio.is_empty() {
+        // Except when a passphrase is part of the key, which is not in the
+        // vault and is not being asked for here. Rebuilding without it would
+        // succeed — that is the whole problem with a BIP-39 passphrase — and
+        // hand back a valid, different, empty wallet. Somebody would read that
+        // as their money being gone. Refusing says what actually happened and
+        // what recovers it.
+        if meta.bip39_passphrase {
+            bail!(
+                "this wallet's databases are missing and it was set up with a BIP-39 \
+                 passphrase, which is part of the key and is not stored here. Restore \
+                 from the recovery phrase and that passphrase to rebuild it; the coins \
+                 are on the chain either way."
+            );
+        }
         let phrase =
             std::str::from_utf8(&secret).context("the vault does not contain readable text")?;
         let xprv = xprv_from_mnemonic(phrase, None, meta.network())?;
@@ -1120,7 +1209,7 @@ mod tests {
 
     #[test]
     fn generated_phrase_is_twelve_valid_words() {
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         assert_eq!(phrase.split_whitespace().count(), 12);
         // Round-trips through the BIP-39 checksum.
         Mnemonic::parse_in(Language::English, phrase.as_str()).unwrap();
@@ -1128,8 +1217,8 @@ mod tests {
 
     #[test]
     fn phrases_are_not_repeated() {
-        let a = generate_mnemonic().unwrap();
-        let b = generate_mnemonic().unwrap();
+        let a = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        let b = generate_mnemonic(PhraseLength::Twelve).unwrap();
         assert_ne!(*a, *b);
     }
 
@@ -1176,7 +1265,7 @@ mod tests {
         let paths = scratch("roundtrip");
         assert!(!paths.is_initialised());
 
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         let created = create_for_test(&phrase, b"a good password", &paths);
 
         assert!(paths.is_initialised());
@@ -1194,7 +1283,7 @@ mod tests {
     #[test]
     fn the_address_list_covers_everything_handed_out() {
         let paths = scratch("addresses");
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         create_for_test(&phrase, b"a good password", &paths);
 
         let dir = data_dir(&paths).to_path_buf();
@@ -1250,7 +1339,7 @@ mod tests {
         // creating a wallet and reading back what its database holds,
         // which is exactly the shape a device hands over.
         let source = scratch("watchlock-source");
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         create_for_test(&phrase, b"a good password", &source);
         let db = data_dir(&source).join(accounts::ScriptType::Taproot.db_file());
         let account = accounts::Account::load(accounts::ScriptType::Taproot, &db, DEFAULT_NETWORK)
@@ -1296,7 +1385,7 @@ mod tests {
         // Its password is the vault's, and a second one would be a second
         // thing to get wrong for no gain.
         let paths = scratch("seedlock");
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         create_for_test(&phrase, b"a good password", &paths);
 
         let refused = set_watch_only_password(&paths, b"another password").unwrap_err();
@@ -1309,7 +1398,7 @@ mod tests {
     #[test]
     fn a_rescan_keeps_the_wallet_and_forgets_the_chain() {
         let paths = scratch("rescan");
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         let before = create_for_test(&phrase, b"a good password", &paths);
 
         // Hand out a few addresses, as a wallet in use would have.
@@ -1565,6 +1654,7 @@ mod tests {
             vec![accounts::ScriptType::Taproot],
             accounts::ScriptType::Taproot,
             None,
+            false,
         );
         assert_eq!(meta.display_name("abcdef"), "Wallet abcd");
 
@@ -1574,8 +1664,169 @@ mod tests {
             vec![accounts::ScriptType::Taproot],
             accounts::ScriptType::Taproot,
             Some("Spending".into()),
+            false,
         );
         assert_eq!(named.display_name("abcdef"), "Spending");
+    }
+
+    #[test]
+    fn a_twenty_four_word_phrase_is_asked_for_and_returned() {
+        let short = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        assert_eq!(short.split_whitespace().count(), 12);
+        Mnemonic::parse_in(Language::English, short.as_str()).unwrap();
+
+        let long = generate_mnemonic(PhraseLength::TwentyFour).unwrap();
+        assert_eq!(long.split_whitespace().count(), 24);
+        Mnemonic::parse_in(Language::English, long.as_str()).unwrap();
+    }
+
+    #[test]
+    fn a_passphrase_is_recorded_as_a_fact_and_never_as_a_value() {
+        // Signing has to know to ask. Without this the vault opens, the wrong
+        // key is derived, and the only symptom is a refusal to spend.
+        let paths = scratch("passphrase-meta");
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        create(
+            &phrase,
+            b"a good password",
+            &paths,
+            FAST,
+            DEFAULT_NETWORK,
+            SIGNET_CHECKPOINTS[0],
+            &[accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            Some("correct horse"),
+            None,
+            25,
+        )
+        .unwrap();
+
+        let meta = Meta::load(&paths).unwrap();
+        assert!(meta.bip39_passphrase, "the fact must be recorded");
+
+        // And the passphrase itself must not be anywhere on disk.
+        let written = std::fs::read(&paths.meta).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&written).contains("correct horse"),
+            "the passphrase itself must never be written down"
+        );
+
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_wallet_made_without_a_passphrase_says_so() {
+        let paths = scratch("no-passphrase-meta");
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        create_for_test(&phrase, b"a good password", &paths);
+        assert!(!Meta::load(&paths).unwrap().bip39_passphrase);
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_metadata_file_written_before_passphrases_still_loads() {
+        // Every wallet on disk predates this field. One that cannot be read is
+        // a wallet somebody cannot open.
+        let older = r#"{
+            "network": "signet",
+            "birthday_height": 1,
+            "birthday_hash": "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
+            "script_types": ["Taproot"],
+            "primary": "Taproot"
+        }"#;
+        let meta: Meta = serde_json::from_str(older).unwrap();
+        assert!(!meta.bip39_passphrase);
+    }
+
+    #[test]
+    fn losing_the_databases_refuses_rather_than_rebuilding_an_empty_wallet() {
+        // The passphrase is not in the vault, so a rebuild would derive a
+        // different wallet — successfully, with a zero balance. Somebody would
+        // read that as their money being gone.
+        let paths = scratch("passphrase-rebuild");
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        create(
+            &phrase,
+            b"a good password",
+            &paths,
+            FAST,
+            DEFAULT_NETWORK,
+            SIGNET_CHECKPOINTS[0],
+            &[accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            Some("correct horse"),
+            None,
+            25,
+        )
+        .unwrap();
+
+        std::fs::remove_dir_all(data_dir(&paths)).unwrap();
+        let error = unlock(b"a good password", &paths)
+            .expect_err("a rebuild without the passphrase must not be attempted");
+        let said = error.to_string();
+        assert!(said.contains("passphrase"), "{said}");
+
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn signing_a_passphrase_wallet_needs_the_passphrase_and_is_refused_without_it() {
+        // The whole reason the flag above exists. A missing BIP-39 passphrase
+        // is not an error anywhere in the key derivation — it produces a
+        // valid, different, empty wallet — so the only thing standing between
+        // somebody and a signature that finalizes nothing is this check.
+        const PASSPHRASE: &str = "correct horse";
+        let paths = scratch("passphrase-signing");
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        create(
+            &phrase,
+            b"a good password",
+            &paths,
+            FAST,
+            DEFAULT_NETWORK,
+            SIGNET_CHECKPOINTS[0],
+            &[accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            Some(PASSPHRASE),
+            None,
+            25,
+        )
+        .unwrap();
+
+        // What the wallet on disk is actually watching.
+        use bdk_wallet::chain::DescriptorExt;
+        let portfolio = accounts::Portfolio::load(
+            data_dir(&paths),
+            &[accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            DEFAULT_NETWORK,
+        )
+        .unwrap();
+        let watching = portfolio.accounts[0]
+            .wallet
+            .public_descriptor(bdk_wallet::KeychainKind::External)
+            .descriptor_id();
+
+        let with = send::signer(
+            &phrase,
+            accounts::ScriptType::Taproot,
+            DEFAULT_NETWORK,
+            Some(PASSPHRASE),
+        )
+        .unwrap();
+        send::check_signer(&with, watching).expect("the passphrase must derive these addresses");
+
+        let without = send::signer(
+            &phrase,
+            accounts::ScriptType::Taproot,
+            DEFAULT_NETWORK,
+            None,
+        )
+        .unwrap();
+        send::check_signer(&without, watching)
+            .expect_err("signing without the passphrase must be refused, not attempted");
+
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
     }
 
     #[test]
@@ -1583,7 +1834,7 @@ mod tests {
         // Without this file the first sync falls back to the genesis block and
         // walks the entire chain.
         let paths = scratch("birthday");
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         create_for_test(&phrase, b"a good password", &paths);
 
         let meta = Meta::load(&paths).expect("a created wallet must record its metadata");
@@ -1601,7 +1852,7 @@ mod tests {
     #[test]
     fn unlock_rejects_the_wrong_password() {
         let paths = scratch("wrongpass");
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         create_for_test(&phrase, b"the right one", &paths);
 
         assert!(unlock(b"the wrong one", &paths).is_err());
@@ -1612,7 +1863,7 @@ mod tests {
     #[test]
     fn a_lost_database_is_rebuilt_from_the_vault() {
         let paths = scratch("rebuild");
-        let phrase = generate_mnemonic().unwrap();
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
         let created = create_for_test(&phrase, b"a good password", &paths);
 
         // The databases hold only public data, so losing them must be survivable.

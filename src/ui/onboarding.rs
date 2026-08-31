@@ -117,9 +117,30 @@ pub enum OnboardingMsg {
     PreviewWelcome,
     /// Whether a wallet list sits behind this screen.
     Back,
-    SetPassword(Secret, Secret, String),
+    Configured(Setup),
     PhraseWritten,
-    Verify(Secret, Secret, Secret),
+    Verify(Secret, Secret, Secret, Secret),
+}
+
+/// Everything the first step collects.
+///
+/// A struct rather than five positional arguments: two of these are passwords
+/// and two are passphrases, they are all `Secret`, and getting the order wrong
+/// would compile.
+pub struct Setup {
+    pub password: Secret,
+    pub confirm: Secret,
+    pub name: String,
+    /// The BIP-39 passphrase, empty when none was asked for.
+    pub passphrase: Secret,
+    pub passphrase_confirm: Secret,
+    pub length: wallet::PhraseLength,
+}
+
+impl std::fmt::Debug for Setup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Setup(<redacted>)")
+    }
 }
 
 #[derive(Debug)]
@@ -151,6 +172,13 @@ pub struct Onboarding {
     /// Held only between generation and sealing.
     mnemonic: Option<Zeroizing<String>>,
     password: Option<Zeroizing<String>>,
+    /// The BIP-39 passphrase, when one was asked for. Part of the key, not of
+    /// the file encryption, and never written down anywhere but the person's
+    /// own paper.
+    passphrase: Option<Zeroizing<String>>,
+    /// How long the generated phrase is, which the copy and the challenge both
+    /// have to agree with.
+    length: wallet::PhraseLength,
     /// What to call it. Optional — an unnamed wallet still gets a stable
     /// fallback — but naming it here beats renaming it later.
     name: Option<String>,
@@ -173,6 +201,14 @@ impl Onboarding {
         }
     }
 
+    /// What the phrase screen says, which depends on whether the words alone
+    /// are enough to recover the wallet. With a passphrase they are not, and
+    /// somebody who writes down only the words has a backup that restores an
+    /// empty wallet — silently, years later.
+    fn phrase_warning(&self) -> String {
+        phrase_warning(self.length.words(), self.passphrase.is_some())
+    }
+
     fn word(&self, position: usize) -> Option<String> {
         self.mnemonic
             .as_ref()?
@@ -182,13 +218,29 @@ impl Onboarding {
     }
 }
 
-/// Three distinct 1-based positions in a twelve-word phrase.
-fn pick_challenge() -> [usize; 3] {
+/// What the phrase screen says. Free-standing so it can be checked without a
+/// display: the wording is the safety property, not the widget.
+fn phrase_warning(words: usize, passphrase: bool) -> String {
+    match passphrase {
+        false => format!(
+            "These {words} words are the only way to recover your money. \
+             Write them on paper. Anyone who reads them can spend your coins."
+        ),
+        true => format!(
+            "These {words} words and your passphrase together are the only way to \
+             recover your money — the words alone restore a different, empty wallet. \
+             Write them on paper. Anyone who has both can spend your coins."
+        ),
+    }
+}
+
+/// Three distinct 1-based positions in a phrase of `words` words.
+fn pick_challenge(words: usize) -> [usize; 3] {
     let mut bytes = [0u8; 8];
     let _ = getrandom::fill(&mut bytes);
     let mut chosen: Vec<usize> = Vec::with_capacity(3);
     for byte in bytes {
-        let candidate = (byte as usize % 12) + 1;
+        let candidate = (byte as usize % words) + 1;
         if !chosen.contains(&candidate) {
             chosen.push(candidate);
         }
@@ -198,7 +250,7 @@ fn pick_challenge() -> [usize; 3] {
     }
     // Entropy exhausted without three distinct values: fall back rather than loop.
     while chosen.len() < 3 {
-        let next = (1..=12).find(|n| !chosen.contains(n)).unwrap_or(1);
+        let next = (1..=words).find(|n| !chosen.contains(n)).unwrap_or(1);
         chosen.push(next);
     }
     chosen.sort_unstable();
@@ -328,7 +380,7 @@ impl Component for Onboarding {
                     set_description: Some(
                         "This locks the wallet on this computer. It is not part of your \
                          recovery phrase — if you forget it you can still restore from \
-                         those twelve words."
+                         the words themselves."
                     ),
 
                     #[wrap(Some)]
@@ -354,17 +406,89 @@ impl Component for Onboarding {
                                 },
                             },
 
+                            // Its own group, well away from the password.
+                            // These two are the pair this wallet must never
+                            // let anybody confuse: one encrypts a file on this
+                            // machine and can be changed, the other is part of
+                            // the key itself and cannot.
+                            adw::PreferencesGroup {
+                                set_title: "Recovery phrase",
+                                // On the group rather than the row: a subtitle
+                                // this long squeezes a ComboRow's value into
+                                // an ellipsis, and "24…" is not a choice
+                                // anybody can read.
+                                set_description: Some(
+                                    "Both lengths are far beyond guessing. Twice the \
+                                     words is twice as much to copy down without a \
+                                     mistake, which is how phrases are really lost."
+                                ),
+
+                                #[name(length_row)]
+                                adw::ComboRow {
+                                    set_title: "Length",
+                                    set_model: Some(&gtk::StringList::new(&[
+                                        "12 words",
+                                        "24 words",
+                                    ])),
+                                },
+
+                                #[name(passphrase_expander)]
+                                adw::ExpanderRow {
+                                    set_title: "Add a passphrase",
+                                    set_subtitle: "Advanced. A 25th word, held only in \
+                                                   your head — it is part of the key, so \
+                                                   the phrase alone will not restore this \
+                                                   wallet. Forgetting it loses the money.",
+                                    set_show_enable_switch: true,
+                                    set_enable_expansion: false,
+
+                                    #[name(passphrase_row)]
+                                    add_row = &adw::PasswordEntryRow {
+                                        set_title: "Passphrase",
+                                    },
+                                    #[name(passphrase_confirm_row)]
+                                    add_row = &adw::PasswordEntryRow {
+                                        set_title: "Confirm passphrase",
+                                    },
+                                },
+                            },
+
                             gtk::Button {
                                 add_css_class: "suggested-action",
                                 add_css_class: "pill",
                                 set_halign: gtk::Align::Center,
                                 set_label: "Continue",
-                                connect_clicked[sender, pass_row, confirm_row, name_row] => move |_| {
-                                    sender.input(OnboardingMsg::SetPassword(
-                                        Secret(Zeroizing::new(pass_row.text().to_string())),
-                                        Secret(Zeroizing::new(confirm_row.text().to_string())),
-                                        name_row.text().to_string(),
-                                    ));
+                                connect_clicked[
+                                    sender, pass_row, confirm_row, name_row, length_row,
+                                    passphrase_expander, passphrase_row, passphrase_confirm_row
+                                ] => move |_| {
+                                    // An unexpanded row still holds whatever
+                                    // was typed before it was switched off, so
+                                    // the switch decides, not the field.
+                                    let wanted = passphrase_expander.enables_expansion();
+                                    let text = |row: &adw::PasswordEntryRow| {
+                                        Secret(Zeroizing::new(if wanted {
+                                            row.text().to_string()
+                                        } else {
+                                            String::new()
+                                        }))
+                                    };
+                                    sender.input(OnboardingMsg::Configured(Setup {
+                                        password: Secret(Zeroizing::new(
+                                            pass_row.text().to_string(),
+                                        )),
+                                        confirm: Secret(Zeroizing::new(
+                                            confirm_row.text().to_string(),
+                                        )),
+                                        name: name_row.text().to_string(),
+                                        passphrase: text(&passphrase_row),
+                                        passphrase_confirm: text(&passphrase_confirm_row),
+                                        length: if length_row.selected() == 1 {
+                                            wallet::PhraseLength::TwentyFour
+                                        } else {
+                                            wallet::PhraseLength::Twelve
+                                        },
+                                    }));
                                 },
                             },
                         },
@@ -374,10 +498,8 @@ impl Component for Onboarding {
                 // ---- phrase ----
                 add_named[Some("phrase")] = &adw::StatusPage {
                     set_title: "Write these words down",
-                    set_description: Some(
-                        "These twelve words are the only way to recover your money. \
-                         Write them on paper. Anyone who reads them can spend your coins."
-                    ),
+                    #[watch]
+                    set_description: Some(&model.phrase_warning()),
 
                     #[wrap(Some)]
                     set_child = &adw::Clamp {
@@ -444,16 +566,41 @@ impl Component for Onboarding {
                                 },
                             },
 
+                            // A passphrase typed wrong is not an error
+                            // anywhere later: it derives a valid, empty wallet
+                            // and the money appears to be gone. This is the
+                            // only moment it can be checked against something,
+                            // because this is the only moment Sieve still
+                            // knows what it was meant to be.
+                            adw::PreferencesGroup {
+                                #[watch]
+                                set_visible: model.passphrase.is_some(),
+                                set_title: "Passphrase",
+                                set_description: Some(
+                                    "Type it again from your own copy, not from memory."
+                                ),
+
+                                #[name(passphrase_back)]
+                                adw::PasswordEntryRow {
+                                    set_title: "Passphrase",
+                                },
+                            },
+
                             gtk::Button {
                                 add_css_class: "suggested-action",
                                 add_css_class: "pill",
                                 set_halign: gtk::Align::Center,
                                 set_label: "Create wallet",
-                                connect_clicked[sender, word_a, word_b, word_c] => move |_| {
+                                connect_clicked[
+                                    sender, word_a, word_b, word_c, passphrase_back
+                                ] => move |_| {
                                     sender.input(OnboardingMsg::Verify(
                                         Secret(Zeroizing::new(word_a.text().to_string())),
                                         Secret(Zeroizing::new(word_b.text().to_string())),
                                         Secret(Zeroizing::new(word_c.text().to_string())),
+                                        Secret(Zeroizing::new(
+                                            passphrase_back.text().to_string(),
+                                        )),
                                     ));
                                 },
                             },
@@ -494,6 +641,8 @@ impl Component for Onboarding {
     ) -> ComponentParts<Self> {
         let words = FactoryVecDeque::builder().launch_default().detach();
         let model = Onboarding {
+            passphrase: None,
+            length: wallet::PhraseLength::Twelve,
             step: Step::Welcome,
             can_cancel: false,
             skip_welcome: false,
@@ -538,16 +687,32 @@ impl Component for Onboarding {
                 }
             },
 
-            OnboardingMsg::SetPassword(pass, confirm, name) => {
-                if pass.0.len() < 8 {
+            OnboardingMsg::Configured(setup) => {
+                if setup.password.0.len() < 8 {
                     self.error = Some("Use at least 8 characters.".into());
                     return;
                 }
-                if *pass.0 != *confirm.0 {
+                if *setup.password.0 != *setup.confirm.0 {
                     self.error = Some("The two passwords do not match.".into());
                     return;
                 }
-                match wallet::generate_mnemonic() {
+                // No minimum and no rules: every byte of a BIP-39 passphrase
+                // is part of the key, so any string is a valid one. Only that
+                // it was typed the same way twice can be checked — and an
+                // empty one asked for is a mistake worth catching, since it
+                // would derive the no-passphrase wallet and nothing would say
+                // so.
+                if !setup.passphrase.0.is_empty() || !setup.passphrase_confirm.0.is_empty() {
+                    if *setup.passphrase.0 != *setup.passphrase_confirm.0 {
+                        self.error = Some("The two passphrases do not match.".into());
+                        return;
+                    }
+                    self.passphrase = Some(setup.passphrase.0.clone());
+                } else {
+                    self.passphrase = None;
+                }
+                self.length = setup.length;
+                match wallet::generate_mnemonic(setup.length) {
                     Ok(phrase) => {
                         {
                             let mut guard = self.words.guard();
@@ -557,10 +722,10 @@ impl Component for Onboarding {
                             }
                         }
                         self.mnemonic = Some(phrase);
-                        self.password = Some(pass.0);
-                        let trimmed = name.trim();
+                        self.password = Some(setup.password.0);
+                        let trimmed = setup.name.trim();
                         self.name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-                        self.challenge = pick_challenge();
+                        self.challenge = pick_challenge(self.length.words());
                         self.step = Step::Phrase;
                     }
                     Err(e) => self.error = Some(e.to_string()),
@@ -569,7 +734,7 @@ impl Component for Onboarding {
 
             OnboardingMsg::PhraseWritten => self.step = Step::Verify,
 
-            OnboardingMsg::Verify(a, b, c) => {
+            OnboardingMsg::Verify(a, b, c, passphrase) => {
                 let given = [a, b, c];
                 let matches = self
                     .challenge
@@ -586,6 +751,27 @@ impl Component for Onboarding {
                     return;
                 }
 
+                // Compared exactly. A passphrase is bytes, not words: leading
+                // space, capital letter and trailing space are all part of the
+                // key, so trimming or lowercasing here would accept a copy
+                // that does not open the wallet.
+                if let Some(wanted) = self.passphrase.as_ref() {
+                    if **wanted != *passphrase.0 {
+                        self.error = Some(
+                            "That passphrase does not match the one you set. It is part \
+                             of the key, so it has to be exact — spaces and capitals \
+                             included."
+                                .into(),
+                        );
+                        return;
+                    }
+                }
+
+                let bip39 = self.passphrase.clone();
+                // Collected on the first step and, until now, dropped on the
+                // floor: `create` takes a name and was being handed `None`, so
+                // naming a wallet while making it did nothing at all.
+                let name = self.name.clone();
                 let (Some(mnemonic), Some(password)) =
                     (self.mnemonic.clone(), self.password.clone())
                 else {
@@ -623,8 +809,8 @@ impl Component for Onboarding {
                             birthday,
                             &script_types,
                             primary,
-                            None,
-                            None,
+                            bip39.as_ref().map(|phrase| phrase.as_str()),
+                            name,
                             // A wallet created here starts empty, so BDK's
                             // default window is plenty.
                             25,
@@ -686,6 +872,48 @@ mod tests {
                 step.tag()
             );
         }
+    }
+
+    #[test]
+    fn the_challenge_stays_inside_the_phrase() {
+        // Asking for word 19 of a twelve-word phrase is a challenge nobody can
+        // answer, and the wallet would refuse to be created.
+        for length in [
+            wallet::PhraseLength::Twelve,
+            wallet::PhraseLength::TwentyFour,
+        ] {
+            let words = length.words();
+            for _ in 0..200 {
+                let challenge = pick_challenge(words);
+                for position in challenge {
+                    assert!(
+                        (1..=words).contains(&position),
+                        "word {position} of {words}"
+                    );
+                }
+                assert!(
+                    challenge[0] < challenge[1] && challenge[1] < challenge[2],
+                    "positions must be distinct and in order: {challenge:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_phrase_screen_says_when_the_words_alone_are_not_enough() {
+        // Somebody who writes down only the words has a backup that restores
+        // an empty wallet. They find that out years later, so the screen that
+        // tells them to write is the only place it can be said.
+        let plain = phrase_warning(24, false);
+        assert!(plain.contains("24 words"), "{plain}");
+        assert!(!plain.contains("passphrase"), "{plain}");
+
+        let guarded = phrase_warning(24, true);
+        assert!(guarded.contains("passphrase"), "{guarded}");
+        assert!(
+            guarded.contains("empty wallet"),
+            "it has to say what happens, not just that a passphrase exists: {guarded}"
+        );
     }
 
     #[test]

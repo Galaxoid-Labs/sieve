@@ -47,6 +47,7 @@ pub enum WalletPageOutput {
     Send {
         plan: Box<Plan>,
         password: Password,
+        passphrase: Password,
     },
 }
 
@@ -521,6 +522,10 @@ pub struct WalletPage {
     labels: crate::wallet::labels::Labels,
     /// This wallet holds no keys, so nothing here may offer to sign.
     watch_only: bool,
+    /// Whether signing on this wallet needs a BIP-39 passphrase as well as the
+    /// password. Held here as well as on the send form, because the fee-bump
+    /// dialog is a second signing path and does not go through that form.
+    has_passphrase: bool,
     /// Whether the password prompt is on screen. The locked notice and the
     /// dialog say the same thing, and saying it twice at once makes the page
     /// behind the dialog look like a page that failed.
@@ -612,6 +617,7 @@ pub enum WalletPageMsg {
     },
     /// This wallet holds no keys: the device that does is what signs.
     SetWatchOnly(bool),
+    SetHasPassphrase(bool),
     /// Tor is on and could not be started, so nothing is connecting.
     TorProblem(Option<String>),
     RetryTor,
@@ -620,6 +626,7 @@ pub enum WalletPageMsg {
     SendNow {
         plan: Box<Plan>,
         password: Password,
+        passphrase: Password,
     },
     /// The send form is on screen and wants a fee rate to start from.
     EstimateFee,
@@ -2037,7 +2044,15 @@ impl Component for WalletPage {
             .launch(())
             .forward(sender.input_sender(), |out| match out {
                 SendOutput::Plan(draft) => WalletPageMsg::PlanSend(draft),
-                SendOutput::Send { plan, password } => WalletPageMsg::SendNow { plan, password },
+                SendOutput::Send {
+                    plan,
+                    password,
+                    passphrase,
+                } => WalletPageMsg::SendNow {
+                    plan,
+                    password,
+                    passphrase,
+                },
                 SendOutput::Toast(message) => WalletPageMsg::Toast(message),
                 SendOutput::NameTransaction { txid, text } => {
                     WalletPageMsg::NameTransaction { txid, text }
@@ -2045,6 +2060,7 @@ impl Component for WalletPage {
             });
 
         let mut model = WalletPage {
+            has_passphrase: false,
             settings: Settings::load(),
             stack: None,
             address_label_row: None,
@@ -2299,6 +2315,11 @@ impl Component for WalletPage {
                 self.send.emit(SendMsg::SetWatchOnly(watch_only));
             }
 
+            WalletPageMsg::SetHasPassphrase(has) => {
+                self.has_passphrase = has;
+                self.send.emit(SendMsg::SetHasPassphrase(has));
+            }
+
             WalletPageMsg::TorProblem(problem) => self.tor_problem = problem,
             WalletPageMsg::RetryTor => {
                 let _ = sender.output(WalletPageOutput::RetryTor);
@@ -2410,8 +2431,16 @@ impl Component for WalletPage {
             WalletPageMsg::PlanSend(draft) => {
                 let _ = sender.output(WalletPageOutput::PlanSend(draft));
             }
-            WalletPageMsg::SendNow { plan, password } => {
-                let _ = sender.output(WalletPageOutput::Send { plan, password });
+            WalletPageMsg::SendNow {
+                plan,
+                password,
+                passphrase,
+            } => {
+                let _ = sender.output(WalletPageOutput::Send {
+                    plan,
+                    password,
+                    passphrase,
+                });
             }
             WalletPageMsg::EstimateFee => {
                 let _ = sender.output(WalletPageOutput::EstimateFee);
@@ -3064,16 +3093,34 @@ impl WalletPage {
         password.set_show_peek_icon(true);
         password.set_placeholder_text(Some("Wallet password"));
         password.set_margin_top(6);
-        dialog.set_extra_child(Some(&password));
+
+        // A replacement is signed exactly like the payment it replaces, so a
+        // wallet with a passphrase needs it here as well. This dialog was
+        // missed once already — it is a second signing path that does not go
+        // through the send form.
+        let passphrase = gtk::PasswordEntry::new();
+        passphrase.set_show_peek_icon(true);
+        passphrase.set_placeholder_text(Some("BIP-39 passphrase"));
+        passphrase.set_margin_top(6);
+        passphrase.set_visible(self.has_passphrase);
+
+        let fields = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        fields.append(&password);
+        fields.append(&passphrase);
+        dialog.set_extra_child(Some(&fields));
 
         {
             let sender = sender.clone();
             let password = password.clone();
+            let passphrase = passphrase.clone();
             dialog.connect_response(None, move |_, response| {
                 if response == "send" {
                     let _ = sender.output(WalletPageOutput::Send {
                         plan: Box::new(plan.clone()),
                         password: Password(zeroize::Zeroizing::new(password.text().to_string())),
+                        passphrase: Password(zeroize::Zeroizing::new(
+                            passphrase.text().to_string(),
+                        )),
                     });
                 }
             });

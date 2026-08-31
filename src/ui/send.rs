@@ -59,6 +59,9 @@ pub enum SendMsg {
     },
     /// This wallet holds no keys here.
     SetWatchOnly(bool),
+    /// Whether a BIP-39 passphrase is part of this wallet's key, and so has to
+    /// be asked for alongside the password before anything can be signed.
+    SetHasPassphrase(bool),
     /// The fee field was changed.
     FeeEdited,
     SelectFrom(u32),
@@ -69,7 +72,7 @@ pub enum SendMsg {
     Review,
     Planned(Box<Result<Plan, String>>),
     /// The password is in and the dialog said go.
-    Confirm(Password),
+    Confirm(Password, Password),
     Sent(Box<Result<String, String>>),
     /// Back to an empty form.
     Reset,
@@ -82,7 +85,14 @@ pub enum SendOutput {
     /// Build this, watch-only, and hand the numbers back.
     Plan(Box<Draft>),
     /// Sign and broadcast the plan already reviewed.
-    Send { plan: Box<Plan>, password: Password },
+    Send {
+        plan: Box<Plan>,
+        password: Password,
+        /// The BIP-39 passphrase, empty unless this wallet was set up with
+        /// one. It is part of the key, so signing without it derives a
+        /// different wallet and finalizes nothing.
+        passphrase: Password,
+    },
     /// Something worth saying once and not keeping. The toast overlay belongs
     /// to the wallet page, which wraps this one.
     Toast(String),
@@ -104,6 +114,7 @@ pub struct SendForm {
     min_fee: Option<f64>,
     /// No keys in this wallet: it can build a payment but not sign one.
     watch_only: bool,
+    has_passphrase: bool,
     /// Where the number in the fee field came from, said under it.
     fee_source: Option<String>,
     /// The last rate Sieve put there itself. A value that no longer matches it
@@ -994,6 +1005,7 @@ impl Component for SendForm {
             max: false,
             min_fee: None,
             watch_only: false,
+            has_passphrase: false,
             fee_source: None,
             suggested: None,
             error: None,
@@ -1097,6 +1109,7 @@ impl Component for SendForm {
             }
 
             SendMsg::SetWatchOnly(watch_only) => self.watch_only = watch_only,
+            SendMsg::SetHasPassphrase(has) => self.has_passphrase = has,
 
             SendMsg::Suggest { rate, source } => {
                 self.fee_source = Some(source);
@@ -1280,7 +1293,7 @@ impl Component for SendForm {
                 }
             }
 
-            SendMsg::Confirm(password) => {
+            SendMsg::Confirm(password, passphrase) => {
                 let Some(plan) = self.plan.take() else { return };
                 self.sent_detail = Some(format!(
                     "{} to {}",
@@ -1291,6 +1304,7 @@ impl Component for SendForm {
                 ));
                 self.busy = true;
                 let _ = sender.output(SendOutput::Send {
+                    passphrase,
                     plan: Box::new(plan),
                     password,
                 });
@@ -1399,16 +1413,32 @@ impl SendForm {
         password.set_show_peek_icon(true);
         password.set_placeholder_text(Some("Wallet password"));
         password.set_margin_top(6);
-        dialog.set_extra_child(Some(&password));
+
+        // And the passphrase beside it, for a wallet that has one. It is not
+        // stored anywhere — that is the entire point of it — so it has to be
+        // typed at every signature, and without it the key derived from this
+        // vault belongs to a different, empty wallet.
+        let passphrase = gtk::PasswordEntry::new();
+        passphrase.set_show_peek_icon(true);
+        passphrase.set_placeholder_text(Some("BIP-39 passphrase"));
+        passphrase.set_margin_top(6);
+        passphrase.set_visible(self.has_passphrase);
+
+        let fields = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        fields.append(&password);
+        fields.append(&passphrase);
+        dialog.set_extra_child(Some(&fields));
 
         {
             let sender = sender.clone();
             let password = password.clone();
+            let passphrase = passphrase.clone();
             dialog.connect_response(None, move |_, response| {
                 if response == "send" {
-                    sender.input(SendMsg::Confirm(Password(Zeroizing::new(
-                        password.text().to_string(),
-                    ))));
+                    sender.input(SendMsg::Confirm(
+                        Password(Zeroizing::new(password.text().to_string())),
+                        Password(Zeroizing::new(passphrase.text().to_string())),
+                    ));
                 }
             });
         }

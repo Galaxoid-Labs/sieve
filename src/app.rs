@@ -406,6 +406,7 @@ pub enum AppMsg {
     SendNow {
         plan: Box<crate::wallet::send::Plan>,
         password: crate::ui::send::Password,
+        passphrase: crate::ui::send::Password,
     },
     /// The desktop switched between light and dark.
     ///
@@ -576,9 +577,15 @@ impl Component for App {
                     crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
                         AppMsg::PlanSend(draft)
                     }
-                    crate::ui::wallet_page::WalletPageOutput::Send { plan, password } => {
-                        AppMsg::SendNow { plan, password }
-                    }
+                    crate::ui::wallet_page::WalletPageOutput::Send {
+                        plan,
+                        password,
+                        passphrase,
+                    } => AppMsg::SendNow {
+                        plan,
+                        password,
+                        passphrase,
+                    },
                 });
 
         // The desktop owns this preference, not the app. Normally
@@ -1633,11 +1640,14 @@ impl Component for App {
                     .unwrap_or_default();
                 let meta = wallet::Meta::load(&paths);
                 let watch_only = meta.as_ref().is_some_and(|m| m.watch_only);
+                let has_passphrase = meta.as_ref().is_some_and(|m| m.bip39_passphrase);
 
                 self.active = Some(paths.clone());
                 self.balance_sats = Some(summary.balance_sats);
                 self.unlocked = true;
                 self.wallet.emit(WalletPageMsg::SetWatchOnly(watch_only));
+                self.wallet
+                    .emit(WalletPageMsg::SetHasPassphrase(has_passphrase));
 
                 // The name, which this path used to leave alone. Opening a
                 // wallet from the list sets it; arriving here from an import
@@ -1716,7 +1726,11 @@ impl Component for App {
                 });
             }
 
-            AppMsg::SendNow { plan, password } => {
+            AppMsg::SendNow {
+                plan,
+                password,
+                passphrase,
+            } => {
                 // Travels with the plan, so it describes this signature and no
                 // other.
                 self.bumping = plan.replaces.clone();
@@ -1727,6 +1741,12 @@ impl Component for App {
                     ))));
                     return;
                 };
+
+                // Empty unless this wallet was set up with one, and an empty
+                // string is not the same as no passphrase: BIP-39 derives a
+                // different seed for "" than for absent, so this must stay
+                // `None` when nothing was asked for.
+                let bip39 = (!passphrase.0.is_empty()).then(|| passphrase.0.clone());
 
                 sender.oneshot_command(async move {
                     // Argon2 would hold a runtime worker for the best part of a
@@ -1754,7 +1774,7 @@ impl Component for App {
 
                     AppCmd::Sent(
                         session
-                            .sign_and_send(*plan, &text, None)
+                            .sign_and_send(*plan, &text, bip39.as_ref().map(|p| p.as_str()))
                             .await
                             .map(|(txid, summary)| (txid.to_string(), summary))
                             .map_err(|e| e.to_string()),
@@ -2613,6 +2633,8 @@ impl App {
             .emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
         self.wallet
             .emit(WalletPageMsg::SetWatchOnly(meta.watch_only));
+        self.wallet
+            .emit(WalletPageMsg::SetHasPassphrase(meta.bip39_passphrase));
         self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
             wallet::labels::Labels::load(&paths.dir),
         )));
