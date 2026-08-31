@@ -332,6 +332,47 @@ fn mono(text: &str) -> String {
     format!("<tt>{}</tt>", gtk::glib::markup_escape_text(text))
 }
 
+/// Whether a transaction answers what was typed into the search box.
+///
+/// Matched against everything a person might have in front of them: what it
+/// paid, who it paid, its own id, and the name they gave it. Case-insensitive,
+/// and anywhere in the value rather than only at the start — an address is
+/// usually copied from somewhere that shows only its middle, and the last
+/// characters of a transaction id are as identifying as the first.
+///
+/// The amount is matched twice: once as it is written on screen, so what is
+/// visible can be typed back, and once as plain satoshis, because that is the
+/// number a person reads off a block explorer.
+fn matches_search(
+    tx: &crate::wallet::TxSummary,
+    label: Option<&str>,
+    query: &str,
+    unit: crate::settings::Denomination,
+    network: &str,
+) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let has = |value: &str| value.to_lowercase().contains(&query);
+
+    if has(&tx.txid) || label.is_some_and(has) {
+        return true;
+    }
+    if tx.paid_to.iter().any(|(address, _)| has(address))
+        || tx.paid_to_self.iter().any(|out| has(&out.address))
+    {
+        return true;
+    }
+    // What it published, if anything: a message is a thing people look for.
+    if tx.data.iter().any(|(text, hex)| has(text) || has(hex)) {
+        return true;
+    }
+
+    let magnitude = tx.net_sats.unsigned_abs();
+    has(&unit.format(magnitude, network)) || has(&magnitude.to_string())
+}
+
 /// An address with an amount beside it, monospaced and wrapped without
 /// hyphens — the same treatment addresses get everywhere else, because a
 /// wrong character in an address is money.
@@ -492,6 +533,8 @@ pub struct WalletPage {
     /// Which derivation path the activity list is limited to, or `None` for
     /// all of them together, which is what it opens on.
     activity_path: Option<crate::wallet::accounts::ScriptType>,
+    /// What was typed into the search box. Empty shows everything.
+    search: String,
     /// What each row of the activity filter means, by position. The source of
     /// truth for reading a selection back, since the model holds only labels.
     activity_choices: Vec<Option<crate::wallet::accounts::ScriptType>>,
@@ -608,6 +651,8 @@ pub enum WalletPageMsg {
         txid: String,
         text: String,
     },
+    /// Narrow the activity list to what matches.
+    Search(String),
     /// Tell one more peer about a payment that has not been seen.
     Rebroadcast(String),
     /// Ask for a new fee rate for an unconfirmed payment. `cancel` decides
@@ -1479,6 +1524,22 @@ impl Component for WalletPage {
                                 },
                             },
 
+                            // Below the heading rather than beside it: an
+                            // address is long, and a field it does not fit in
+                            // is a field you cannot check what you pasted
+                            // into.
+                            gtk::SearchEntry {
+                                set_margin_top: 12,
+                                set_placeholder_text: Some(
+                                    "Search amount, address, transaction id or label"
+                                ),
+                                #[watch]
+                                set_visible: model.has_transactions(),
+                                connect_search_changed[sender] => move |entry| {
+                                    sender.input(WalletPageMsg::Search(entry.text().to_string()));
+                                },
+                            },
+
                             #[local_ref]
                             tx_list -> gtk::ListBox {
                                 add_css_class: "boxed-list",
@@ -1497,7 +1558,11 @@ impl Component for WalletPage {
                                 add_css_class: "dim-label",
                                 set_halign: gtk::Align::Center,
                                 set_margin_all: 24,
-                                set_label: "No transactions on this path",
+                                // Two ways to empty the list, and saying the
+                                // wrong one sends somebody looking at the
+                                // wrong control.
+                                #[watch]
+                                set_label: &model.nothing_shown(),
                                 #[watch]
                                 set_visible: model.filtered_to_nothing() && !model.locked,
                             },
@@ -2101,6 +2166,7 @@ impl Component for WalletPage {
             transactions,
             path_labels: Vec::new(),
             activity_path: None,
+            search: String::new(),
             activity_choices: Vec::new(),
             activity_model: gtk::StringList::new(&[]),
             receive_index: 0,
@@ -2247,6 +2313,13 @@ impl Component for WalletPage {
                 });
             }
             WalletPageMsg::ShowAddresses => self.show_addresses(root, &sender),
+
+            WalletPageMsg::Search(query) => {
+                self.search = query;
+                if let Some(summary) = self.summary.clone() {
+                    self.rebuild_transactions(&summary);
+                }
+            }
 
             WalletPageMsg::Rebroadcast(txid) => {
                 let Some(from) = self
@@ -2537,6 +2610,19 @@ impl WalletPage {
             {
                 continue;
             }
+            let label = self
+                .labels
+                .get(crate::wallet::labels::Kind::Tx, &tx.txid)
+                .map(str::to_owned);
+            if !matches_search(
+                tx,
+                label.as_deref(),
+                &self.search,
+                self.settings.denomination,
+                &summary.network,
+            ) {
+                continue;
+            }
             guard.push_back((
                 tx.clone(),
                 self.settings.denomination,
@@ -2544,9 +2630,7 @@ impl WalletPage {
                 self.price,
                 summary.network.clone(),
                 show_path,
-                self.labels
-                    .get(crate::wallet::labels::Kind::Tx, &tx.txid)
-                    .map(str::to_owned),
+                label,
             ));
         }
     }
@@ -2554,6 +2638,16 @@ impl WalletPage {
     /// Whether the filter is hiding everything the wallet has.
     fn filtered_to_nothing(&self) -> bool {
         self.has_transactions() && self.transactions.is_empty()
+    }
+
+    /// Why the list is empty when the wallet is not. The search is named
+    /// first: it is the thing just typed, and so the thing to undo.
+    fn nothing_shown(&self) -> String {
+        match (!self.search.trim().is_empty(), self.activity_path) {
+            (true, _) => format!("Nothing matches “{}”", self.search.trim()),
+            (false, Some(_)) => "No transactions on this path".to_string(),
+            (false, None) => "No transactions".to_string(),
+        }
     }
 
     /// Open one transaction as a page over the wallet.
@@ -3522,6 +3616,57 @@ fn detail_row(title: &str, value: &str) -> adw::ActionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn a_transaction() -> crate::wallet::TxSummary {
+        crate::wallet::TxSummary {
+            txid: "9894a16a8388c63e8005d6d7fd97a47ad0c2b59fbe2c26edf03921de13282c08".into(),
+            net_sats: -20_553,
+            fee_sats: Some(553),
+            height: Some(900_000),
+            seen_at: None,
+            script_type: crate::wallet::accounts::ScriptType::NativeSegwit,
+            vsize: 141,
+            inputs: 1,
+            outputs: 2,
+            paid_to: vec![("bc1qexampleaddresshere".into(), 20_000)],
+            paid_to_self: Vec::new(),
+            account_path: None,
+            replaceable: true,
+            data: vec![("sieve was here".into(), "7369657665".into())],
+            replaces: Vec::new(),
+            reused_address: false,
+            block_hash: None,
+        }
+    }
+
+    #[test]
+    fn search_matches_what_a_person_has_in_front_of_them() {
+        let tx = a_transaction();
+        let unit = crate::settings::Denomination::Sats;
+        let find = |query: &str| matches_search(&tx, Some("Boom"), query, unit, "bitcoin");
+
+        // Nothing typed shows everything, or the list empties on first focus.
+        assert!(find(""));
+        assert!(find("   "));
+
+        // The middle and the end of an id, not only the start: an id is
+        // usually copied from something that shows neither end whole.
+        assert!(find("9894a16a"));
+        assert!(find("13282c08"));
+        assert!(find("D6D7FD"), "case must not matter");
+
+        assert!(find("bc1qexample"), "an address");
+        assert!(find("Boom"), "the name given to it");
+        assert!(find("sieve was here"), "what it published");
+
+        // The amount both ways: as written on screen, and as the plain
+        // satoshis a block explorer shows.
+        assert!(find("20553"));
+        assert!(find(&unit.format(20_553, "bitcoin")));
+
+        assert!(!find("bc1qsomebodyelse"));
+        assert!(!find("41"), "a number that is in no field of this one");
+    }
 
     #[test]
     fn header_progress_is_measured_from_the_birthday() {
