@@ -43,6 +43,13 @@ and opening it is what proves the password. That gates the wallet inside Sieve
 disk**, because the descriptors and history live in SQLite that the node
 writes to on every block. Every screen that offers it says so.
 
+The same fact from the other side: **deleting `lock.sieve` removes the lock**.
+That is a real limit on what it defends — anybody with the files can take it
+off — and it is also the only way back from a forgotten password, since a
+watch-only wallet has no recovery phrase to restore from. Which is why the
+dialog that sets one asks for it twice and will not accept a pair that
+disagree.
+
 **In memory** — `src/wallet/send.rs`, `src/wallet/node.rs`
 
 The seed is decrypted at exactly two moments: signing a payment, and revealing

@@ -1136,11 +1136,56 @@ impl Component for App {
                 dialog.set_default_response(Some("cancel"));
                 dialog.set_close_response("cancel");
 
+                // Typed twice, because this password is never checked against
+                // anything the person already knows: a wallet with no keys has
+                // no coins to fail to spend, so a typo would simply lock them
+                // out of their own history with no way to notice until later.
+                let fields = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                fields.set_margin_top(6);
+
                 let entry = gtk::PasswordEntry::new();
                 entry.set_show_peek_icon(true);
                 entry.set_placeholder_text(Some("New password"));
-                entry.set_margin_top(6);
-                dialog.set_extra_child(Some(&entry));
+                fields.append(&entry);
+
+                let confirm = gtk::PasswordEntry::new();
+                confirm.set_show_peek_icon(true);
+                confirm.set_placeholder_text(Some("Type it again"));
+                fields.append(&confirm);
+
+                let mismatch = gtk::Label::new(None);
+                mismatch.add_css_class("error");
+                mismatch.add_css_class("caption");
+                mismatch.set_halign(gtk::Align::Start);
+                mismatch.set_visible(false);
+                fields.append(&mismatch);
+
+                dialog.set_extra_child(Some(&fields));
+                dialog.set_response_enabled("set", false);
+
+                // Enabled only when both fields agree and neither is empty,
+                // so the failure is visible before the button rather than in a
+                // toast afterwards.
+                let agree = {
+                    let dialog = dialog.clone();
+                    let entry = entry.clone();
+                    let confirm = confirm.clone();
+                    let mismatch = mismatch.clone();
+                    move || {
+                        let first = entry.text();
+                        let second = confirm.text();
+                        let filled = !first.trim().is_empty();
+                        let same = first == second;
+                        dialog.set_response_enabled("set", filled && same);
+                        mismatch.set_visible(!second.is_empty() && !same);
+                        mismatch.set_label("Those do not match");
+                    }
+                };
+                entry.connect_changed({
+                    let agree = agree.clone();
+                    move |_| agree()
+                });
+                confirm.connect_changed(move |_| agree());
 
                 {
                     let sender = sender.clone();
