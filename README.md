@@ -41,6 +41,16 @@ behaves like the rest of the desktop rather than like a browser in a window.
   create stated in plain words.
 - **Fee bump (RBF)** for a payment that is taking too long, with the race
   against the original explained rather than hidden.
+- **Try to cancel** an unconfirmed payment, by replacing it with one that pays
+  nobody. Called "try" because it is: the original is already out there, and if
+  it is mined first the money is gone as it was meant to be.
+- **Several recipients** in one transaction, which costs less in fees than the
+  same payments made separately and says, to anybody reading the chain, that
+  one person made all of them.
+- **Attach data** (`OP_RETURN`) to a payment, or send a transaction that only
+  carries data. Capped at 80 bytes so it relays everywhere, submitted exactly
+  as typed, and warned about honestly — with nobody paid, such a transaction
+  proves which outputs are yours rather than leaving anyone to guess.
 - **Max**, which drains a path — or, with coins chosen, exactly those coins.
 - BIP-21 payment URIs read on paste, including the amount and who is being
   paid.
@@ -97,13 +107,16 @@ Stated plainly, because a wallet that overstates itself is dangerous:
   build payments but cannot spend. PSBT export and import is designed
   (`PSBT.md`) and not written.
 - **Multisig.** Single-signature only.
-- **More than one recipient** per payment.
 - **Amounts typed in dollars.** They can be read in dollars.
+- **Searching the activity list.** It filters by derivation path, and by
+  nothing else.
 - **Storing anything the node downloads.** The version of kyoto Sieve uses
   discards the data directory it is given — `data_path: _` in its own
-  `node.rs` — so block headers and filters are fetched again on every start,
-  and a second wallet on the same network gains nothing from the first. This
-  is the largest single thing between Sieve and feeling quick.
+  `node.rs`. A synced wallet still starts from its own checkpoint, so an
+  ordinary start costs seconds rather than re-reading the chain; what it costs
+  is a **rescan** and **importing a wallet with history**, both of which fetch
+  filters from the birthday again, and a second wallet on a network gaining
+  nothing from the first.
 - **Packages.** There is no `.deb`, `.rpm` or AUR package yet — see
   `PACKAGING.md` for the plan.
 
