@@ -1,6 +1,9 @@
-# Sieve
+<h1 align="center">
+  <img src="data/icons/hicolor/256x256/apps/com.galaxoidlabs.Sieve.png" width="128" alt=""><br>
+  Sieve
+</h1>
 
-A Bitcoin wallet for Linux that keeps its business to itself.
+<p align="center">A Bitcoin wallet for Linux that keeps its business to itself.</p>
 
 Sieve syncs by downloading BIP157/158 compact block filters and matching them
 on your own machine. No server is ever told which addresses are yours, what
@@ -67,15 +70,24 @@ behaves like the rest of the desktop rather than like a browser in a window.
 - The seed is sealed with XChaCha20-Poly1305 under a key derived from your
   password with Argon2id (256 MiB, 3 passes, 4 lanes) and is decrypted only at
   the moment of signing — never held open while the wallet is on screen.
-- Watch-only wallets have no vault and no password, because there is nothing
-  to protect.
+- Watch-only wallets can have a password too. They hold no keys, so there is
+  nothing to decrypt — the password seals a known value instead, which gives a
+  hardware-wallet or descriptor wallet something to fail against rather than
+  leaving its whole history open to anyone who opens the app.
 - Idle auto-lock, and lock when the computer goes to sleep.
 
 **Looking like the rest of the desktop**
-- Light, dark, or follow the system, and the system's accent colour on primary
-  buttons — including on Omarchy, whose themes publish an accent that GNOME's
-  own settings never carry. The theme is followed live, so switching one
-  changes the wallet without restarting it.
+- Light and dark follow the desktop, with no switch of Sieve's own: an
+  application that can disagree with everything around it is an application
+  that will.
+- The system's accent colour on primary buttons — and on
+  [Omarchy](https://omarchy.org), where a theme publishes a whole palette that
+  GNOME's settings never carry, the backgrounds too. Nothing about any
+  particular theme is written down: Sieve reads the mode, the accent and three
+  surface colours out of whatever theme is current, so one you write yourself
+  works exactly like a shipped one.
+- Themes are followed live. Switching one changes the wallet without
+  restarting it, light to dark included.
 
 ## What it does not do yet
 
