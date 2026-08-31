@@ -118,6 +118,8 @@ pub enum OnboardingMsg {
     /// Whether a wallet list sits behind this screen.
     Back,
     Configured(Setup),
+    /// The chain was changed, which decides whether the warning is shown.
+    NetworkChanged(u32),
     PhraseWritten,
     Verify(Secret, Secret, Secret, Secret),
 }
@@ -135,6 +137,10 @@ pub struct Setup {
     pub passphrase: Secret,
     pub passphrase_confirm: Secret,
     pub length: wallet::PhraseLength,
+    pub network: bdk_wallet::bitcoin::Network,
+    /// Whether the warning against putting real money in unreviewed software
+    /// was read and switched past. Only asked for on bitcoin.
+    pub acknowledged: bool,
 }
 
 impl std::fmt::Debug for Setup {
@@ -179,6 +185,12 @@ pub struct Onboarding {
     /// How long the generated phrase is, which the copy and the challenge both
     /// have to agree with.
     length: wallet::PhraseLength,
+    /// Which chain this wallet will be on. Chosen before the phrase is
+    /// generated, because it decides the birthday the wallet records and there
+    /// is no changing it afterwards.
+    network: bdk_wallet::bitcoin::Network,
+    /// Whether the warning is on screen, which is only on bitcoin.
+    mainnet: bool,
     /// What to call it. Optional — an unnamed wallet still gets a stable
     /// fallback — but naming it here beats renaming it later.
     name: Option<String>,
@@ -233,6 +245,15 @@ fn phrase_warning(words: usize, passphrase: bool) -> String {
         ),
     }
 }
+
+/// The chains offered when making a wallet, bitcoin first and by default.
+///
+/// Order matters twice: it is what the picker shows, and it is what an index
+/// out of the picker means.
+const NETWORKS: [bdk_wallet::bitcoin::Network; 2] = [
+    bdk_wallet::bitcoin::Network::Bitcoin,
+    bdk_wallet::bitcoin::Network::Signet,
+];
 
 /// Three distinct 1-based positions in a phrase of `words` words.
 fn pick_challenge(words: usize) -> [usize; 3] {
@@ -406,6 +427,38 @@ impl Component for Onboarding {
                                 },
                             },
 
+                            adw::PreferencesGroup {
+                                set_title: "Network",
+
+                                #[name(network_row)]
+                                adw::ComboRow {
+                                    set_title: "Chain",
+                                    // Bitcoin first, and the default. Making
+                                    // somebody change this to reach the chain
+                                    // their money is on taught nothing; the
+                                    // warning below is what carries the point.
+                                    set_model: Some(&gtk::StringList::new(&[
+                                        "Bitcoin (real coins)",
+                                        "Signet (test coins)",
+                                    ])),
+                                    connect_selected_notify[sender] => move |row| {
+                                        sender.input(OnboardingMsg::NetworkChanged(row.selected()));
+                                    },
+                                },
+
+                                #[name(acknowledge_row)]
+                                adw::SwitchRow {
+                                    add_css_class: "warning",
+                                    set_title: "I understand this software is unreviewed",
+                                    set_subtitle: "Sieve has had no external security review. \
+                                                   Its vault format and key handling are \
+                                                   unaudited. Do not keep money here that you \
+                                                   cannot afford to lose.",
+                                    #[watch]
+                                    set_visible: model.mainnet,
+                                },
+                            },
+
                             // Its own group, well away from the password.
                             // These two are the pair this wallet must never
                             // let anybody confuse: one encrypts a file on this
@@ -460,7 +513,8 @@ impl Component for Onboarding {
                                 set_label: "Continue",
                                 connect_clicked[
                                     sender, pass_row, confirm_row, name_row, length_row,
-                                    passphrase_expander, passphrase_row, passphrase_confirm_row
+                                    passphrase_expander, passphrase_row, passphrase_confirm_row,
+                                    network_row, acknowledge_row
                                 ] => move |_| {
                                     // An unexpanded row still holds whatever
                                     // was typed before it was switched off, so
@@ -488,6 +542,9 @@ impl Component for Onboarding {
                                         } else {
                                             wallet::PhraseLength::Twelve
                                         },
+                                        network: NETWORKS
+                                            [(network_row.selected() as usize).min(1)],
+                                        acknowledged: acknowledge_row.is_active(),
                                     }));
                                 },
                             },
@@ -643,6 +700,8 @@ impl Component for Onboarding {
         let model = Onboarding {
             passphrase: None,
             length: wallet::PhraseLength::Twelve,
+            network: NETWORKS[0],
+            mainnet: true,
             step: Step::Welcome,
             can_cancel: false,
             skip_welcome: false,
@@ -687,7 +746,19 @@ impl Component for Onboarding {
                 }
             },
 
+            OnboardingMsg::NetworkChanged(index) => {
+                self.network = NETWORKS[(index as usize).min(1)];
+                self.mainnet = self.network == bdk_wallet::bitcoin::Network::Bitcoin;
+            }
+
             OnboardingMsg::Configured(setup) => {
+                // Real money in software nobody has reviewed is a decision,
+                // and it is made here rather than discovered later.
+                if setup.network == bdk_wallet::bitcoin::Network::Bitcoin && !setup.acknowledged {
+                    self.error =
+                        Some("Switch on the acknowledgement to make a wallet on bitcoin.".into());
+                    return;
+                }
                 if setup.password.0.len() < 8 {
                     self.error = Some("Use at least 8 characters.".into());
                     return;
@@ -712,6 +783,7 @@ impl Component for Onboarding {
                     self.passphrase = None;
                 }
                 self.length = setup.length;
+                self.network = setup.network;
                 match wallet::generate_mnemonic(setup.length) {
                     Ok(phrase) => {
                         {
@@ -785,7 +857,7 @@ impl Component for Onboarding {
                 let paths = Paths::for_wallet(&Paths::new_id());
                 // A wallet created here is new, so its birthday is simply the
                 // newest checkpoint this build knows about.
-                let network = wallet::DEFAULT_NETWORK;
+                let network = self.network;
                 let birthday = wallet::checkpoints(network)[0];
                 // Taproot to receive on, with native segwit alongside it.
                 // Taproot is the better address to hand out — a single-sig
@@ -872,6 +944,17 @@ mod tests {
                 step.tag()
             );
         }
+    }
+
+    #[test]
+    fn the_first_chain_offered_is_the_one_with_real_money_on_it() {
+        // The picker's order and this list have to agree: an index out of the
+        // combo row means whatever this array says it means, and getting that
+        // backwards would make a wallet on the chain nobody asked for — with
+        // no way to move it afterwards, since the network is baked into the
+        // descriptors and the birthday.
+        assert_eq!(NETWORKS[0], bdk_wallet::bitcoin::Network::Bitcoin);
+        assert_eq!(NETWORKS[1], bdk_wallet::bitcoin::Network::Signet);
     }
 
     #[test]

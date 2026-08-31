@@ -34,8 +34,12 @@ pub mod watch;
 
 use crate::vault;
 
-/// Until network selection lands in the UI, everything defaults here. Mainnet
-/// stays unreachable from the interface until M8.
+/// The chain assumed when a wallet's own metadata cannot say.
+///
+/// Not the default for anything a person chooses any more: both making a
+/// wallet and importing one ask, and both offer bitcoin first. This is the
+/// fallback for reading a wallet whose network is unreadable, where signet is
+/// the answer that cannot spend real money by mistake.
 pub const DEFAULT_NETWORK: Network = Network::Signet;
 
 /// A block known to predate any wallet on a given network, used when the true

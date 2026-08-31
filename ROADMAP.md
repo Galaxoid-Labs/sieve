@@ -194,7 +194,10 @@ as AAD), atomic writes, process hardening, six vault tests.
 - [x] Restore from a recovery phrase, a WIF key, or (stub) a descriptor
 - [x] Optional BIP-39 passphrase on restore, kept distinct from the wallet password
 - [x] All four standard derivation paths searched on import, with a per-path breakdown
-- [x] Mainnet selectable on import behind an explicit unreviewed-software acknowledgement
+- [x] Mainnet selectable on import behind an explicit unreviewed-software acknowledgement,
+      and **selectable when creating a wallet too** — which it was not, so every wallet made
+      in Sieve was a signet wallet with no way to say otherwise. Bitcoin is first and default
+      on both.
 - [x] A BIP-39 passphrase when *creating* a wallet, and a choice of 12 or 24 words. Both on
       the first step, in a group of their own away from the password — the two things this
       wallet must never let anybody confuse. Both conditions this was waiting on are met: the
@@ -425,10 +428,12 @@ and the order of work.
 - [ ] `org.freedesktop.portal.Secret`, reproducible builds, and external review of the vault
       format and the signing path.
 
-**Mainnet is *not* currently gated, and this line has been wrong for a while.**
-`ui/restore.rs` lets mainnet through behind an acknowledgement, and the wallet has been run
-against mainnet with real coins. Either the gate becomes real or this stops claiming one;
-what it must not do is keep saying something the code does not do.
+**Mainnet is not gated, and this milestone no longer claims it is.** Both making a wallet
+and importing one offer bitcoin first and by default, behind a switch acknowledging that the
+software is unreviewed. The gate was never real — `ui/restore.rs` had let mainnet through for
+a long time, and the wallet has been run against it with real coins — and a signet default
+that somebody had to change to reach their own money taught nobody anything. The
+acknowledgement is a sentence people read; a wrong default is a step people click past.
 
 ## Before anyone else runs it
 

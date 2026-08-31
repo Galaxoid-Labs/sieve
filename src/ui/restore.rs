@@ -104,11 +104,16 @@ pub struct Restore {
     birthday_model: gtk::StringList,
 }
 
-/// Networks offered, signet first so the safe option is the default.
+/// Networks offered, bitcoin first because importing a seed almost always
+/// means importing a real one. Signet was the default while mainnet was a
+/// thing the interface half-allowed; making somebody change it to reach the
+/// chain their money is on was a step that taught nothing. The
+/// acknowledgement below is what carries the warning now, and it is a
+/// sentence rather than a wrong default.
 fn networks() -> [bdk_wallet::bitcoin::Network; 2] {
     [
-        bdk_wallet::bitcoin::Network::Signet,
         bdk_wallet::bitcoin::Network::Bitcoin,
+        bdk_wallet::bitcoin::Network::Signet,
     ]
 }
 
@@ -347,7 +352,7 @@ impl Component for Restore {
                     #[name(network_row)]
                     adw::ComboRow {
                         set_title: "Chain",
-                        set_model: Some(&gtk::StringList::new(&["Signet (test coins)", "Bitcoin (real coins)"])),
+                        set_model: Some(&gtk::StringList::new(&["Bitcoin (real coins)", "Signet (test coins)"])),
                         connect_selected_notify[sender] => move |row| {
                             sender.input(RestoreMsg::NetworkChanged(row.selected()));
                         },
@@ -483,7 +488,7 @@ impl Component for Restore {
         let model = Restore {
             // Hardware is first in the list, so it is what the form opens on.
             kind: KINDS[0],
-            network: bdk_wallet::bitcoin::Network::Signet,
+            network: bdk_wallet::bitcoin::Network::Bitcoin,
             birthday_index: 1,
             busy: false,
             error: None,
