@@ -50,6 +50,10 @@ pub struct Draft {
     /// Bytes to publish in an `OP_RETURN` output, if any. Exactly what was
     /// typed, as UTF-8 — not trimmed, not normalised. Altering a payload
     /// somebody is about to make permanent is the one thing this must not do.
+    ///
+    /// One, not a list. More than one data output is standard under Core 30's
+    /// relaxed policy and is refused by everything older, so building a second
+    /// would be offering somebody a transaction that might never relay.
     pub data: Option<Vec<u8>>,
     pub fee_rate: FeeRate,
     /// Which coins to spend. Empty means "choose for me", which is what most
@@ -68,15 +72,17 @@ pub struct Draft {
 /// silent: a node that will not relay simply does not.
 pub const MAX_DATA: usize = 80;
 
-/// The bytes a transaction publishes, if it publishes any.
+/// Everything a transaction publishes, in the order the outputs appear.
 ///
-/// Read back off the transaction rather than remembered, so a replacement of
-/// somebody else's making reports what it actually carries.
-pub(super) fn data_in(tx: &bdk_wallet::bitcoin::Transaction) -> Option<Vec<u8>> {
+/// A list, though Sieve only ever builds one: this reads transactions other
+/// software made, and Bitcoin Core 30 relaxed the rule that allowed only a
+/// single data output. Showing the first and dropping the rest would be a
+/// quiet half-truth on a screen whose job is saying what a transaction did.
+pub(super) fn data_in(tx: &bdk_wallet::bitcoin::Transaction) -> Vec<Vec<u8>> {
     tx.output
         .iter()
-        .find(|out| out.script_pubkey.is_op_return())
-        .and_then(|out| {
+        .filter(|out| out.script_pubkey.is_op_return())
+        .filter_map(|out| {
             out.script_pubkey
                 .instructions()
                 .flatten()
@@ -87,6 +93,7 @@ pub(super) fn data_in(tx: &bdk_wallet::bitcoin::Transaction) -> Option<Vec<u8>> 
                     _ => None,
                 })
         })
+        .collect()
 }
 
 /// One recipient of a payment.
@@ -113,10 +120,12 @@ pub struct Plan {
     /// What that payment was paying, so the increase can be shown rather than
     /// only the new figure.
     pub was_fee: Option<u64>,
-    /// What this transaction publishes, if anything. Kept so the review
-    /// dialog can show it: it is about to become permanent and public, and
-    /// this is the last screen on which it can be read before that.
-    pub data: Option<Vec<u8>>,
+    /// What this transaction publishes. Kept so the review dialog can show
+    /// it: it is about to become permanent and public, and this is the last
+    /// screen on which it can be read before that. A list because a
+    /// replacement rebuilds whatever the original carried, which Sieve did not
+    /// necessarily build.
+    pub data: Vec<Vec<u8>>,
     /// Whether this replacement pays nobody — the same coins back to this
     /// wallet, to call the original off. Every screen has to say so: the
     /// numbers alone read as a payment to yourself, and `total()` would
@@ -1092,7 +1101,7 @@ mod tests {
             payees,
             fee: Amount::from_sat(500),
             change: None,
-            data: None,
+            data: Vec::new(),
             replaces: None,
             was_fee: None,
             cancels: false,
@@ -1158,7 +1167,7 @@ mod tests {
             "a data output must not be reported as somebody being paid"
         );
         assert!(change.is_some(), "the money came back");
-        assert_eq!(data_in(&psbt.unsigned_tx).as_deref(), Some(&message[..]));
+        assert_eq!(data_in(&psbt.unsigned_tx), vec![message.to_vec()]);
 
         // And with somebody paid, they are the only payee.
         let stranger =
@@ -1174,6 +1183,48 @@ mod tests {
         assert_eq!(payees.len(), 1, "{payees:?}");
         assert_eq!(payees[0].0, stranger.to_string());
         assert_eq!(payees[0].1, Amount::from_sat(20_000));
+    }
+
+    #[test]
+    fn every_data_output_is_read_not_just_the_first() {
+        // Sieve builds one, because a second is refused by everything older
+        // than Core 30. But this reads transactions other software made, and
+        // showing the first while dropping the rest is a quiet half-truth on
+        // the screen that says what a transaction did.
+        let script = |bytes: &[u8]| {
+            let push: &bdk_wallet::bitcoin::script::PushBytes = bytes.try_into().unwrap();
+            ScriptBuf::new_op_return(push)
+        };
+        let carrying_two = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: script(b"first"),
+                },
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: parse_address(
+                        "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+                        Network::Signet,
+                    )
+                    .unwrap()
+                    .script_pubkey(),
+                },
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: script(b"second"),
+                },
+            ],
+        };
+
+        assert_eq!(
+            data_in(&carrying_two),
+            vec![b"first".to_vec(), b"second".to_vec()],
+            "both, in the order the outputs appear"
+        );
     }
 
     #[test]
@@ -1193,7 +1244,7 @@ mod tests {
                     .script_pubkey(),
             }],
         };
-        assert_eq!(data_in(&plain), None);
+        assert!(data_in(&plain).is_empty());
     }
 
     #[test]
@@ -1217,7 +1268,7 @@ mod tests {
             )],
             fee: Amount::from_sat(900),
             change: Some(Amount::from_sat(59_100)),
-            data: None,
+            data: Vec::new(),
             replaces: Some("an id".into()),
             was_fee: Some(300),
             cancels,

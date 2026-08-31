@@ -2697,11 +2697,17 @@ impl WalletPage {
         // review dialog showed them: the text is what somebody meant and the
         // hex is what is actually on the chain, and this is the only screen
         // where either can be read again.
-        if let Some((text, hex)) = &tx.data {
+        // Numbered only when there is more than one, so the ordinary case
+        // does not read as an excerpt from a longer list.
+        for (position, (text, hex)) in tx.data.iter().enumerate() {
+            let title = match tx.data.len() {
+                1 => "Message".to_string(),
+                _ => format!("Message {}", position + 1),
+            };
             // Escaped by `mono`, which matters more here than anywhere else in
             // the app: this is the one field carrying bytes somebody else
             // chose into markup.
-            let message = mono_row("Message", &format!("{text}\n{hex}"));
+            let message = mono_row(&title, &format!("{text}\n{hex}"));
             message.set_subtitle_lines(4);
             message.add_css_class("full-contrast");
             status.add(&message);

@@ -1777,7 +1777,7 @@ impl SendForm {
         // hex is what actually goes on the chain, and the two differ whenever
         // an invisible character or an encoding surprise is involved. This is
         // the last screen on which either can be read.
-        if let Some(data) = plan.data.as_deref() {
+        for data in &plan.data {
             let hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
             body.push_str(&format!(
                 "\n\n<tt>{}</tt>\n<tt>{}</tt>\n{} bytes, public and permanent",

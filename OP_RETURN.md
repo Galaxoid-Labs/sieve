@@ -146,6 +146,18 @@ Then:
   it first, and "Enter an address to pay" already says the right thing.
 - **The review dialog** shows the data as text *and* as hex. Text alone hides
   what is really being written; hex alone is unreadable.
+- **Reading is a list, writing is not.** Sieve builds one data output,
+  because a second is refused by everything older than Core 30 and offering
+  somebody a transaction that might never relay is not a feature. What it
+  *reads* has to cope with more, since the activity list covers transactions
+  other software made: showing the first and dropping the rest would be a quiet
+  half-truth on the screen that says what a transaction did. The detail page
+  numbers them only when there is more than one.
+- **One message per transaction, not per recipient.** The data belongs to the
+  transaction, so paying three people with a message attached gives all three
+  the same one, and nothing on chain says which it refers to. Per-recipient
+  references mean separate transactions — which is also the better privacy
+  answer, since batching already says the three payments came from one person.
 - **The transaction detail** should show the message on a transaction that
   carries one. It is the nicest part of the feature, and it is also the only
   place the data is ever readable again.

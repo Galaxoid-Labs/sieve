@@ -675,7 +675,7 @@ impl Session {
             change: Some(psbt.unsigned_tx.output.iter().map(|o| o.value).sum()),
             fee,
             // A cancellation drops the original's outputs, data included.
-            data: None,
+            data: Vec::new(),
             replaces: Some(txid.to_string()),
             was_fee: Some(was),
             cancels: true,
