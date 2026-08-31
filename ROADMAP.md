@@ -245,6 +245,16 @@ crosses a component boundary as a message.
 - [x] Password only at signing, in an `adw::AlertDialog` that restates every number.
 - [x] Signing from the vault, checked against the account's descriptor first.
 - [x] Broadcast via `Requester::submit_package`, then recorded locally as unconfirmed.
+- [x] **Broadcast again**, on an unconfirmed payment. kyoto announces to exactly one random
+      peer, which is plenty for an ordinary payment and a coin toss for anything a peer might
+      refuse on policy — and the refusal is silent, BIP-61 `reject` being long gone. The first
+      transaction Sieve sent carrying an `OP_RETURN` never reached a mempool; one press of
+      this put it there. Above the fee rows on purpose: a payment nobody has seen usually does
+      not need to pay more. Asked for rather than done on a timer, since each announcement is
+      another peer told the transaction is probably ours.
+- [x] Say what a broadcast actually knows. `submit_package` returns once a transaction is
+      queued and announced; nothing ever reports acceptance. The error claimed "no peer
+      accepted the transaction", which is a conclusion that call cannot reach.
 - [x] Drain the wallet ("Max"), where the fee comes out of the amount.
 - [x] Fee suggestion from `average_fee_rate`, fetched once per tip when the send form comes
       into view, with the block it came from named under the field.
@@ -377,6 +387,13 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       leaves the machine.
 
 ### M7 — Lock and key hygiene
+
+- [x] `PR_SET_DUMPABLE(0)` is lifted for the length of a file dialog and restored after.
+      Setting it makes the kernel re-own `/proc/<pid>` to root, so `xdg-desktop-portal`
+      cannot identify the caller and refuses it everything — the file chooser included, in
+      silence. Every file dialog in Sieve did nothing until this was found, and it would have
+      made PSBT export appear broken on arrival. `RLIMIT_CORE=0` is not lifted, and signing is
+      never inside the window; see `SECURITY.md`.
 - [x] Idle auto-lock, with the interval a preference and a "Lock now" beside it.
 - [x] Lock on suspend, via logind `PrepareForSleep` over the D-Bus GIO already provides.
 - [x] A lock for watch-only wallets, which had none at all: `lock.sieve` seals a known
