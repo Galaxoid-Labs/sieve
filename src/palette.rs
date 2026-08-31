@@ -27,12 +27,13 @@ pub struct Palette {
     pub accent: String,
 }
 
-/// Where Omarchy keeps the theme currently applied.
+/// Where Omarchy keeps the theme currently applied, under a state directory.
 ///
 /// A symlink into the theme's own directory, so this follows a theme change
-/// without anything being copied.
-fn omarchy_colors() -> PathBuf {
-    dirs_state().join("omarchy/current/theme/colors.toml")
+/// without anything being copied. Taking the base as an argument is what lets
+/// the "no palette here" case be tested rather than asserted.
+fn omarchy_colors(state: &std::path::Path) -> PathBuf {
+    state.join("omarchy/current/theme/colors.toml")
 }
 
 fn dirs_state() -> PathBuf {
@@ -57,7 +58,12 @@ pub fn watch_dir() -> PathBuf {
 /// somebody runs Omarchy's theming on plain Arch, or if the file is missing on
 /// a half-installed Omarchy.
 pub fn desktop() -> Option<Palette> {
-    let text = std::fs::read_to_string(omarchy_colors()).ok()?;
+    desktop_in(&dirs_state())
+}
+
+/// The same, under a given state directory.
+fn desktop_in(state: &std::path::Path) -> Option<Palette> {
+    let text = std::fs::read_to_string(omarchy_colors(state)).ok()?;
     parse(&text)
 }
 
@@ -134,6 +140,30 @@ fn luminance(hex: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A desktop that publishes no palette must be left entirely alone: GNOME
+    /// sets its own accent, libadwaita applies it, and Sieve has nothing to
+    /// add. Anything else here would be a regression on every machine that is
+    /// not this one.
+    #[test]
+    fn a_desktop_without_a_palette_is_left_alone() {
+        let empty = std::env::temp_dir().join(format!("sieve-nopalette-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            desktop_in(&empty).is_none(),
+            "found a palette where there is none"
+        );
+
+        // And a file that exists but says nothing useful is the same case,
+        // rather than a reason to write half a stylesheet.
+        let broken = empty.join("omarchy/current/theme");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("colors.toml"), "mode = \"dark\"\n").unwrap();
+        assert!(desktop_in(&empty).is_none());
+
+        std::fs::remove_dir_all(&empty).ok();
+    }
 
     #[test]
     fn reads_the_accent_out_of_a_theme_file() {
