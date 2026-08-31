@@ -112,7 +112,6 @@ pub enum OnboardingMsg {
     /// somewhere to go back to, and the welcome step has already been answered.
     EnteredByChoice,
     /// Whether a wallet list sits behind this screen.
-    CanCancel(bool),
     Back,
     SetPassword(Secret, Secret, String),
     PhraseWritten,
@@ -513,7 +512,6 @@ impl Component for Onboarding {
                 self.skip_welcome = true;
                 self.step = Step::Password;
             }
-            OnboardingMsg::CanCancel(can) => self.can_cancel = can,
             OnboardingMsg::Begin => self.step = Step::Password,
 
             OnboardingMsg::Restore => {
@@ -576,7 +574,6 @@ impl Component for Onboarding {
                     return;
                 }
 
-                let name = self.name.clone();
                 let (Some(mnemonic), Some(password)) =
                     (self.mnemonic.clone(), self.password.clone())
                 else {

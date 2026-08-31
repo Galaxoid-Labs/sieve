@@ -70,11 +70,6 @@ pub fn find_binary() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Is there a Tor we could run, one way or another?
-pub fn available() -> bool {
-    super::detect().is_some() || find_binary().is_some()
-}
-
 /// Where the port of a Tor we started is written, and where its pid goes.
 ///
 /// Tor refuses to share a data directory, so a copy left behind by a previous

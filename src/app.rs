@@ -89,12 +89,24 @@ pub struct App {
     session: Option<Arc<Session>>,
     chooser: Controller<Chooser>,
     onboarding: Controller<Onboarding>,
+    // Never read, and must not be dropped: a Relm4 controller shuts its
+    // component down when it goes, so this field is what keeps the restore
+    // screen alive between visits.
+    #[allow(dead_code)]
     restore: Controller<Restore>,
     /// Whether this session's block count has been written down yet. Once per
     /// session: later updates are new tips arriving, not this scan.
     blocks_recorded: bool,
-    /// The payment a replacement is replacing, held between building it and
-    /// broadcasting it so the label can follow.
+    /// Dropping this unsubscribes from logind, so it is held for the life of
+    /// the app rather than let go at the end of `init`.
+    sleep_watch: Option<gtk::gio::SignalSubscription>,
+    /// The payment a replacement is replacing, taken from the plan at the
+    /// moment of signing and cleared when the broadcast lands.
+    ///
+    /// Set from `Plan::replaces` rather than when the bump was asked for:
+    /// asking is not doing. A dialog opened and cancelled used to leave this
+    /// set, and the next ordinary payment inherited the old one's label, its
+    /// "fee raised" toast, and its navigation.
     bumping: Option<String>,
     /// When somebody last touched this window. What the idle lock counts from.
     ///
@@ -136,32 +148,39 @@ const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(15);
 /// with no logind simply never signals, which is why every step here fails
 /// quietly: locking is a precaution, and a precaution that cannot be armed is
 /// not an error worth putting in front of anybody.
-fn watch_for_sleep(sender: &ComponentSender<App>) {
+fn watch_for_sleep(sender: &ComponentSender<App>) -> Option<gtk::gio::SignalSubscription> {
     let Ok(bus) = gtk::gio::bus_get_sync(gtk::gio::BusType::System, gtk::gio::Cancellable::NONE)
     else {
         tracing::debug!("no system bus; the wallet will not lock on sleep");
-        return;
+        return None;
     };
 
     let sender = sender.clone();
-    bus.signal_subscribe(
+    // The returned subscription unsubscribes when it is dropped, so the caller
+    // holds it for as long as the app is running.
+    let watch = bus.subscribe_to_signal(
         Some("org.freedesktop.login1"),
         Some("org.freedesktop.login1.Manager"),
         Some("PrepareForSleep"),
         Some("/org/freedesktop/login1"),
         None,
         gtk::gio::DBusSignalFlags::NONE,
-        move |_, _, _, _, _, parameters| {
+        move |signal| {
             // The signal fires twice: `true` on the way down, `false` on the
             // way back. Locking on the way down is the point — afterwards the
             // machine has already been asleep with the wallet open.
-            let going_to_sleep = parameters.child_value(0).get::<bool>().unwrap_or(false);
+            let going_to_sleep = signal
+                .parameters
+                .child_value(0)
+                .get::<bool>()
+                .unwrap_or(false);
             if going_to_sleep {
                 sender.input(AppMsg::Lock(LockReason::Suspend));
             }
         },
     );
     tracing::debug!("will lock when this computer goes to sleep");
+    Some(watch)
 }
 
 /// Whether an untouched wallet has been untouched for long enough.
@@ -427,7 +446,6 @@ impl Component for App {
                     ChooserOutput::Open(id) => AppMsg::OpenWallet(id),
                     ChooserOutput::New => AppMsg::ShowOnboarding,
                     ChooserOutput::Import => AppMsg::ShowRestore,
-                    ChooserOutput::Back => AppMsg::Back,
                 });
         let onboarding = Onboarding::builder()
             .launch(())
@@ -447,14 +465,12 @@ impl Component for App {
             .launch(())
             .forward(sender.input_sender(), |out| match out {
                 UnlockOutput::Unlocked { paths, summary } => AppMsg::Ready { paths, summary },
-                UnlockOutput::SwitchWallet => AppMsg::Back,
             });
         let reveal = Reveal::builder().launch(()).detach();
         let wallet =
             WalletPage::builder()
                 .launch(())
                 .forward(sender.input_sender(), |out| match out {
-                    crate::ui::wallet_page::WalletPageOutput::SwitchWallet => AppMsg::ShowWallets,
                     crate::ui::wallet_page::WalletPageOutput::ShowPreferences => {
                         AppMsg::ShowPreferences
                     }
@@ -594,8 +610,9 @@ impl Component for App {
             move |_| sender.input(AppMsg::UnlockClosed)
         });
 
-        let model = App {
+        let mut model = App {
             blocks_recorded: false,
+            sleep_watch: None,
             bumping: None,
             last_seen: std::time::Instant::now(),
             stirs: 0,
@@ -661,7 +678,7 @@ impl Component for App {
             root.add_controller(watching);
         }
         model.watch_for_idle(&sender);
-        watch_for_sleep(&sender);
+        model.sleep_watch = watch_for_sleep(&sender);
 
         // The one opened last, if it is still there. Falling back to the
         // first by name is a sort order, not a choice anybody made.
@@ -1043,9 +1060,6 @@ impl Component for App {
                 from,
                 fee_rate,
             } => {
-                // Remembered now so the label can follow the payment if this
-                // one is the one that gets broadcast.
-                self.bumping = Some(txid.clone());
                 let Some(session) = self.session.clone() else {
                     self.wallet.emit(WalletPageMsg::BumpPlanned(Box::new(Err(
                         "Not connected to the network yet — wait for peers".into(),
@@ -1429,6 +1443,9 @@ impl Component for App {
             }
 
             AppMsg::SendNow { plan, password } => {
+                // Travels with the plan, so it describes this signature and no
+                // other.
+                self.bumping = plan.replaces.clone();
                 let (Some(session), Some(paths)) = (self.session.clone(), self.active.clone())
                 else {
                     self.wallet.emit(WalletPageMsg::Sent(Box::new(Err(

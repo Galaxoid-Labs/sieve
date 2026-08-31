@@ -18,8 +18,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Copy)]
 pub struct Price {
     pub usd: f64,
-    /// Fraction, so 0.009 is +0.9% over the day.
-    pub change_24h: f64,
 }
 
 impl Price {
@@ -87,10 +85,7 @@ fn parse(body: &str) -> Result<Price> {
         ));
     }
 
-    Ok(Price {
-        usd,
-        change_24h: fields.get(5).copied().unwrap_or(0.0),
-    })
+    Ok(Price { usd })
 }
 
 #[cfg(test)]
@@ -114,7 +109,6 @@ mod tests {
                     78137,405.09223597,78351,77254,1358182043000]";
         let price = parse(body).unwrap();
         assert_eq!(price.usd, 78137.0);
-        assert!((price.change_24h - 0.00902658).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -128,10 +122,7 @@ mod tests {
 
     #[test]
     fn converts_sats_to_value() {
-        let price = Price {
-            usd: 100_000.0,
-            change_24h: 0.0,
-        };
+        let price = Price { usd: 100_000.0 };
         assert!((price.value_of(100_000_000) - 100_000.0).abs() < 0.01);
         assert!((price.value_of(53_713) - 53.713).abs() < 0.01);
     }

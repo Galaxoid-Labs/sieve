@@ -101,6 +101,10 @@ impl ScriptType {
     /// Taproot did not exist before block 709,632, so a BIP86 wallet scanned
     /// from earlier is scanning blocks it cannot match. The others go back to
     /// the beginning.
+    // Under test rather than in use: no scan currently starts from a script
+    // type's own floor, but the fact that taproot did not exist before block
+    // 709,632 is worth keeping true.
+    #[allow(dead_code)]
     pub fn earliest_possible(self, network: Network) -> Option<u32> {
         match (self, network) {
             (ScriptType::Taproot, Network::Bitcoin) => Some(709_632),

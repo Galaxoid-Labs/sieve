@@ -176,6 +176,9 @@ pub fn checkpoints(network: Network) -> &'static [Checkpoint] {
 ///
 /// Always rounds *earlier*. Starting too early costs time; starting too late
 /// loses coins.
+// Read by the tests that hold its rule — a birthday must always round
+// earlier — rather than by the app, which reaches for `birthday_choices`.
+#[allow(dead_code)]
 pub fn checkpoint_at_or_before(network: Network, height: u32) -> Checkpoint {
     let all = checkpoints(network);
     all.iter()

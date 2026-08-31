@@ -1015,7 +1015,6 @@ fn explain_bump(error: bdk_wallet::error::BuildFeeBumpError) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct ChainInfo {
     pub tip_height: u32,
-    pub tip_hash: String,
     /// Timestamp in the tip's header.
     pub tip_time: Option<u64>,
     pub difficulty: f64,
@@ -1241,7 +1240,6 @@ impl Session {
 
         let mut info = ChainInfo {
             tip_height: tip.height,
-            tip_hash: tip.hash.to_string(),
             blocks_to_retarget: RETARGET_INTERVAL - (tip.height % RETARGET_INTERVAL),
             ..Default::default()
         };

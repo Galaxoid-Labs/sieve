@@ -14,7 +14,6 @@ use crate::wallet::send::{Draft, Plan};
 
 #[derive(Debug)]
 pub enum WalletPageOutput {
-    SwitchWallet,
     /// Throw away this wallet's chain data and scan again from its birthday.
     /// The app owns the node, so it owns the confirmation too.
     AskRescan,
@@ -474,14 +473,11 @@ pub struct WalletPage {
     locked: bool,
     name: String,
     transactions: FactoryVecDeque<TxRow>,
-    /// Backing model for the address-type picker.
+    /// The set of paths this wallet watches, as last seen.
     ///
-    /// Held and mutated in place rather than rebuilt under `#[watch]`: swapping
-    /// a ComboRow's model resets its selection, so a rebuild on every view
-    /// update would snap the picker back while someone was using it.
-    path_model: gtk::StringList,
-    /// Labels currently in `path_model`, so it is only rewritten when the set
-    /// of paths genuinely changes.
+    /// Only a change detector: the receive picker is four toggle buttons
+    /// rather than a model-backed list, and what this guards is the default
+    /// selection, which must not be recomputed on every sync.
     path_labels: Vec<String>,
     /// Which derivation path the activity list is limited to, or `None` for
     /// all of them together, which is what it opens on.
@@ -489,8 +485,9 @@ pub struct WalletPage {
     /// What each row of the activity filter means, by position. The source of
     /// truth for reading a selection back, since the model holds only labels.
     activity_choices: Vec<Option<crate::wallet::accounts::ScriptType>>,
-    /// Backing model for that filter, held and spliced for the same reason
-    /// `path_model` is.
+    /// Backing model for that filter, held and spliced rather than rebuilt:
+    /// swapping a dropdown's model resets its selection, and the selection is
+    /// the filter.
     activity_model: gtk::StringList,
     receive_index: u32,
     /// Which path the receive view is showing. By type, not by position: the
@@ -556,7 +553,6 @@ pub enum WalletPageMsg {
     Note(String),
     Failed(String),
     CopyAddress,
-    SwitchWallet,
     /// Which unit amounts are shown in. Owned by the app, since the
     /// preferences dialog is where it is changed.
     SetDenomination(crate::settings::Denomination),
@@ -622,8 +618,6 @@ pub enum WalletPageMsg {
     FeeSuggestion(f64, String),
     Planned(Box<Result<Plan, String>>),
     Sent(Box<Result<String, String>>),
-    /// Choose which derivation path to receive on.
-    SelectReceivePath(u32),
     /// Limit the activity list to one derivation path, or lift the limit.
     FilterActivity(u32),
     SelectPath(crate::wallet::accounts::ScriptType),
@@ -2039,7 +2033,6 @@ impl Component for WalletPage {
             peers_list,
             name: "Sieve".into(),
             transactions,
-            path_model: gtk::StringList::new(&[]),
             path_labels: Vec::new(),
             activity_path: None,
             activity_choices: Vec::new(),
@@ -2060,7 +2053,6 @@ impl Component for WalletPage {
         let unhyphenated = gtk::pango::AttrList::new();
         unhyphenated.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
         let peers_box = model.peers_list.widget();
-        let path_model = model.path_model.clone();
         let activity_model = model.activity_model.clone();
         let widgets = view_output!();
 
@@ -2137,12 +2129,6 @@ impl Component for WalletPage {
                         self.rebuild_transactions(&summary);
                     }
                 }
-            }
-            WalletPageMsg::SelectReceivePath(index) => {
-                self.receive_index = index;
-                // The fresh address belonged to the path being left.
-                self.fresh_address = None;
-                self.refresh_address_label();
             }
             WalletPageMsg::NewAddress => {
                 if let Some(summary) = &self.summary
@@ -2356,7 +2342,6 @@ impl Component for WalletPage {
                 self.receive_path = None;
                 self.fresh_address = None;
                 self.path_labels.clear();
-                self.path_model.splice(0, self.path_model.n_items(), &[]);
                 self.activity_path = None;
                 self.activity_choices.clear();
                 self.activity_model
@@ -2368,9 +2353,6 @@ impl Component for WalletPage {
                 self.chain = None;
                 self.peers_list.guard().clear();
                 self.price = None;
-            }
-            WalletPageMsg::SwitchWallet => {
-                let _ = sender.output(WalletPageOutput::SwitchWallet);
             }
             WalletPageMsg::Show(summary) => {
                 // Rebuild rather than diff: four rows, and the set only changes
@@ -2809,10 +2791,20 @@ impl WalletPage {
         let page = adw::PreferencesPage::new();
         let group = adw::PreferencesGroup::new();
         group.set_title("Handed out");
-        group.set_description(Some(
-            "Every address this wallet has given out, oldest first. Change addresses are not \
-             here: they belong to a payment rather than to anybody.",
-        ));
+        // Which paths are in the list, since a wallet imported from a device
+        // watches four and they are interleaved here by age rather than kept
+        // apart.
+        let mut paths: Vec<&'static str> = summary
+            .addresses
+            .iter()
+            .map(|entry| entry.script_type.label())
+            .collect();
+        paths.dedup();
+        group.set_description(Some(&format!(
+            "Every address this wallet has given out, oldest first, across {}. Change \
+             addresses are not here: they belong to a payment rather than to anybody.",
+            paths.join(", ")
+        )));
 
         // Oldest first within a path, and paths in the order the ecosystem
         // grew — the same order everything else in Sieve lists them.
@@ -2988,14 +2980,33 @@ impl WalletPage {
 
         let was = plan.was_fee.unwrap_or(0);
         let now = plan.fee.to_sat();
-        let body = format!(
-            "The recipient still gets {}.\n\nFee was {}\nFee becomes {}\nThat is {} more.\n\n\
-             The replacement spends the same coins as the original, so only one of them can \
-             confirm.",
+        let rate = plan
+            .fee_rate()
+            .map(|rate| format!(" · about {:.1} sat/vB", rate.to_sat_per_vb_ceil()))
+            .unwrap_or_default();
+        let mut body = format!(
+            "The recipient still gets {}.\n\nFee was {}\nFee becomes {}{rate}\nThat is {} \
+             more.",
             unit.format(plan.spend.to_sat(), network),
             unit.format(was, network),
             unit.format(now, network),
             unit.format(now.saturating_sub(was), network),
+        );
+        // Where the extra comes from, which is the part somebody would want to
+        // check: normally the change, and if there is none, another coin.
+        match plan.change {
+            Some(change) => body.push_str(&format!(
+                "\n\nComing back to you {}",
+                unit.format(change.to_sat(), network)
+            )),
+            None => body.push_str(
+                "\n\nNothing comes back to you from this one — the fee is taking what change \
+                 there was.",
+            ),
+        }
+        body.push_str(
+            "\n\nThe replacement spends the same coins as the original, so only one of them \
+             can confirm.",
         );
 
         let dialog = adw::AlertDialog::new(Some("Replace this payment?"), Some(&body));
@@ -3174,8 +3185,6 @@ impl WalletPage {
             return;
         }
 
-        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        self.path_model.splice(0, self.path_model.n_items(), &refs);
         self.path_labels = labels;
 
         // Default to the wallet's primary path rather than whatever happens to

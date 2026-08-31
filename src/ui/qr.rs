@@ -4,10 +4,9 @@
 //! is involved, which matters: handing an address to a QR API would tell that
 //! service exactly what a block explorer lookup would.
 
-use relm4::gtk;
 use relm4::gtk::gdk;
 use relm4::gtk::glib::Bytes;
-use relm4::gtk::prelude::{Cast, TextureExt};
+use relm4::gtk::prelude::Cast;
 
 /// Every code is rendered onto a canvas of this side, whatever version it is.
 ///
@@ -88,6 +87,9 @@ pub fn payment_uri(address: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests measure a texture; a normal build has no use for this,
+    // and importing it at the top made it look unused.
+    use relm4::gtk::prelude::TextureExt;
 
     #[test]
     fn encodes_a_bip21_uri() {

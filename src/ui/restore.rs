@@ -41,7 +41,6 @@ pub struct Submission {
     password: Secret,
     confirm: Secret,
     network_index: u32,
-    birthday_index: u32,
     acknowledged: bool,
     name: String,
 }
@@ -435,7 +434,7 @@ impl Component for Restore {
                         set_label: if model.busy { "Importing…" } else { "Import wallet" },
                         connect_clicked[
                             sender, kind_row, credential_row, bip39_row, bip39_expander,
-                            network_row, birthday_row, password_row, confirm_row,
+                            network_row, password_row, confirm_row,
                             acknowledge_row, name_row
                         ] => move |_| {
                             sender.input(RestoreMsg::Submit(Box::new(Submission {
@@ -455,7 +454,6 @@ impl Component for Restore {
                                 password: Secret(Zeroizing::new(password_row.text().to_string())),
                                 confirm: Secret(Zeroizing::new(confirm_row.text().to_string())),
                                 network_index: network_row.selected(),
-                                birthday_index: birthday_row.selected(),
                                 acknowledged: acknowledge_row.is_active(),
                                 name: name_row.text().to_string(),
                             })));
@@ -482,7 +480,7 @@ impl Component for Restore {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let mut model = Restore {
+        let model = Restore {
             // Hardware is first in the list, so it is what the form opens on.
             kind: KINDS[0],
             network: bdk_wallet::bitcoin::Network::Signet,

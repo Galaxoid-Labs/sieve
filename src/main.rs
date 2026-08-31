@@ -14,7 +14,6 @@ mod wallet;
 
 use relm4::RelmApp;
 use relm4::gtk;
-use relm4::gtk::prelude::*;
 
 /// Reverse-DNS ID. Must match the .desktop file or GNOME won't associate the
 /// window with the app icon.
@@ -71,7 +70,7 @@ fn main() {
     // that a glance at the card says which chain this wallet is on — the
     // mistake worth making impossible. Kept at a fifth of an alpha so the hue
     // reads the same against a light or a dark card.
-    app.set_global_css(
+    relm4::set_global_css(
         ".qr-ground { background-color: #ffffff; border-radius: 18px; padding: 6px; } \
          .seed-word { \
            background-color: alpha(currentColor, 0.07); \

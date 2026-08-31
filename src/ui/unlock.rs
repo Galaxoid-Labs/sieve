@@ -27,7 +27,6 @@ impl std::fmt::Debug for Password {
 #[derive(Debug)]
 pub enum UnlockMsg {
     Submit(Password),
-    SwitchWallet,
     /// Which wallet this screen is unlocking. Sent before the screen is shown.
     Open {
         paths: Paths,
@@ -38,7 +37,6 @@ pub enum UnlockMsg {
 #[derive(Debug)]
 pub enum UnlockOutput {
     /// Back to the wallet list.
-    SwitchWallet,
     /// The vault opened. Only the watch-only summary travels — the decrypted
     /// seed never crosses a component boundary.
     Unlocked { paths: Paths, summary: Summary },
@@ -168,9 +166,6 @@ impl Component for Unlock {
         _root: &Self::Root,
     ) {
         match msg {
-            UnlockMsg::SwitchWallet => {
-                let _ = sender.output(UnlockOutput::SwitchWallet);
-            }
             UnlockMsg::Open { paths, name } => {
                 self.many_wallets = wallet::list_wallets().len() > 1;
                 self.paths = Some(paths);
