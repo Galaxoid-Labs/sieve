@@ -1,0 +1,38 @@
+# Hardware signers Sieve can talk to.
+#
+# Without these, a wallet device is visible only to root: the kernel exposes
+# it as a hidraw or tty node owned by root with no access for anybody else, so
+# Sieve — an ordinary user process, deliberately — sees nothing plugged in and
+# can only say so. That is the whole of the "device not detected" problem on
+# Linux, and it is why every vendor ships a file like this one.
+#
+# TAG+="uaccess" is what does the work: systemd-logind grants the user sitting
+# at the machine access to the device, and takes it away when they log out.
+# That is narrower than a group like plugdev, which grants it to a named set
+# of people whether or not they are here.
+#
+# The identifiers are not written from memory. Each is the constant used by
+# the library Sieve actually links:
+#   Ledger    ledger-transport-hidapi   LEDGER_VID  = 0x2c97
+#   Coldcard  coldcard                  COINKITE_VID = 0xd13e, CKCC_PID = 0xcc10
+#   Specter   async-hwi                 SPECTER_VID = 0xf055, SPECTER_PID = 0x9802
+#
+# Installed to /usr/lib/udev/rules.d/. After installing, either replug the
+# device or run `udevadm control --reload && udevadm trigger`.
+
+# Ledger — every model, matched by vendor alone.
+#
+# Nano S, Nano S Plus, Nano X, Stax and Flex each use a different product id,
+# and Ledger's own rules match on the vendor for exactly that reason: a rule
+# listing products goes stale the next time they ship hardware.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess"
+
+# Coldcard.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="d13e", ATTRS{idProduct}=="cc10", MODE="0660", TAG+="uaccess"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="d13e", ATTRS{idProduct}=="cc10", MODE="0660", TAG+="uaccess"
+
+# Specter — a serial device rather than a HID one, so it arrives as
+# /dev/ttyACM* and needs the tty subsystem instead.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="f055", ATTRS{idProduct}=="9802", MODE="0660", TAG+="uaccess"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="f055", ATTRS{idProduct}=="9802", MODE="0660", TAG+="uaccess"

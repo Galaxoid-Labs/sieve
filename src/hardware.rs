@@ -317,14 +317,47 @@ fn explain(error: &async_hwi::Error) -> String {
 /// Whether anything could ever be found: on Linux a device is invisible
 /// without udev rules, and an empty list is the same shape as "no permission".
 pub fn udev_hint() -> &'static str {
-    "If a device is plugged in and unlocked but not listed, Linux needs udev rules \
-     to let anything but root see it. The vendors publish them, and the packaged \
-     build of Sieve will ship them."
+    "If a device is plugged in and unlocked but not listed, Linux may not be letting \
+     anything but root see it. A packaged build of Sieve installs the rules that fix \
+     that; a build run from source does not, and the file is in packaging/udev. After \
+     installing it, unplug the device and plug it in again."
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rules a packaged build installs, so a device is visible to the
+    /// person at the machine rather than only to root.
+    ///
+    /// Read here so the test below can hold it against the devices Sieve
+    /// claims to support: a signer added to `Kind` with no rule beside it will
+    /// not be found on most Linux machines, and nothing else would notice.
+    const UDEV_RULES: &str = include_str!("../packaging/udev/51-sieve-hardware.rules");
+
+    #[test]
+    fn every_device_sieve_supports_has_a_udev_rule() {
+        // The identifiers here are the ones the linked libraries use. If a
+        // device is added to `Kind` without a rule, it is invisible on a
+        // machine that has not been hand-configured, and the failure looks
+        // like "nothing is plugged in".
+        for (kind, vendor) in [
+            (Kind::Ledger, "2c97"),
+            (Kind::Coldcard, "d13e"),
+            (Kind::Specter, "f055"),
+        ] {
+            assert!(
+                UDEV_RULES.contains(&format!(r#"ATTRS{{idVendor}}=="{vendor}""#)),
+                "no udev rule for {} ({vendor})",
+                kind.label()
+            );
+        }
+
+        // uaccess is the point: it grants the person at the machine, and
+        // nobody else, and takes it back at logout. A rule that only sets a
+        // mode leaves the device root-only.
+        assert!(UDEV_RULES.contains(r#"TAG+="uaccess""#));
+    }
     use bdk_wallet::bitcoin::bip32::{Fingerprint, Xpub};
     use std::str::FromStr;
 
