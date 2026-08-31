@@ -317,7 +317,9 @@ and the order of work.
       of each family.
 - [ ] Verify the libadwaita 1.5 floor against real containers. Ubuntu 22.04 and Debian 12 are
       expected to fail it, and there is no fix short of lowering the baseline.
-- [ ] A signed tag, GitHub Releases and a `SHA256SUMS`.
+- [ ] A signed tag, GitHub Releases and a `SHA256SUMS`, produced by a tag-triggered workflow
+      rather than by hand — including installing each artefact in a clean container and
+      running it, which is the only test the dependency lists ever get.
 - [ ] Publish to the AUR, then a pull request adding one line to Omarchy's install menu —
       `PACKAGING.md` has the shape of the entry and why the category is the awkward part.
 - [ ] Delete the Flatpak manifest and `scripts/fetch-tor.sh` once the AUR package is proven.
@@ -332,7 +334,7 @@ what it must not do is keep saying something the code does not do.
 ## Running alongside
 
 - regtest harness with `bitcoind -blockfilterindex=1` for integration tests
-- CI: `cargo test`, `clippy -D warnings`, `cargo fmt --check`
+- CI: `cargo test`, `clippy -D warnings`, `cargo fmt --check` — the baseline is clean now, so `fmt --check` can be switched on
 - `cargo audit` and `cargo deny`
 - Keep CLAUDE.md current as milestones land
 

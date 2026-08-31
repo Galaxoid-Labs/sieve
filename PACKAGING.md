@@ -226,6 +226,73 @@ Built in containers — `debian:trixie`, `ubuntu:24.04`, `fedora:41` — from a
 release tag, in CI, so the artefacts are reproducible by someone else and not
 by this laptop.
 
+## Releases, by CI rather than by hand
+
+Three artefacts built on three distributions, checksummed, signed and
+published every time — that is exactly the work a person does badly and a
+machine does the same way twice. There is no remote yet, so this is the shape
+to build when there is one.
+
+**One trigger: pushing a tag.** `v0.2.0` and nothing else. No release from a
+branch, no manual dispatch that quietly builds something other than what the
+tag says.
+
+```
+.github/workflows/release.yml
+
+  check     tag matches the version in Cargo.toml, or stop
+            cargo fmt --check · cargo clippy -D warnings · cargo test
+
+  arch      container: archlinux:base-devel
+            makepkg --syncdeps, then install the result and run `sieve --version`
+
+  deb       container: debian:trixie      → cargo-deb
+            container: ubuntu:24.04       → cargo-deb
+            install into a clean container of the same image, and run it
+
+  rpm       container: fedora:41          → cargo-generate-rpm
+            install into a clean container, and run it
+
+  publish   SHA256SUMS over every artefact, signed
+            GitHub Release with the notes from the tag
+            push the PKGBUILD to the AUR over SSH
+```
+
+Five things worth getting right, each of which is a way this goes wrong
+quietly:
+
+- **The version guard comes first.** A tag that disagrees with `Cargo.toml`
+  produces packages whose filename lies about their contents. Cheapest
+  possible check, first job, everything else depends on it.
+- **Build in a container of the *oldest* target of each family.** glibc is
+  forwards compatible and not backwards: a binary linked on Ubuntu 24.10 will
+  not run on 24.04. Pin the images by digest so a base image moving does not
+  silently change what shipped.
+- **Install what was built, in a clean container, and run it.** Not `--help`
+  in the build container that already has every dev library — a fresh
+  container with only the declared dependencies, which is the only way the
+  dependency list is ever actually tested. It needs a headless display to get
+  past GTK initialisation; `xvfb-run` or `WAYLAND_DISPLAY=` with a nested
+  compositor, whichever proves less trouble.
+- **`--locked` everywhere**, and commit `Cargo.lock`. A release that resolves
+  its own dependencies is a release nobody can reproduce.
+- **Sign the checksums, not the files.** One signature over `SHA256SUMS` is
+  what `sieve-bin`'s PKGBUILD verifies and what a person can check by hand.
+  The key lives in repository secrets and nowhere else; rotating it is a
+  release note, not a silent event.
+
+**The AUR step is different from the others** and worth separating. CI does
+not build the AUR package — the AUR builds it, on the user's machine, from
+source. What CI pushes is the `PKGBUILD` and `.SRCINFO` for the new version,
+over SSH with a deploy key. So the Arch job's purpose is not to produce an
+artefact but to **prove the PKGBUILD still works** before that push: build it,
+install it, run it. A broken PKGBUILD in the AUR is broken for everybody who
+tries to install until somebody notices.
+
+`sieve-bin` is the exception — it points at the release tarball and its
+checksum, both of which the publish job has just produced, so its PKGBUILD is
+generated rather than maintained.
+
 ## Hosting
 
 **GitHub Releases first**: three files and a `SHA256SUMS`, signed. Enough for
