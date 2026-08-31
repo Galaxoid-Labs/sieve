@@ -3137,8 +3137,8 @@ impl WalletPage {
             format!(
                 "{} stops being paid to {}.\n\nFee was {}\nFee becomes {}{rate}\nComing \
                  back to you {}",
-                unit.format(plan.spend.to_sat(), network),
-                crate::ui::send::shorten(&plan.to),
+                unit.format(plan.spend().to_sat(), network),
+                crate::ui::send::shorten(&plan.to()),
                 unit.format(was, network),
                 unit.format(now, network),
                 unit.format(
@@ -3150,7 +3150,7 @@ impl WalletPage {
             let mut body = format!(
                 "The recipient still gets {}.\n\nFee was {}\nFee becomes {}{rate}\nThat is {} \
                  more.",
-                unit.format(plan.spend.to_sat(), network),
+                unit.format(plan.spend().to_sat(), network),
                 unit.format(was, network),
                 unit.format(now, network),
                 unit.format(now.saturating_sub(was), network),

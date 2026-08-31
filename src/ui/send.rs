@@ -33,8 +33,119 @@ impl std::fmt::Debug for Password {
 /// built by leaving the field alone.
 const DEFAULT_FEE_RATE: f64 = 2.0;
 
+/// One more person paid by the same transaction.
+///
+/// The first recipient keeps its own row on the form, because it carries what
+/// belongs to the payment rather than to a person: a pasted payment request is
+/// unpacked there, and Max means "everything", which only has a meaning while
+/// there is one person to send everything to. These are the ones after it, and
+/// saying "also pay" is what makes that order readable.
+#[derive(Debug)]
+pub struct ExtraPayee {
+    unit: String,
+    /// Kept here rather than read back off the widgets, so the form can decide
+    /// whether it has a payment without reaching into anybody's entry boxes.
+    address: String,
+    amount: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExtraPayeeMsg {
+    SetUnit(String),
+    SetAddress(String),
+    SetAmount(String),
+}
+
+#[derive(Debug)]
+pub enum ExtraPayeeOutput {
+    Remove(DynamicIndex),
+    Edited,
+}
+
+#[relm4::factory(pub)]
+impl FactoryComponent for ExtraPayee {
+    type Init = String;
+    type Input = ExtraPayeeMsg;
+    type Output = ExtraPayeeOutput;
+    type CommandOutput = ();
+    type ParentWidget = gtk::Box;
+
+    view! {
+        adw::PreferencesGroup {
+            #[name(address)]
+            adw::EntryRow {
+                set_title: "Also pay",
+                // Same treatment as the first: an address is checked
+                // character by character against another screen.
+                add_css_class: "monospace",
+                connect_changed[sender] => move |row| {
+                    sender.input(ExtraPayeeMsg::SetAddress(row.text().to_string()));
+                    let _ = sender.output(ExtraPayeeOutput::Edited);
+                },
+
+                add_suffix = &gtk::Button {
+                    set_icon_name: "list-remove-symbolic",
+                    add_css_class: "flat",
+                    set_valign: gtk::Align::Center,
+                    set_tooltip_text: Some("Remove this recipient"),
+                    connect_clicked[sender, index] => move |_| {
+                        let _ = sender.output(ExtraPayeeOutput::Remove(index.clone()));
+                    },
+                },
+            },
+
+            #[name(amount)]
+            adw::EntryRow {
+                #[watch]
+                set_title: &format!("Amount in {}", self.unit),
+                set_input_purpose: gtk::InputPurpose::Number,
+                add_css_class: "numeric",
+                connect_changed[sender] => move |row| {
+                    sender.input(ExtraPayeeMsg::SetAmount(row.text().to_string()));
+                    let _ = sender.output(ExtraPayeeOutput::Edited);
+                },
+            },
+        }
+    }
+
+    fn init_model(unit: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
+        Self {
+            unit,
+            address: String::new(),
+            amount: String::new(),
+        }
+    }
+
+    fn init_widgets(
+        &mut self,
+        index: &DynamicIndex,
+        root: Self::Root,
+        _returned: &<Self::ParentWidget as relm4::factory::FactoryView>::ReturnedWidget,
+        sender: FactorySender<Self>,
+    ) -> Self::Widgets {
+        let index = index.clone();
+        let widgets = view_output!();
+        install_amount_filter(&widgets.amount);
+        widgets
+    }
+
+    fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
+        match msg {
+            ExtraPayeeMsg::SetUnit(unit) => self.unit = unit,
+            ExtraPayeeMsg::SetAddress(address) => self.address = address,
+            ExtraPayeeMsg::SetAmount(amount) => self.amount = amount,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SendMsg {
+    /// One more person on this transaction.
+    AddPayee,
+    RemovePayee(DynamicIndex),
+    /// An extra recipient's address or amount changed, so Review has to be
+    /// re-decided.
+    PayeeEdited,
     /// The "Pay to" field holds a `bitcoin:` URI: take it apart and fill the
     /// form in from it.
     UnpackUri(String),
@@ -152,6 +263,8 @@ pub struct SendForm {
     from_model: gtk::StringList,
     from_labels: Vec<String>,
     /// Kept so the form can be emptied after a payment goes out.
+    /// Everybody after the first. The first has its own row on the form.
+    extras: FactoryVecDeque<ExtraPayee>,
     to_row: Option<adw::EntryRow>,
     amount_row: Option<adw::EntryRow>,
 }
@@ -602,7 +715,41 @@ impl SendForm {
             self.amount_filled,
             self.max,
             self.has_funds(),
+            self.extra_payees().is_ok(),
         )
+    }
+
+    /// Everybody after the first, parsed.
+    ///
+    /// An extra recipient half filled in blocks Review rather than being
+    /// skipped: a row somebody typed an address into and then left is a
+    /// payment they meant to make, and quietly dropping it would send the
+    /// others and say nothing.
+    fn extra_payees(&self) -> Result<Vec<crate::wallet::send::Payee>, &'static str> {
+        let network = self.network();
+        self.extras
+            .iter()
+            .map(|extra| {
+                let to = crate::wallet::send::parse_address(extra.address.trim(), network)
+                    .map_err(|_| "One of the other recipients is not a valid address")?;
+                let sats = self
+                    .settings
+                    .denomination
+                    .parse(extra.amount.trim())
+                    .map_err(|_| "One of the other recipients has no amount")?;
+                Ok(crate::wallet::send::Payee {
+                    to,
+                    amount: Sending::Exact(bdk_wallet::bitcoin::Amount::from_sat(sats)),
+                })
+            })
+            .collect()
+    }
+
+    /// Re-decide whether the form describes a payment, after a recipient was
+    /// added, removed or edited.
+    fn recount_payees(&mut self, widgets: &mut <Self as Component>::Widgets) {
+        let _ = widgets;
+        self.error = None;
     }
 
     fn has_funds(&self) -> bool {
@@ -895,8 +1042,16 @@ impl Component for SendForm {
                                     // Max means everything that is available,
                                     // and choosing coins is a way of saying
                                     // what "available" means.
+                                    // "Everything" needs one person to send
+                                    // everything to. With somebody else on the
+                                    // transaction the word stops having an
+                                    // amount behind it.
                                     #[watch]
-                                    set_tooltip_text: Some(if model.coins.is_empty() {
+                                    set_sensitive: model.extras.is_empty(),
+                                    #[watch]
+                                    set_tooltip_text: Some(if !model.extras.is_empty() {
+                                        "Max needs a single recipient"
+                                    } else if model.coins.is_empty() {
                                         "Send everything on this path, fee included"
                                     } else {
                                         "Send all the chosen coins, fee included"
@@ -939,6 +1094,30 @@ impl Component for SendForm {
                                 },
                                 connect_activated => SendMsg::ChooseCoins,
                             },
+                        },
+
+                        // Everybody after the first, each in a group of their
+                        // own so an address and its amount stay together.
+                        #[local_ref]
+                        extras -> gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 12,
+                            set_margin_top: 12,
+                        },
+
+                        gtk::Button {
+                            add_css_class: "flat",
+                            set_halign: gtk::Align::Center,
+                            set_margin_top: 6,
+                            set_label: "Add another recipient",
+                            set_tooltip_text: Some(
+                                "One transaction paying several people costs less in fees than \
+                                 the same payments made separately — and tells anybody reading \
+                                 the chain that the same person made all of them"
+                            ),
+                            #[watch]
+                            set_sensitive: !model.busy,
+                            connect_clicked => SendMsg::AddPayee,
                         },
 
                         adw::PreferencesGroup {
@@ -997,6 +1176,12 @@ impl Component for SendForm {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let mut model = SendForm {
+            extras: FactoryVecDeque::builder()
+                .launch(gtk::Box::default())
+                .forward(sender.input_sender(), |out| match out {
+                    ExtraPayeeOutput::Remove(index) => SendMsg::RemovePayee(index),
+                    ExtraPayeeOutput::Edited => SendMsg::PayeeEdited,
+                }),
             settings: Settings::load(),
             network: "bitcoin".into(),
             accounts: Vec::new(),
@@ -1027,6 +1212,7 @@ impl Component for SendForm {
             request_label: None,
         };
 
+        let extras = model.extras.widget();
         let widgets = view_output!();
 
         // Held so a finished payment can leave an empty form behind rather
@@ -1094,6 +1280,11 @@ impl Component for SendForm {
 
             SendMsg::SetDenomination(denomination) => {
                 self.settings.denomination = denomination;
+                // The extra rows say which unit they are in, and a row still
+                // labelled in satoshis while the form is in BTC is how a
+                // payment goes out a hundred million times wrong.
+                self.extras
+                    .broadcast(ExtraPayeeMsg::SetUnit(self.unit().to_string()));
                 self.sync_sources();
             }
 
@@ -1145,6 +1336,27 @@ impl Component for SendForm {
                 self.coins.clear();
                 self.from = self.fundable().get(index as usize).map(|a| a.script_type);
             }
+
+            SendMsg::AddPayee => {
+                let unit = self.unit().to_string();
+                self.extras.guard().push_back(unit);
+                // "Everything" needs one person to send everything to. With
+                // somebody else on the transaction it is no longer a number
+                // this form can work out, so it is released rather than left
+                // switched on meaning something different.
+                if self.max {
+                    self.max = false;
+                    widgets.max_button.set_active(false);
+                }
+                self.recount_payees(widgets);
+            }
+
+            SendMsg::RemovePayee(index) => {
+                self.extras.guard().remove(index.current_index());
+                self.recount_payees(widgets);
+            }
+
+            SendMsg::PayeeEdited => self.recount_payees(widgets),
 
             SendMsg::ToggleMax(max) => {
                 self.max = max;
@@ -1273,10 +1485,20 @@ impl Component for SendForm {
                 };
 
                 self.busy = true;
+                let extras = match self.extra_payees() {
+                    Ok(extras) => extras,
+                    Err(message) => {
+                        self.error = Some(message.into());
+                        self.update_view(widgets, sender);
+                        return;
+                    }
+                };
+                let mut payees = vec![crate::wallet::send::Payee { to, amount }];
+                payees.extend(extras);
+
                 let _ = sender.output(SendOutput::Plan(Box::new(Draft {
                     from: source,
-                    to,
-                    amount,
+                    payees,
                     fee_rate,
                     coins: self.coins.clone(),
                 })));
@@ -1299,8 +1521,8 @@ impl Component for SendForm {
                     "{} to {}",
                     self.settings
                         .denomination
-                        .format(plan.spend.to_sat(), &self.network),
-                    shorten(&plan.to),
+                        .format(plan.spend().to_sat(), &self.network),
+                    shorten(&plan.to()),
                 ));
                 self.busy = true;
                 let _ = sender.output(SendOutput::Send {
@@ -1357,6 +1579,10 @@ impl Component for SendForm {
                 widgets.max_button.set_active(false);
                 widgets.to_row.set_text("");
                 widgets.amount_row.set_text("");
+                // Everybody after the first goes too. A second payment sent by
+                // accident is bad enough without it carrying the last one's
+                // other recipients.
+                self.extras.guard().clear();
                 self.request = None;
                 self.request_label = None;
                 self.to_filled = false;
@@ -1377,17 +1603,37 @@ impl SendForm {
     fn confirm(&self, plan: &Plan, root: &gtk::ScrolledWindow, sender: &ComponentSender<Self>) {
         let unit = self.settings.denomination;
         let network = &self.network;
-        let amount = unit.format(plan.spend.to_sat(), network);
+        let amount = unit.format(plan.spend().to_sat(), network);
         let fee = unit.format(plan.fee.to_sat(), network);
         let total = unit.format(plan.total().to_sat(), network);
 
         let escape = gtk::glib::markup_escape_text;
-        let to = format!("<tt>{}</tt>", escape(&plan.to.to_string()));
 
-        let mut body = format!("Send {} to\n{to}", escape(&amount));
-        if let Some(fiat) = self.fiat(plan.spend.to_sat()) {
-            body = format!("Send {} ({}) to\n{to}", escape(&amount), escape(&fiat));
-        }
+        // Every recipient named with its own amount. A total with the
+        // addresses left off would be a number nobody could check, and this is
+        // the screen where checking is the entire point.
+        let mut body = match plan.payees.as_slice() {
+            [(address, _)] => {
+                let to = format!("<tt>{}</tt>", escape(address));
+                match self.fiat(plan.spend().to_sat()) {
+                    Some(fiat) => {
+                        format!("Send {} ({}) to\n{to}", escape(&amount), escape(&fiat))
+                    }
+                    None => format!("Send {} to\n{to}", escape(&amount)),
+                }
+            }
+            many => {
+                let mut body = format!("Send {} to {} recipients:", escape(&amount), many.len());
+                for (address, paid) in many {
+                    body.push_str(&format!(
+                        "\n\n{}\n<tt>{}</tt>",
+                        escape(&unit.format(paid.to_sat(), network)),
+                        escape(address),
+                    ));
+                }
+                body
+            }
+        };
         body.push_str(&format!(
             "\n\nFee {}\nLeaving this wallet {}",
             escape(&fee),
@@ -1456,9 +1702,13 @@ fn why_not_ready(
     amount_filled: bool,
     max: bool,
     has_funds: bool,
+    extras_ready: bool,
 ) -> Option<&'static str> {
     if !has_funds {
         return Some("There is nothing on this path to send");
+    }
+    if !extras_ready {
+        return Some("Finish the other recipients, or remove them");
     }
     match (to_filled, max || amount_filled) {
         (false, false) => Some("Enter who to pay and how much"),
@@ -1525,30 +1775,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unfinished_extra_recipient_blocks_review() {
+        // Half a recipient is somebody's payment, typed and abandoned.
+        // Sending the rest and saying nothing about it would be the worst
+        // possible reading of an empty box.
+        assert_eq!(
+            why_not_ready(true, true, false, true, false),
+            Some("Finish the other recipients, or remove them")
+        );
+        // And with them finished, nothing is in the way.
+        assert_eq!(why_not_ready(true, true, false, true, true), None);
+    }
+
+    #[test]
     fn review_waits_for_both_fields() {
         // The button is the promise that something will happen. Offering it
         // over an empty form and answering with an error is a worse way of
         // saying "not yet".
         assert_eq!(
-            why_not_ready(false, false, false, true),
+            why_not_ready(false, false, false, true, true),
             Some("Enter who to pay and how much")
         );
         assert_eq!(
-            why_not_ready(true, false, false, true),
+            why_not_ready(true, false, false, true, true),
             Some("Enter an amount to send")
         );
         assert_eq!(
-            why_not_ready(false, true, false, true),
+            why_not_ready(false, true, false, true, true),
             Some("Enter an address to pay")
         );
-        assert_eq!(why_not_ready(true, true, false, true), None);
+        assert_eq!(why_not_ready(true, true, false, true, true), None);
 
         // Max is an amount before the field catches up with it.
-        assert_eq!(why_not_ready(true, false, true, true), None);
+        assert_eq!(why_not_ready(true, false, true, true, true), None);
 
         // And an empty path has nothing to send, whatever the fields say.
         assert_eq!(
-            why_not_ready(true, true, true, false),
+            why_not_ready(true, true, true, false, true),
             Some("There is nothing on this path to send")
         );
     }

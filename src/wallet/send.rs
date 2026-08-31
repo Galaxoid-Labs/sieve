@@ -42,8 +42,11 @@ pub struct Draft {
     /// Which derivation path the coins come from. Each path is its own BDK
     /// wallet with its own UTXOs, so a transaction is built from exactly one.
     pub from: ScriptType,
-    pub to: Address,
-    pub amount: Sending,
+    /// Who is being paid. One is the ordinary case; more than one is a single
+    /// transaction with several outputs, which costs less in fees than the
+    /// same payments made separately and tells anybody reading the chain that
+    /// the same person made all of them.
+    pub payees: Vec<Payee>,
     pub fee_rate: FeeRate,
     /// Which coins to spend. Empty means "choose for me", which is what most
     /// payments should be; a non-empty list means exactly these and nothing
@@ -52,15 +55,21 @@ pub struct Draft {
     pub coins: Vec<bdk_wallet::bitcoin::OutPoint>,
 }
 
+/// One recipient of a payment.
+#[derive(Debug, Clone)]
+pub struct Payee {
+    pub to: Address,
+    pub amount: Sending,
+}
+
 /// A built, unsigned transaction, with the numbers to show before signing.
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub psbt: Psbt,
     pub from: ScriptType,
-    pub to: String,
-    /// What the recipient receives. Not the same as what was typed when
-    /// sending everything, since the fee comes out of it.
-    pub spend: Amount,
+    /// Who is paid and what each receives. Not the same as what was typed
+    /// when sending everything, since the fee comes out of it.
+    pub payees: Vec<(String, Amount)>,
     pub fee: Amount,
     /// Returning to this wallet on the change chain, if there is any.
     pub change: Option<Amount>,
@@ -78,14 +87,34 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// What leaves the wallet: the payment plus the fee.
+    /// What everybody being paid receives, together.
+    pub fn spend(&self) -> Amount {
+        self.payees
+            .iter()
+            .map(|(_, amount)| *amount)
+            .fold(Amount::ZERO, |total, amount| total + amount)
+    }
+
+    /// Who to name when there is only room for one — a toast, a row, a
+    /// sentence. With several, the count is the honest summary: naming the
+    /// first and silently dropping the rest would be worse than not naming
+    /// anybody.
+    pub fn to(&self) -> String {
+        match self.payees.as_slice() {
+            [(address, _)] => address.clone(),
+            [] => "nobody".into(),
+            many => format!("{} recipients", many.len()),
+        }
+    }
+
+    /// What leaves the wallet: the payments plus the fee.
     ///
     /// A cancellation pays nobody, so the fee is the whole of it.
     pub fn total(&self) -> Amount {
         if self.cancels {
             self.fee
         } else {
-            self.spend + self.fee
+            self.spend() + self.fee
         }
     }
 
@@ -385,9 +414,9 @@ pub fn estimated_fee(
 pub(super) fn split_outputs_of(
     tx: &bdk_wallet::bitcoin::Transaction,
     wallet: &Wallet,
-) -> ((String, Amount), Option<Amount>) {
+) -> (Vec<(String, Amount)>, Option<Amount>) {
     let network = wallet.network();
-    let mut paid = None;
+    let mut paid = Vec::new();
     let mut change = Amount::ZERO;
 
     for out in &tx.output {
@@ -395,34 +424,18 @@ pub(super) fn split_outputs_of(
             change += out.value;
             continue;
         }
-        if paid.is_none() {
-            let address = bdk_wallet::bitcoin::Address::from_script(&out.script_pubkey, network)
-                .map(|address| address.to_string())
-                .unwrap_or_else(|_| "an unusual script, not an address".into());
-            paid = Some((address, out.value));
-        }
+        let address = bdk_wallet::bitcoin::Address::from_script(&out.script_pubkey, network)
+            .map(|address| address.to_string())
+            .unwrap_or_else(|_| "an unusual script, not an address".into());
+        paid.push((address, out.value));
     }
 
-    (
-        // A payment with no outputs of its own is a self-send; naming it that
-        // way beats an empty string where an address belongs.
-        paid.unwrap_or_else(|| ("yourself".to_string(), Amount::ZERO)),
-        (change > Amount::ZERO).then_some(change),
-    )
-}
-
-/// Which output is the recipient's, and which is change.
-pub(super) fn split_outputs(psbt: &Psbt, to: &ScriptBuf) -> (Amount, Option<Amount>) {
-    let mut spend = Amount::ZERO;
-    let mut change = Amount::ZERO;
-    for out in &psbt.unsigned_tx.output {
-        if &out.script_pubkey == to {
-            spend += out.value;
-        } else {
-            change += out.value;
-        }
+    // A payment with no outputs of its own is a self-send; naming it that way
+    // beats an empty list where a recipient belongs.
+    if paid.is_empty() {
+        paid.push(("yourself".to_string(), Amount::ZERO));
     }
-    (spend, (change > Amount::ZERO).then_some(change))
+    (paid, (change > Amount::ZERO).then_some(change))
 }
 
 #[cfg(test)]
@@ -531,8 +544,9 @@ mod tests {
                 builder.finish().expect("could not build the transaction")
             };
 
-            let (spend, change) = split_outputs(&psbt, &to.script_pubkey());
-            assert_eq!(spend, Amount::from_sat(20_000));
+            let (payees, change) = split_outputs_of(&psbt.unsigned_tx, &wallet);
+            assert_eq!(payees.len(), 1, "{script_type}: {payees:?}");
+            assert_eq!(payees[0].1, Amount::from_sat(20_000));
             assert!(change.is_some(), "{script_type} kept no change");
 
             // Signed by a wallet derived from the phrase, not the one that
@@ -954,6 +968,104 @@ mod tests {
     }
 
     #[test]
+    fn every_recipient_is_read_back_off_the_transaction() {
+        // The screens are built from what the transaction actually pays, not
+        // from what was typed. Keeping only the first recipient would show a
+        // payment to three people as a payment to one — and it is the review
+        // screen that would be lying.
+        let network = Network::Signet;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let mut wallet = hd_signer(xprv, ScriptType::NativeSegwit, network).unwrap();
+
+        let funded = wallet.reveal_next_address(KeychainKind::External).address;
+        wallet.apply_unconfirmed_txs([(
+            Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(
+                        "0000000000000000000000000000000000000000000000000000000000000003"
+                            .parse::<Txid>()
+                            .unwrap(),
+                        0,
+                    ),
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: funded.script_pubkey(),
+                }],
+            },
+            0u64,
+        )]);
+
+        let one = parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+        // Derived rather than written down, so it is certainly valid and
+        // certainly not this wallet's: a different passphrase is a different
+        // seed.
+        let two = {
+            let theirs =
+                super::super::xprv_from_mnemonic(PHRASE, Some("someone else"), network).unwrap();
+            hd_signer(theirs, ScriptType::NativeSegwit, network)
+                .unwrap()
+                .peek_address(KeychainKind::External, 0)
+                .address
+        };
+        let psbt = {
+            let mut builder = wallet.build_tx();
+            builder.add_recipient(one.script_pubkey(), Amount::from_sat(20_000));
+            builder.add_recipient(two.script_pubkey(), Amount::from_sat(30_000));
+            builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+            builder.finish().unwrap()
+        };
+
+        let (payees, change) = split_outputs_of(&psbt.unsigned_tx, &wallet);
+        assert_eq!(payees.len(), 2, "{payees:?}");
+        let paid: Amount = payees
+            .iter()
+            .map(|(_, amount)| *amount)
+            .fold(Amount::ZERO, |a, b| a + b);
+        assert_eq!(paid, Amount::from_sat(50_000));
+        assert!(payees.iter().any(|(a, _)| *a == one.to_string()));
+        assert!(payees.iter().any(|(a, _)| *a == two.to_string()));
+        assert!(change.is_some(), "this payment kept change");
+    }
+
+    #[test]
+    fn one_line_names_a_recipient_or_counts_them() {
+        // Naming the first of several and dropping the rest silently would be
+        // worse than not naming anybody: it reads as a payment to one person.
+        let plan = |payees: Vec<(String, Amount)>| Plan {
+            psbt: Psbt::from_unsigned_tx(Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: Vec::new(),
+            })
+            .unwrap(),
+            from: ScriptType::NativeSegwit,
+            payees,
+            fee: Amount::from_sat(500),
+            change: None,
+            replaces: None,
+            was_fee: None,
+            cancels: false,
+        };
+
+        let one = plan(vec![("bc1qsomeaddress".into(), Amount::from_sat(1_000))]);
+        assert_eq!(one.to(), "bc1qsomeaddress");
+        assert_eq!(one.spend(), Amount::from_sat(1_000));
+
+        let many = plan(vec![
+            ("bc1qone".into(), Amount::from_sat(1_000)),
+            ("bc1qtwo".into(), Amount::from_sat(2_500)),
+        ]);
+        assert_eq!(many.to(), "2 recipients");
+        assert_eq!(many.spend(), Amount::from_sat(3_500));
+        assert_eq!(many.total(), Amount::from_sat(4_000));
+    }
+
+    #[test]
     fn a_cancellation_costs_only_its_fee() {
         // `total()` is what the screens call "leaving the wallet". For an
         // ordinary payment that is the amount plus the fee; for a
@@ -968,8 +1080,10 @@ mod tests {
             })
             .unwrap(),
             from: ScriptType::NativeSegwit,
-            to: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into(),
-            spend: Amount::from_sat(40_000),
+            payees: vec![(
+                "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into(),
+                Amount::from_sat(40_000),
+            )],
             fee: Amount::from_sat(900),
             change: Some(Amount::from_sat(59_100)),
             replaces: Some("an id".into()),

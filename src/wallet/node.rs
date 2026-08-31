@@ -578,7 +578,7 @@ impl Session {
             .calculate_fee(&original.tx_node.tx)
             .map(|fee| fee.to_sat())
             .unwrap_or(0);
-        let (spend, change) = super::send::split_outputs_of(&original.tx_node.tx, &account.wallet);
+        let (payees, change) = super::send::split_outputs_of(&original.tx_node.tx, &account.wallet);
 
         let psbt = super::send::build_replacement(
             &mut account.wallet,
@@ -594,8 +594,7 @@ impl Session {
 
         Ok(super::send::Plan {
             from: script_type,
-            to: spend.0,
-            spend: spend.1,
+            payees,
             change,
             fee,
             replaces: Some(txid.to_string()),
@@ -643,8 +642,8 @@ impl Session {
             .calculate_fee(&original.tx_node.tx)
             .map(|fee| fee.to_sat())
             .unwrap_or(0);
-        // What the original was paying out, which is what cancelling keeps.
-        let (spend, _) = super::send::split_outputs_of(&original.tx_node.tx, &account.wallet);
+        // Who the original was paying, which is what cancelling calls off.
+        let (payees, _) = super::send::split_outputs_of(&original.tx_node.tx, &account.wallet);
 
         let back = account
             .wallet
@@ -666,10 +665,9 @@ impl Session {
 
         Ok(super::send::Plan {
             from: script_type,
-            // Who was being paid, kept so the screen can name what is being
-            // called off rather than describing a payment to nobody.
-            to: spend.0,
-            spend: spend.1,
+            // Kept so the screen can name what is being called off rather
+            // than describing a payment to nobody.
+            payees,
             // Everything the replacement holds comes back here.
             change: Some(psbt.unsigned_tx.output.iter().map(|o| o.value).sum()),
             fee,
@@ -702,7 +700,6 @@ impl Session {
         let pending = super::send::unconfirmed_outpoints(&account.wallet);
         let waiting_on_a_block = !pending.is_empty();
 
-        let script = draft.to.script_pubkey();
         let psbt = {
             let mut builder = account.wallet.build_tx();
             builder.unspendable(pending);
@@ -719,17 +716,19 @@ impl Session {
                 builder.manually_selected_only();
             }
 
-            match draft.amount {
-                Sending::Exact(amount) => {
-                    builder.add_recipient(script.clone(), amount);
-                }
-                // No change output, and the fee comes out of what is sent
-                // rather than being added to it. With coins chosen this drains
-                // exactly those, which is how somebody empties one source
-                // deliberately.
-                Sending::Everything => {
-                    builder.drain_wallet();
-                    builder.drain_to(script.clone());
+            for payee in &draft.payees {
+                match payee.amount {
+                    Sending::Exact(amount) => {
+                        builder.add_recipient(payee.to.script_pubkey(), amount);
+                    }
+                    // No change output, and the fee comes out of what is sent
+                    // rather than being added to it. With coins chosen this
+                    // drains exactly those, which is how somebody empties one
+                    // source deliberately.
+                    Sending::Everything => {
+                        builder.drain_wallet();
+                        builder.drain_to(payee.to.script_pubkey());
+                    }
                 }
             }
             builder.finish().map_err(|e| {
@@ -751,13 +750,15 @@ impl Session {
         let fee = psbt
             .fee()
             .map_err(|e| anyhow!("could not work out the fee: {e}"))?;
-        let (spend, change) = super::send::split_outputs(&psbt, &script);
+        // Read back off the built transaction rather than trusting what was
+        // asked for: "everything" is only known once the fee is worked out,
+        // and a payee paid twice on one transaction appears once here.
+        let (payees, change) = super::send::split_outputs_of(&psbt.unsigned_tx, &account.wallet);
 
         Ok(super::send::Plan {
             psbt,
             from: draft.from,
-            to: draft.to.to_string(),
-            spend,
+            payees,
             fee,
             change,
             // An ordinary payment replaces nothing.
