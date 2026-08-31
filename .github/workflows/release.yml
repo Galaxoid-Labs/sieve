@@ -141,6 +141,16 @@ jobs:
           . "$HOME/.cargo/env"
           cargo install cargo-deb --locked
           cargo deb --locked
+          # cargo-deb names a package `sieve_0.1.0-1_amd64.deb` with nothing in
+          # it about which distribution built it, so trixie and ubuntu produce
+          # the same filename for the same architecture. Release assets are one
+          # flat namespace: without this, two of the four quietly become one,
+          # and `SHA256SUMS` lists a name that means two different files.
+          codename=$(. /etc/os-release; echo "${ID}${VERSION_ID}")
+          for f in target/debian/*.deb; do
+            mv "$f" "${f%_*.deb}_${codename}_${f##*_}"
+          done
+          ls -la target/debian/
       - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}-${{ strategy.job-index }}
