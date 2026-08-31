@@ -364,14 +364,38 @@ gpg --export --armor "$PRIMARY" > sieve-signing-key.asc
 ```
 
 Check step 5 before trusting it — an export that quietly included the primary
-looks identical from the outside:
+looks identical from the outside. `--show-keys` is *not* the way: it prints
+`sec` for the stub and for the real thing alike, which reads as a disaster that
+has not happened. Ask what packets are actually in the file:
 
 ```sh
-gpg --show-keys release-subkey.asc     # `sec#` means the primary is absent
+gpg --list-packets release-subkey.asc | grep -E 'secret|gnu-dummy'
 ```
 
-The `#` after `sec` is the whole point: it says the secret primary is *not*
-in this file. A bare `sec` means you exported the key you meant to keep.
+What you want:
+
+```
+:secret key packet:
+	gnu-dummy, algo: 0, ...      <- the primary, present in name only
+:secret sub key packet:
+	iter+salt S2K, ...           <- the subkey, with real protected material
+```
+
+`gnu-dummy` on the primary is the whole point: the packet is a placeholder and
+the secret is not in this file. If the primary's packet shows an S2K and
+protected material like the subkey's does, you have exported the key you meant
+to keep offline — start again at step 5.
+
+The files hold a secret and should be `600` in a `700` directory, which is not
+what a shell redirect leaves behind:
+
+```sh
+chmod 700 ~/sieve_keys && chmod 600 ~/sieve_keys/*.asc
+```
+
+Once `release-subkey.asc` is in the repository's secrets, delete it. It has no
+second use, and a private key sitting in a home directory is one more place it
+can leak from. The primary stays wherever offline means for you.
 
 Then, in the repository's **Settings → Secrets and variables → Actions**:
 
