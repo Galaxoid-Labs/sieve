@@ -313,6 +313,24 @@ watched. Show a fresh address per payer; never present one address as "the" wall
 The derivation-path list is a balance breakdown and must not show addresses: it duplicated
 the receive row and read as address reuse.
 
+## The name
+
+**Sieve**, one word, and it stays that way. The GNOME naming guidance asks for
+under fifteen characters, one or two simple nouns, no generic descriptor, and
+ideally a physical object that an icon can depict — "Sieve Bitcoin Wallet"
+fails three of those and "Sieve" satisfies all four, since a sieve is both an
+object and what the program does to block filters.
+
+What kind of program it is lives where a launcher looks for it: `GenericName`
+in the desktop entry, `Comment` under that, and `Keywords` for search. Adding
+it to `Name` would put it in the window title and the About window too, where
+it is noise.
+
+The one risk is that Sieve is also an email filtering language (RFC 5228). It
+is a protocol rather than an application, so the collision is in search results
+rather than in anybody's app menu — worth knowing before the name is on a
+release.
+
 ## The application icon
 
 `data/icons/hicolor/<size>/apps/com.galaxoidlabs.Sieve.png`, at 16 through 512. Fixed-size PNGs

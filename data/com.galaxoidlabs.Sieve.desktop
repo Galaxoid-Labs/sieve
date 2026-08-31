@@ -1,10 +1,14 @@
 [Desktop Entry]
 Type=Application
 Name=Sieve
-Comment=A privacy-focused Bitcoin wallet
+# The name stays one noun, as the HIG asks. What kind of program it is belongs
+# here instead: GenericName is what a launcher shows beside the name, and is
+# where "Bitcoin Wallet" does its work without becoming part of the name.
+GenericName=Bitcoin Wallet
+Comment=A privacy-focused Bitcoin wallet that syncs with compact block filters
 Exec=sieve
 Icon=com.galaxoidlabs.Sieve
 Terminal=false
 Categories=GNOME;GTK;Office;Finance;
-Keywords=Bitcoin;Wallet;Privacy;
+Keywords=Bitcoin;Wallet;Privacy;BTC;Crypto;Payments;Tor;
 StartupNotify=true
