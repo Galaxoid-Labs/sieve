@@ -158,6 +158,7 @@ mod icon_names {
         "network-offline-symbolic",
         "network-idle-symbolic",
         "changes-prevent-symbolic",
+        "system-search-symbolic",
         "channel-secure-symbolic",
     ];
 

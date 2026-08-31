@@ -1509,6 +1509,14 @@ impl Component for WalletPage {
                                     set_label: "Transactions",
                                 },
 
+                                #[name(search_button)]
+                                gtk::ToggleButton {
+                                    set_icon_name: "system-search-symbolic",
+                                    set_valign: gtk::Align::Center,
+                                    add_css_class: "flat",
+                                    set_tooltip_text: Some("Search this list"),
+                                },
+
                                 // Only worth offering when the wallet watches
                                 // more than one path.
                                 gtk::DropDown {
@@ -1524,19 +1532,28 @@ impl Component for WalletPage {
                                 },
                             },
 
-                            // Below the heading rather than beside it: an
-                            // address is long, and a field it does not fit in
-                            // is a field you cannot check what you pasted
-                            // into.
-                            gtk::SearchEntry {
-                                set_margin_top: 12,
-                                set_placeholder_text: Some(
-                                    "Search amount, address, transaction id or label"
-                                ),
-                                #[watch]
-                                set_visible: model.has_transactions(),
-                                connect_search_changed[sender] => move |entry| {
-                                    sender.input(WalletPageMsg::Search(entry.text().to_string()));
+                            // Folded away behind the button above until it is
+                            // wanted, which is the ordinary shape of a search
+                            // in this desktop — and it takes the full width
+                            // when it does appear, because an address is long
+                            // and a field it does not fit in is one you cannot
+                            // check what you pasted into.
+                            #[name(search_bar)]
+                            gtk::SearchBar {
+                                set_margin_top: 6,
+
+                                #[wrap(Some)]
+                                #[name(search_entry)]
+                                set_child = &gtk::SearchEntry {
+                                    set_hexpand: true,
+                                    set_placeholder_text: Some(
+                                        "Amount, address, transaction id or label"
+                                    ),
+                                    connect_search_changed[sender] => move |entry| {
+                                        sender.input(
+                                            WalletPageMsg::Search(entry.text().to_string())
+                                        );
+                                    },
                                 },
                             },
 
@@ -1553,16 +1570,19 @@ impl Component for WalletPage {
 
                             // The filter can empty the list without the wallet
                             // being empty, and that needs saying, or the
-                            // picker looks broken.
-                            gtk::Label {
-                                add_css_class: "dim-label",
-                                set_halign: gtk::Align::Center,
-                                set_margin_all: 24,
-                                // Two ways to empty the list, and saying the
-                                // wrong one sends somebody looking at the
-                                // wrong control.
+                            // controls look broken. Given the same treatment as
+                            // a wallet with no transactions at all, because it
+                            // is the same moment: a list with nothing in it and
+                            // a question about why.
+                            adw::StatusPage {
                                 #[watch]
-                                set_label: &model.nothing_shown(),
+                                set_icon_name: Some(model.nothing_icon()),
+                                set_title: "No results",
+                                // Two ways to empty the list, and naming the
+                                // wrong one sends somebody to the wrong
+                                // control.
+                                #[watch]
+                                set_description: Some(&model.nothing_shown()),
                                 #[watch]
                                 set_visible: model.filtered_to_nothing() && !model.locked,
                             },
@@ -2195,6 +2215,37 @@ impl Component for WalletPage {
         model.address_label_shown = Some(widgets.address_label_shown.clone());
         model.main_menu = Some(widgets.main_menu.clone());
 
+        // The button and the bar are one control. Bound both ways so that
+        // Escape, which the search bar handles itself, also lifts the button —
+        // a pressed-looking button over a hidden field is a control that has
+        // stopped describing itself.
+        widgets
+            .search_button
+            .bind_property("active", &widgets.search_bar, "search-mode-enabled")
+            .bidirectional()
+            .sync_create()
+            .build();
+        // Tells the bar which entry is its own, which is what makes Escape and
+        // the clear button do anything.
+        widgets.search_bar.connect_entry(&widgets.search_entry);
+        {
+            // Closing the search puts the list back. Leaving a query in place
+            // while its field is out of sight is a wallet that appears to have
+            // lost most of its history.
+            let sender = sender.clone();
+            let entry = widgets.search_entry.clone();
+            widgets
+                .search_bar
+                .connect_search_mode_enabled_notify(move |bar| {
+                    if bar.is_search_mode() {
+                        entry.grab_focus();
+                    } else if !entry.text().is_empty() {
+                        entry.set_text("");
+                        sender.input(WalletPageMsg::Search(String::new()));
+                    }
+                });
+        }
+
         // The line hands over to the field, and the field hands back once the
         // name is saved — so the group is always one row tall and the QR above
         // it never moves.
@@ -2644,9 +2695,24 @@ impl WalletPage {
     /// first: it is the thing just typed, and so the thing to undo.
     fn nothing_shown(&self) -> String {
         match (!self.search.trim().is_empty(), self.activity_path) {
-            (true, _) => format!("Nothing matches “{}”", self.search.trim()),
-            (false, Some(_)) => "No transactions on this path".to_string(),
-            (false, None) => "No transactions".to_string(),
+            (true, _) => format!(
+                "Nothing here matches “{}”. Try part of an address, an amount, or a name \
+                 you gave a payment.",
+                self.search.trim()
+            ),
+            (false, Some(_)) => {
+                "This wallet has transactions, but none on the derivation path being shown."
+                    .to_string()
+            }
+            (false, None) => "Nothing to show.".to_string(),
+        }
+    }
+
+    /// Which of the two emptied it, said in a picture as well as in words.
+    fn nothing_icon(&self) -> &'static str {
+        match self.search.trim().is_empty() {
+            false => "system-search-symbolic",
+            true => "document-open-recent-symbolic",
         }
     }
 
