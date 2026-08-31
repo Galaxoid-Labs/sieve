@@ -643,7 +643,13 @@ impl Component for App {
             gtk::style_context_add_provider_for_display(
                 &display,
                 &accent,
-                gtk::STYLE_PROVIDER_PRIORITY_SETTINGS,
+                // One above the settings priority, not level with it.
+                // libadwaita defines the same colour names at that priority
+                // itself, and GTK breaks a tie by which provider was added
+                // last — which put a stock blue accent back over this one as
+                // soon as libadwaita reloaded its colours. Still far below
+                // PRIORITY_APPLICATION, so a user's own CSS overrides it.
+                gtk::STYLE_PROVIDER_PRIORITY_SETTINGS + 1,
             );
         }
         apply_palette(&accent);
