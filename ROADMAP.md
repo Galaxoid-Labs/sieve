@@ -305,9 +305,20 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
 - PSBT export/import and device signing moved to M4a.
 
 ### M8 — Package and release — MAINNET GATE
-Flatpak (the only real app-to-app isolation on Linux), `org.freedesktop.portal.Secret`,
-AppStream metainfo and icon, reproducible builds, signed tags, external review of the vault
-format and signing path.
+See `PACKAGING.md`, which was written after checking the target machine and changes the
+order: Omarchy — the distribution this is built on — ships an AUR helper and **no Flatpak**,
+so an AUR package comes first and Flathub second.
+
+- [ ] A PKGBUILD, built locally with `makepkg -si`. No bundled Tor needed: `tor::daemon::find`
+      already looks on `PATH`, so `optdepends=('tor')` is the whole story on Arch.
+- [ ] Install the icon and desktop entry properly — the gresource is for the app's own use and
+      does nothing for the desktop's icon theme.
+- [ ] Build the Flatpak manifest for the first time. It has never run.
+- [ ] AppStream metainfo, and an icon that is Sieve's own rather than the Bitcoin symbol.
+- [ ] Decide what the Flatpak says about hardware wallets: USB HID needs `--device=all` and
+      host udev rules, which is a real limit rather than a detail.
+- [ ] `org.freedesktop.portal.Secret`, reproducible builds, signed tags, and external review of
+      the vault format and the signing path.
 
 **Mainnet is *not* currently gated, and this line has been wrong for a while.**
 `ui/restore.rs` lets mainnet through behind an acknowledgement, and the wallet has been run
