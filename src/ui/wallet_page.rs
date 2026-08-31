@@ -2248,18 +2248,12 @@ impl Component for WalletPage {
 
             // TEMPORARY — remove with the button that sends it.
             WalletPageMsg::ShowWelcome => {
-                if let Some(popover) = self.main_menu.as_ref().and_then(|b| b.popover()) {
-                    popover.popdown();
-                }
+                self.close_menu();
                 let _ = sender.output(WalletPageOutput::ShowWelcome);
             }
 
             WalletPageMsg::ShowAbout => {
-                // Closes the menu it was chosen from: a popover left open
-                // behind a dialog is still there when the dialog goes.
-                if let Some(popover) = self.main_menu.as_ref().and_then(|b| b.popover()) {
-                    popover.popdown();
-                }
+                self.close_menu();
                 crate::about::present(root);
             }
             WalletPageMsg::NameAddress(text) => {
@@ -2338,6 +2332,7 @@ impl Component for WalletPage {
                 }
             }
             WalletPageMsg::ShowPreferences => {
+                self.close_menu();
                 let _ = sender.output(WalletPageOutput::ShowPreferences);
             }
             WalletPageMsg::SetLocked(locked) => {
@@ -3144,6 +3139,18 @@ impl WalletPage {
         group.add(&shown);
         group.add(&editing);
         group
+    }
+
+    /// Shut the header menu.
+    ///
+    /// A GTK popover does not close because something inside it was clicked,
+    /// so every menu action has to say so. Doing it in one place rather than
+    /// in each handler: Preferences was added without it and left the menu
+    /// hanging over the dialog, swallowing scroll until it was clicked away.
+    fn close_menu(&self) {
+        if let Some(popover) = self.main_menu.as_ref().and_then(|button| button.popover()) {
+            popover.popdown();
+        }
     }
 
     /// Put the current address's name on screen, and close the editor.
