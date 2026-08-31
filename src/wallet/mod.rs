@@ -199,6 +199,13 @@ pub struct Paths {
     /// Public, password-free metadata: network, birthday, derivation paths.
     /// Sync is watch-only, so this cannot live in the encrypted vault.
     pub meta: PathBuf,
+    /// Present only on a watch-only wallet somebody has chosen to lock.
+    ///
+    /// A wallet with no keys has no seed to seal, so there is nothing for a
+    /// password to decrypt — this holds a known constant instead, and opening
+    /// it is what proves the password. See `lock` below for what that does and
+    /// does not protect.
+    pub lock: PathBuf,
 }
 
 /// Root of everything Sieve stores.
@@ -229,6 +236,7 @@ impl Paths {
             vault: dir.join("vault.sieve"),
             db: dir.join("wallet.sqlite"),
             meta: dir.join("wallet.meta.json"),
+            lock: dir.join("lock.sieve"),
             dir,
         }
     }
@@ -259,6 +267,9 @@ pub struct WalletEntry {
     pub id: String,
     pub name: String,
     pub network: String,
+    /// Whether opening it asks for a password — true for any wallet holding a
+    /// seed, and for a watch-only wallet somebody has chosen to lock.
+    pub locked: bool,
 }
 
 /// Every wallet on disk, newest-looking last.
@@ -285,6 +296,7 @@ pub fn list_wallets() -> Vec<WalletEntry> {
             Some(meta) => found.push(WalletEntry {
                 name: meta.display_name(&id),
                 network: meta.network,
+                locked: is_locked(&paths),
                 id,
             }),
             None => {
@@ -292,6 +304,7 @@ pub fn list_wallets() -> Vec<WalletEntry> {
                 found.push(WalletEntry {
                     name: format!("Wallet {}", &id[..id.len().min(4)]),
                     network: "unknown".into(),
+                    locked: is_locked(&paths),
                     id,
                 });
             }
@@ -1153,6 +1166,7 @@ mod tests {
             vault: dir.join("vault.sieve"),
             db: dir.join("wallet.sqlite"),
             meta: dir.join("wallet.meta.json"),
+            lock: dir.join("lock.sieve"),
             dir,
         }
     }
@@ -1226,6 +1240,68 @@ mod tests {
         let unique: std::collections::HashSet<_> =
             summary.addresses.iter().map(|a| &a.address).collect();
         assert_eq!(unique.len(), summary.addresses.len());
+
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    #[test]
+    fn a_watch_only_wallet_can_be_locked_and_unlocked() {
+        // A real public descriptor rather than an invented one: made by
+        // creating a wallet and reading back what its database holds,
+        // which is exactly the shape a device hands over.
+        let source = scratch("watchlock-source");
+        let phrase = generate_mnemonic().unwrap();
+        create_for_test(&phrase, b"a good password", &source);
+        let db = data_dir(&source).join(accounts::ScriptType::Taproot.db_file());
+        let account = accounts::Account::load(accounts::ScriptType::Taproot, &db, DEFAULT_NETWORK)
+            .unwrap()
+            .unwrap();
+        let descriptor = account
+            .wallet
+            .public_descriptor(bdk_wallet::KeychainKind::External)
+            .to_string();
+        drop(account);
+        std::fs::remove_dir_all(&source.dir).ok();
+
+        let paths = scratch("watchlock");
+        let birthday = SIGNET_CHECKPOINTS[0];
+        import_descriptor(&descriptor, &paths, DEFAULT_NETWORK, birthday, None)
+            .expect("a public descriptor imports");
+
+        // No password to begin with, which is what makes this worth fixing:
+        // the wallet opens and shows everything.
+        assert!(!is_locked(&paths), "a watch-only wallet starts unlocked");
+        assert!(open_watch_only(&paths).is_ok());
+
+        set_watch_only_password(&paths, b"a good password").unwrap();
+        assert!(is_locked(&paths));
+        assert!(paths.lock.exists());
+
+        // A wrong password fails on the AEAD tag, exactly as a real vault
+        // does, so there is only one way for this to be wrong.
+        assert!(open_locked_watch_only(&paths, b"not the password").is_err());
+        assert!(open_locked_watch_only(&paths, b"a good password").is_ok());
+
+        // And the wallet itself is untouched by any of it: the lock is a
+        // separate file, and taking it off leaves the wallet as it was.
+        clear_watch_only_password(&paths).unwrap();
+        assert!(!is_locked(&paths));
+        assert!(open_watch_only(&paths).is_ok());
+
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    #[test]
+    fn a_wallet_with_a_seed_will_not_take_a_watch_only_lock() {
+        // Its password is the vault's, and a second one would be a second
+        // thing to get wrong for no gain.
+        let paths = scratch("seedlock");
+        let phrase = generate_mnemonic().unwrap();
+        create_for_test(&phrase, b"a good password", &paths);
+
+        let refused = set_watch_only_password(&paths, b"another password").unwrap_err();
+        assert!(refused.to_string().contains("holds a key"), "{refused}");
+        assert!(!paths.lock.exists());
 
         std::fs::remove_dir_all(&paths.dir).ok();
     }
@@ -1789,6 +1865,66 @@ pub fn open_watch_only(paths: &Paths) -> Result<Summary> {
     Summary::from_portfolio(&mut portfolio)
 }
 
+/// What a watch-only lock seals. The value is irrelevant; being able to
+/// decrypt it is the whole message.
+const LOCK_TOKEN: &[u8] = b"sieve watch-only lock";
+
+/// Whether this wallet asks for a password before it will open.
+///
+/// True for any wallet with a vault — the seed is in it — and for a watch-only
+/// wallet that has been given a lock.
+pub fn is_locked(paths: &Paths) -> bool {
+    paths.vault.exists() || paths.lock.exists()
+}
+
+/// Give a watch-only wallet a password, or change the one it has.
+///
+/// **This locks the wallet inside Sieve. It does not encrypt anything on
+/// disk.** A watch-only wallet's descriptors and history live in SQLite files
+/// that BDK reads directly, and encrypting them would mean encrypting the
+/// database the node writes to on every block. What this protects is somebody
+/// opening Sieve at your machine and reading your balance; what it does not
+/// protect is somebody who has the files. Every screen that offers it has to
+/// say so, or it promises more than it delivers.
+pub fn set_watch_only_password(paths: &Paths, password: &[u8]) -> Result<()> {
+    let meta = Meta::load(paths).context("this wallet has no metadata file")?;
+    if !meta.watch_only {
+        anyhow::bail!("this wallet holds a key, and its password is the vault's");
+    }
+    let sealed = vault::seal(
+        LOCK_TOKEN,
+        password,
+        &meta.network,
+        vault::KdfParams::default(),
+    )?;
+    vault::write_atomic(&paths.lock, &sealed)?;
+    restrict(&paths.lock)
+}
+
+/// Take the lock off, so the wallet opens without asking.
+pub fn clear_watch_only_password(paths: &Paths) -> Result<()> {
+    if !paths.lock.exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(&paths.lock)
+        .with_context(|| format!("could not unlock {}", paths.lock.display()))
+}
+
+/// Open a watch-only wallet that has a lock on it.
+///
+/// The password is checked by decrypting the token: a wrong one fails the
+/// AEAD tag, exactly as a wrong password fails a real vault, so there is no
+/// second way for this to be wrong.
+pub fn open_locked_watch_only(paths: &Paths, password: &[u8]) -> Result<Summary> {
+    let blob = std::fs::read(&paths.lock)
+        .with_context(|| format!("cannot read {}", paths.lock.display()))?;
+    let opened = vault::open(&blob, password)?;
+    if opened.as_slice() != LOCK_TOKEN {
+        anyhow::bail!("that is not this wallet's password");
+    }
+    open_watch_only(paths)
+}
+
 /// Delete a wallet from this computer.
 ///
 /// What goes: the encrypted vault, the watch-only databases, the metadata —
@@ -1925,6 +2061,7 @@ mod removal_tests {
             vault: outside.join("vault.sieve"),
             db: outside.join("wallet.sqlite"),
             meta: outside.join("wallet.meta.json"),
+            lock: outside.join("lock.sieve"),
             dir: outside.clone(),
         };
 
@@ -1942,6 +2079,7 @@ mod removal_tests {
             vault: empty.join("vault.sieve"),
             db: empty.join("wallet.sqlite"),
             meta: empty.join("wallet.meta.json"),
+            lock: empty.join("lock.sieve"),
             dir: empty.clone(),
         };
         assert!(remove(&paths).is_err());

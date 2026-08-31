@@ -419,8 +419,7 @@ mod tests {
 
         for (script_type, address) in expected {
             let db = dir.join(script_type.db_file());
-            let mut account =
-                Account::create(xprv, script_type, &db, Network::Bitcoin, 25).unwrap();
+            let account = Account::create(xprv, script_type, &db, Network::Bitcoin, 25).unwrap();
             let first = account
                 .wallet
                 .peek_address(KeychainKind::External, 0)

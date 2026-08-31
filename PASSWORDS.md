@@ -40,7 +40,32 @@ Sources: [Electrum FAQ](https://electrum.readthedocs.io/en/latest/faq.html),
 [Sparrow features](https://sparrowwallet.com/features/),
 [Sparrow best practices](https://sparrowwallet.com/docs/best-practices.html).
 
-## The proposal: both, chosen once
+## What was built
+
+**Per-wallet passwords stay.** They are what Electrum and Sparrow do, and a
+shared password's blast radius — one secret opening every wallet — was not
+worth trading for typing one fewer password.
+
+**Watch-only wallets can now be locked.** `lock.sieve` beside the wallet: a
+vault whose plaintext is a known constant, sealed with a password of that
+wallet's own. Opening it proves the password; a wrong one fails on the AEAD
+tag exactly as a real vault does, so there is one way for this to be wrong
+rather than two. Set, changed and removed from Preferences → This wallet, and
+the wallet list marks a locked wallet so you know before choosing it.
+
+**What it protects, said on every screen that offers it:** the wallet inside
+Sieve, not the files on disk. A watch-only wallet's descriptors and history
+live in SQLite that BDK reads directly and the node writes to on every block;
+encrypting them would mean encrypting a database in active use. So the lock
+shuts what is on screen against somebody who opens Sieve at your machine, and
+does nothing against somebody holding the files. Saying only the first half
+would be the more attractive claim and the dishonest one.
+
+The rest of this document — a shared application password — was considered and
+not taken. It is kept because the reasoning is worth having if the question
+comes back.
+
+## The proposal that was not taken: both, chosen once
 
 At first run, one question with two answers, and it can be changed later:
 

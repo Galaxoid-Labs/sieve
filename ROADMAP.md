@@ -303,10 +303,10 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
 ### M7 — Lock and key hygiene
 - [x] Idle auto-lock, with the interval a preference and a "Lock now" beside it.
 - [x] Lock on suspend, via logind `PrepareForSleep` over the D-Bus GIO already provides.
-- [ ] One password for the app, or one per wallet, chosen at first run — and a lock for
-      watch-only wallets, which have none at all today. `PASSWORDS.md` has the design; the
-      vault format already separates the key that is derived from the key that is wrapped, so
-      this needs no format change.
+- [x] A lock for watch-only wallets, which had none at all: `lock.sieve` seals a known
+      constant, so a wallet with no keys still has a password to fail against. Per-wallet
+      passwords stay; the shared-password design in `PASSWORDS.md` was considered and not
+      taken, and the reasoning is kept there.
 - [ ] Opt-in Secret Service storage, labelled as convenience and not as a boundary.
 - [ ] FIDO2 `hmac-secret` as a second wrap.
 - [ ] Lock on screensaver as well as on sleep — a locked session is the other ordinary way a

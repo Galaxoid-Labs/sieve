@@ -157,6 +157,7 @@ mod icon_names {
         "network-wireless-symbolic",
         "network-offline-symbolic",
         "network-idle-symbolic",
+        "changes-prevent-symbolic",
         "channel-secure-symbolic",
     ];
 

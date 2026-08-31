@@ -190,7 +190,17 @@ impl Component for Unlock {
                 // Blocking and CPU-bound: goes to the thread pool, not the
                 // main loop. `spawn_oneshot_command` cancels on shutdown.
                 sender.spawn_oneshot_command(move || {
-                    let result = wallet::unlock(passphrase.0.as_bytes(), &paths)
+                    // Two shapes of wallet arrive here. One has a vault and
+                    // the password decrypts a seed; the other has no keys at
+                    // all and the password decrypts a token that exists only
+                    // to be decrypted. Both fail the same way on a wrong
+                    // password, which is why they can share this screen.
+                    let opened = if paths.lock.exists() {
+                        wallet::open_locked_watch_only(&paths, passphrase.0.as_bytes())
+                    } else {
+                        wallet::unlock(passphrase.0.as_bytes(), &paths)
+                    };
+                    let result = opened
                         .map(|summary| (paths, summary))
                         .map_err(|e| e.to_string());
                     UnlockCmd::Finished(result)

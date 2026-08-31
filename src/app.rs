@@ -225,6 +225,7 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(8);
 
 const ICONS: &[&str] = &[
     crate::APP_ID,
+    "changes-prevent-symbolic",
     "channel-secure-symbolic",
     "document-open-recent-symbolic",
     "document-save-symbolic",
@@ -310,6 +311,10 @@ pub enum AppMsg {
     SetIdleLock(crate::settings::IdleLock),
     /// Shut the wallet: the password is needed again to see it.
     Lock(LockReason),
+    /// Set, change or remove the password on a watch-only wallet.
+    AskWatchOnlyPassword,
+    SetWatchOnlyPassword(crate::ui::send::Password),
+    ClearWatchOnlyPassword,
     /// Confirm, then throw away this wallet's chain data and scan again.
     AskRescan,
     Rescan,
@@ -1098,6 +1103,107 @@ impl Component for App {
                 });
             }
 
+            AppMsg::AskWatchOnlyPassword => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                let Some(window) = self.nav.root() else {
+                    return;
+                };
+                let locked = paths.lock.exists();
+
+                let dialog = adw::AlertDialog::new(
+                    Some(if locked {
+                        "Change this password?"
+                    } else {
+                        "Set a password?"
+                    }),
+                    Some(
+                        "This wallet holds no keys, so there is nothing here to decrypt. A \
+                         password shuts what is on screen — the balance, the history, the \
+                         addresses — against somebody who opens Sieve at this machine.\n\n\
+                         It does not encrypt the files. Anybody holding them can still read \
+                         this wallet's history, password or not.",
+                    ),
+                );
+                dialog.add_response("cancel", "Cancel");
+                if locked {
+                    dialog.add_response("clear", "Remove it");
+                    dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
+                }
+                dialog.add_response("set", if locked { "Change" } else { "Set" });
+                dialog.set_response_appearance("set", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                let entry = gtk::PasswordEntry::new();
+                entry.set_show_peek_icon(true);
+                entry.set_placeholder_text(Some("New password"));
+                entry.set_margin_top(6);
+                dialog.set_extra_child(Some(&entry));
+
+                {
+                    let sender = sender.clone();
+                    let entry = entry.clone();
+                    dialog.connect_response(None, move |_, response| match response {
+                        "set" => {
+                            sender.input(AppMsg::SetWatchOnlyPassword(crate::ui::send::Password(
+                                zeroize::Zeroizing::new(entry.text().to_string()),
+                            )))
+                        }
+                        "clear" => sender.input(AppMsg::ClearWatchOnlyPassword),
+                        _ => {}
+                    });
+                }
+                dialog.present(Some(&window));
+            }
+
+            AppMsg::SetWatchOnlyPassword(password) => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                if password.0.trim().is_empty() {
+                    self.prefs
+                        .add_toast(adw::Toast::new("A password cannot be empty"));
+                    return;
+                }
+                match wallet::set_watch_only_password(&paths, password.0.as_bytes()) {
+                    Ok(()) => {
+                        self.prefs.add_toast(adw::Toast::new(
+                            "This wallet will ask for that password when it is opened",
+                        ));
+                        self.rebuild_preferences(&sender);
+                    }
+                    Err(e) => {
+                        tracing::error!(%e, "could not set the wallet password");
+                        self.prefs
+                            .add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                                &e.to_string(),
+                            )));
+                    }
+                }
+            }
+
+            AppMsg::ClearWatchOnlyPassword => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                match wallet::clear_watch_only_password(&paths) {
+                    Ok(()) => {
+                        self.prefs
+                            .add_toast(adw::Toast::new("This wallet now opens without asking"));
+                        self.rebuild_preferences(&sender);
+                    }
+                    Err(e) => {
+                        tracing::error!(%e, "could not remove the wallet password");
+                        self.prefs
+                            .add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                                &e.to_string(),
+                            )));
+                    }
+                }
+            }
+
             AppMsg::AskRescan => {
                 let Some(paths) = self.active.clone() else {
                     return;
@@ -1321,10 +1427,13 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetName(name.clone()));
                 self.close_prefs();
 
-                // A watch-only wallet has no vault and therefore no password:
-                // there is nothing to decrypt and nothing a password would
-                // protect. Asking for one would be theatre.
-                if wallet::Meta::load(&paths).is_some_and(|m| m.watch_only) {
+                // A watch-only wallet has no vault, so there is nothing for a
+                // password to decrypt — but there is still a balance and a
+                // history on screen, and somebody may reasonably want those
+                // shut. A wallet that has been given a lock asks for it; one
+                // that has not opens straight away, as before.
+                if wallet::Meta::load(&paths).is_some_and(|m| m.watch_only) && !paths.lock.exists()
+                {
                     let opening = paths.clone();
                     sender.oneshot_command(async move {
                         let result = tokio::task::spawn_blocking(move || {
@@ -2794,6 +2903,31 @@ impl App {
                 phrase.connect_activated(move |_| sender.input(AppMsg::ShowRecoveryPhrase));
             }
             this.add(&phrase);
+
+            // A wallet with no keys still has a balance and a history, and
+            // until now nothing shut them: opening Sieve showed everything.
+            // The password gates the wallet inside the app; it does not
+            // encrypt anything, and the subtitle says which of those it is.
+            if watch_only && let Some(paths) = self.active.clone() {
+                let locked = paths.lock.exists();
+                let lock = adw::ActionRow::new();
+                lock.set_title(if locked { "Password" } else { "Set a password" });
+                lock.set_subtitle(if locked {
+                    "Asked for when this wallet is opened. It does not encrypt the files on \
+                     disk — there are no keys here to protect, only what is on screen."
+                } else {
+                    "This wallet opens without asking. A password would shut its balance and \
+                     history to somebody at this machine — the files on disk stay readable."
+                });
+                lock.set_subtitle_lines(3);
+                lock.set_activatable(true);
+                lock.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                {
+                    let sender = sender.clone();
+                    lock.connect_activated(move |_| sender.input(AppMsg::AskWatchOnlyPassword));
+                }
+                this.add(&lock);
+            }
         }
 
         // Remembering peers is what makes a restart quick; forgetting them is

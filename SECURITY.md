@@ -36,8 +36,12 @@ bound as additional authenticated data, so a header edited to weaken the KDF
 fails to decrypt rather than decrypting with weaker settings. Written
 atomically, mode 0600.
 
-Watch-only wallets have no vault at all: there is nothing to protect, and a
-password would be theatre.
+Watch-only wallets have no vault, because there is no seed to seal. They can
+still be locked: `lock.sieve` holds a known constant sealed with a password,
+and opening it is what proves the password. That gates the wallet inside Sieve
+— the balance, the history, the addresses — and **does not encrypt anything on
+disk**, because the descriptors and history live in SQLite that the node
+writes to on every block. Every screen that offers it says so.
 
 **In memory** — `src/wallet/send.rs`, `src/wallet/node.rs`
 

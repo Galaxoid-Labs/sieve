@@ -14,6 +14,10 @@ pub struct WalletRow {
     id: String,
     name: String,
     network: String,
+    /// Whether picking it will ask for a password. Worth knowing before
+    /// picking, and the only way to tell a locked watch-only wallet from an
+    /// unlocked one.
+    locked: bool,
 }
 
 #[derive(Debug)]
@@ -36,6 +40,13 @@ impl FactoryComponent for WalletRow {
             set_activatable: true,
 
             add_suffix = &gtk::Image {
+                set_icon_name: Some("changes-prevent-symbolic"),
+                add_css_class: "dim-label",
+                set_visible: self.locked,
+                set_tooltip_text: Some("Asks for a password"),
+            },
+
+            add_suffix = &gtk::Image {
                 set_icon_name: Some("go-next-symbolic"),
             },
 
@@ -50,6 +61,7 @@ impl FactoryComponent for WalletRow {
             id: entry.id,
             name: entry.name,
             network: entry.network,
+            locked: entry.locked,
         }
     }
 }
