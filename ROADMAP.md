@@ -18,6 +18,121 @@ a migration and a re-scan.
 | Password vs passphrase | **Both, named distinctly** | The *password* always encrypts the file. The *passphrase* is the optional BIP-39 25th word. A wrong password errors; a wrong passphrase silently derives an empty wallet, so the UI must never blur them. |
 | Wallet count | **One per vault** | Keeps unlock, sync, and the signer singular. The header carries a version, so multi-account stays open. |
 
+## What is missing, in the order it hurts
+
+Written after a full evening of using the wallet on mainnet, and kept current as the list is
+worked through. The milestone in brackets is where the work belongs.
+
+1. **Hardware signing and PSBT files.** [M4a] A device-imported wallet can receive forever and
+   never spend, and there is no air-gapped path at all. The PSBT half is designed but not
+   built — see `PSBT.md`, which also records what multisig would need and why it is a
+   milestone rather than a feature.
+
+Then, in rough order:
+
+- **No descriptor export.** [M5] The recovery phrase can be revealed, but the *public*
+  descriptors cannot be got out — and that is the backup that recreates this wallet
+  watch-only somewhere else without putting a coin at risk.
+- **Amounts cannot be typed in dollars.** [M5] They can be read in dollars.
+- **One recipient per transaction.** [M4]
+- **No search in the activity list.** [M5] It filters by derivation path now; not by amount,
+  address or transaction id.
+- **No local filter store.** [M2] Every deep rescan re-downloads gigabytes of filters that
+  were downloaded last time. Blocks headers are already shared per network; filters are not.
+
+## Closed since that list was written
+
+- **Fee bump (RBF).** [M4] "Raise the fee" on the detail page of an unconfirmed payment you
+  made — its own row, not a button crushed into a suffix. Two dialogs: a rate, floored at what
+  the network will actually relay (the original's fee *plus* a satoshi per virtual byte for the
+  replacement's own size — below that every node drops it, which looks exactly like being
+  ignored), then every number restated and a password. `build_fee_bump` does the construction;
+  signing and broadcast reuse the send path unchanged.
+  - **The label follows to the new id without leaving the old one**, because either
+    transaction can still be the one that confirms, and moving it would leave the winner
+    unnamed.
+  - **The original winning the race needs no handling.** Both spend the same coins, so only
+    one can ever confirm; a confirmed transaction outranks an unconfirmed conflict in BDK's
+    canonicalisation, and BIP-158 filters match on scripts spent as well as created, so the
+    block that settles it arrives like any other. The wallet corrects itself.
+  - **"Already raised" is derived, not remembered.** The graph keeps the transaction that
+    lost, so `direct_conflicts()` reads the fact straight back: it survives restarts with no
+    bookkeeping of ours and cannot drift from what happened.
+  - A successful raise leaves the page showing the payment that no longer exists and opens the
+    replacement's own page, rather than toasting over a stale screen.
+  - *Still missing: cancel-by-replacement, and bumping on a hardware wallet, which needs
+    device signing first.*
+- **Coin control.** [M6] A Coins row on the send form pushes a picker: every coin on the path
+  being spent from, largest first, each named by the label on the payment that brought it in
+  or on the address it landed on — which is what the label work bought. Automatic stays the
+  default and says so in its own row; **Choose for me** puts it back. The tally answers the
+  question that matters at the moment of choosing: what is selected, whether it covers the
+  amount **plus the fee** (an exact-amount payment adds the fee on top, so checking against
+  the amount alone would tick and then fail to build), and — the point of the screen — that
+  spending two coins together tells anyone reading the chain that one person held both, said
+  in the names given to those coins. `manually_selected_only()` is what makes a selection
+  binding; without it BDK treats it as a starting point and tops it up, silently undoing the
+  decision. Max drains exactly the chosen coins, and "available" means the selection once
+  there is one.
+- **Idle auto-lock, and lock on sleep.** [M7] Preferences → Locking: never, 5, 15, 30 minutes
+  or an hour, defaulting to **five** — a protection that ships off protects nobody who never
+  opens preferences — plus a **Lock now** row. One `EventControllerLegacy` on the window in the
+  capture phase counts as being there: every key, click, scroll and pointer move, passed
+  straight through, so every screen added later is covered by construction. The clock is an
+  `Instant` polled every fifteen seconds rather than a timer rebuilt on each keystroke. logind's
+  `PrepareForSleep` over GIO's own D-Bus locks on the way down, because a closed laptop beats
+  every idle timeout to it. Locking shuts the view and clears the reveal screen but leaves the
+  node running: syncing is watch-only work, and stopping it would mean re-downloading filters
+  to see a balance that was on screen a minute ago. The wallet says *why* it locked, since one
+  that shuts itself silently reads as a fault.
+- **BIP-21 payment URIs.** [M4] `wallet::uri` reads them. Pasting one into Pay to unpacks the
+  address and amount into the fields, shows what the request said about itself above them, and
+  names the payment after whoever the request said was being paid once it is sent. A `req-`
+  parameter Sieve does not implement refuses the whole URI, as BIP-21 requires.
+  `parse_address` unpacks one too, so nothing reaches a signature with a URI in the field —
+  and the amount is never read from that path, so a request cannot quietly change what is
+  being sent. *Still missing: reading one from a camera.*
+- **Labels, on transactions and addresses.** [M5] `wallet::labels`, BIP-329 JSONL beside the
+  wallet. A payment's name leads its activity row beside the direction (`Sent · Rent`) and is
+  edited from a line on the detail page rather than a field standing open; an address is named
+  on the receive screen before it is handed out, and that name then appears against it
+  wherever it shows up in a transaction. Import and export from Preferences, so they are not
+  trapped here — fields Sieve does not display survive the round trip. Unencrypted with
+  `0600`, and the UI says so: a watch-only wallet has no password to encrypt them with, and
+  the history beside them is readable anyway. *Still missing: input and output labels, which
+  BIP-329 defines and Sieve preserves but does not show.*
+- **Address list.** [M3] A page pushed from Receive: every address handed out, oldest first,
+  with the label if it has one, the address monospaced, its full derivation path dimmed
+  underneath, and either **Unused** or what it received. An address paid more than once says
+  **Paid 3 times** in the warning colour — the privacy fact this screen can state that no
+  other screen can. Derived from each keychain's revealed index rather than remembered, so it
+  cannot drift from what the wallet is actually watching. Receive addresses only: change
+  belongs to a payment rather than to anybody.
+- **Rescan.** [M2] A button on the Sync group, behind an alert dialog that says what it costs.
+  Clears each path's chain data and scans again from the birthday, keeping the descriptors and
+  replaying the revealed index — without which a rescan would stop watching addresses already
+  handed out. The old Refresh button, which re-read the chain view that a tick already
+  re-reads every eight seconds, is gone.
+- **An About window.** A real menu behind the header's hamburger (it used to open Preferences
+  directly, which made About unreachable and the icon a lie). `adw::AboutDialog` with what
+  Sieve is, the dual licence, a Credits section of rows that open each library's repository,
+  and Legal split per component instead of one wall of text. The list is generated by
+  `scripts/licenses.sh` from `cargo metadata`, so versions, licences and URLs are read from
+  the crates themselves; a test asserts every named component is still a dependency.
+- **Honest sync reporting, end to end.** The block-header phase has a real progress bar
+  (estimated tip from a checkpoint plus the clock); the filter phase has kyoto's own; and the
+  final phase — fetching the blocks the filters matched, which is where the last twenty
+  seconds went with nothing on screen — now names itself and fills a bar against the count the
+  last scan measured, recorded in `Meta.matched_blocks`. A wallet that has never finished a
+  scan gets a spinner, because there is nothing honest to draw yet.
+- **Money reads like money.** Dollar figures are grouped to the thousand everywhere
+  (`price::usd`); addresses, transaction ids and block hashes are monospaced everywhere,
+  including in the send confirmation; the activity list filters by derivation path; and the
+  transaction detail shows the full path of each of the wallet's own outputs
+  (`m/84'/0'/0'/1/7`), read from the descriptor's origin rather than assumed.
+- **Review payment is disabled until the form describes a payment**, with a tooltip saying
+  what is still missing, rather than being pressable and answering with an error.
+
 ## Milestones
 
 ### M0 — Scaffold — SHIPPED
@@ -66,10 +181,20 @@ crosses a component boundary as a message.
 - `ScanType::Recovery` with lookahead sized to wallet history — undersizing silently misses
   transactions rather than erroring
 - Progress from the `Info` stream; `Warning` stream to an `adw::Banner`
+- [x] Block headers shared per network, so a second wallet on a chain Sieve has already seen
+      does not download it again.
+- [x] A resume point (`Meta.scanned_to`), so an interrupted scan restarts where it stopped
+      rather than at the birthday.
+- [x] Rescan on demand, behind a dialog that says what it costs.
+- [ ] A local filter store. Headers are shared; filters are not, so a deep rescan still
+      re-downloads gigabytes.
 
-### M3 — Receive
-`reveal_next_address` with persistence, QR into a `gtk::DrawingArea` (theme-aware — see rule 5),
-BIP-21 URIs, issued-address list with used/unused state.
+### M3 — Receive — DONE
+- [x] `reveal_next_address` with persistence, and a QR rendered in-process — handing an address
+      to an image service would disclose exactly what a block explorer lookup would.
+- [x] BIP-21 URIs, written on this screen and read on the send side.
+- [x] The issued-address list, with used/unused state, what each received, and reuse called out.
+- [x] A name on an address, set before it is handed out.
 
 ### M4 — Send
 - [x] Address and amount validation — wrong-network addresses get their own message, and
@@ -85,14 +210,69 @@ BIP-21 URIs, issued-address list with used/unused state.
 - [ ] A BIP-39 passphrase at signing time, for wallets imported with one. Refused clearly for
       now rather than silently failing to finalize.
 - [x] Unconfirmed coins excluded from selection.
-- [ ] Coin control and RBF.
+- [x] BIP-21 payment requests read on paste, including the amount and who is being paid.
+- [x] Fee bump, with the race against the original explained rather than hidden.
+- [x] Coin control, on its own screen, with the linking it avoids stated in plain words.
+- [ ] Cancel a payment by replacing it with one that pays yourself.
+- [ ] More than one recipient in a transaction.
 
 Exercised end to end on signet: built, signed, broadcast, shown as pending, and confirmed on
 its own through ordinary filter sync — no explorer, no server told which transaction to watch.
 
+### M4a — Hardware signers
+*Done when: a payment can be built in Sieve, confirmed on a device screen, and broadcast, with
+Sieve never holding a key.*
+
+Working today:
+
+- [x] Discovery over USB with `async-hwi` — pure Rust, no Python, no HWI install, no daemon.
+      Ledger, Coldcard, Specter and Jade are compiled in; only Ledger has been exercised.
+- [x] Reading `m/purpose'/coin'/0'` on all four script types and assembling the same descriptor
+      a person could have pasted, so a device import and a descriptor import land in the same
+      place. `display_xpub(false)` keeps it to one prompt instead of four.
+- [x] Watch-only wallet from those descriptors: balance, activity, receive, and the whole send
+      form up to the moment of signing.
+- [x] A udev hint when the device is plugged in and invisible, and a plain message when a
+      Ledger's Bitcoin app refuses a coin-type-1 path because the wallet is on signet.
+
+Left to build:
+
+- [ ] **Signing over USB** — `HWI::sign_tx(&mut Psbt)`. The PSBT is already built and reviewed
+      by the watch-only path; what is missing is handing it to the device, a "confirm on your
+      device" state that can be cancelled, finalizing, and broadcast. Today the send flow stops
+      at an explanatory page for a watch-only wallet.
+- [ ] **Verify address on device** — `display_address`. `AddressScript::P2TR(path)` works on a
+      Ledger with no setup, so taproot wallets could have it immediately. The other three paths
+      go through `AddressScript::Miniscript { index, change }`, which the device only answers
+      for a **registered** wallet policy.
+- [ ] **Wallet policy registration**, which the previous item needs: a one-time on-device
+      confirmation that returns an HMAC, stored per wallet in `Meta`. It is also what lets a
+      Ledger recognise its own change outputs when signing a non-taproot payment.
+- [ ] **Record the device fingerprint in `Meta`**, so signing can refuse a device that is not
+      the one this wallet was imported from instead of producing signatures that do not verify.
+- [ ] **PSBT export and import as files**, for air-gapped use — a Coldcard on an SD card, a
+      Jade over QR. No USB at all, and the only way some people will sign.
+- [ ] **Accounts past `0'`**, and a passphrase-derived device wallet, both of which currently
+      have no way in.
+- [ ] Handle the device being unplugged, locked, or switched to another app mid-flow, rather
+      than surfacing the raw `async-hwi` error.
+- [ ] Exercise Coldcard, Specter and Jade at all. Their code paths compile and have never run.
+
+Sieve sends a device five commands, all of them reads: `enumerate`, `get_version`,
+`get_master_fingerprint`, `get_extended_pubkey`, and `display_xpub(false)` to suppress a
+prompt. Nothing it can send writes to a device — a wiped Ledger showing "set up as new /
+restore" was wiped by its own firmware, which is what three wrong PIN entries do.
+
 ### M5 — Transaction history
-`adw::ActionRow` list, detail page on an `adw::NavigationView`, confirmation depth, fee paid,
-pending and replaced states.
+- [x] `adw::ActionRow` list, detail page on an `adw::NavigationView`, confirmation depth, fee
+      paid, pending state, and the fee rate the payment actually got.
+- [x] Filter the list by derivation path; the path named on each row when more than one is
+      being watched.
+- [x] Labels, in BIP-329's format, importable and exportable.
+- [ ] Search by amount, address or transaction id.
+- [ ] Amounts typed in dollars, not only read in them.
+- [ ] Export the public descriptors — the backup that risks nothing.
+- [ ] Replaced state, which needs RBF to exist first.
 
 ### M6 — Privacy controls
 - [x] Tor for every outbound connection — peers, price, fees — through a system SOCKS5 proxy,
@@ -108,20 +288,31 @@ pending and replaced states.
       the process on an obsolete consensus.
 - [ ] Onion peers: `peers.rs` stores `IpAddr`, so a remembered peer cannot be an onion
       address. kyoto dials them happily; only our own memory of them is missing.
-- [ ] Manual peer pinning with `whitelist_only`, coin control, BIP-329 labels, and an audit
-      that nothing but Bitcoin p2p leaves the machine.
+- [x] Coin control, with the linking it avoids stated in the names given to the coins.
+- [x] BIP-329 labels, importable and exportable.
+- [ ] Coin freezing — BIP-329 already defines `spendable: false`, and the label file is
+      already written, so this is a flag and a filter rather than a new store.
+- [ ] Manual peer pinning with `whitelist_only`, and an audit that nothing but Bitcoin p2p
+      leaves the machine.
 
 ### M7 — Lock and key hygiene
-Idle auto-lock, lock on suspend via logind `PrepareForSleep`, opt-in Secret Service storage
-(labelled as convenience, not a boundary), FIDO2 `hmac-secret` as a second wrap, PSBT
-export/import then HWI.
+- [x] Idle auto-lock, with the interval a preference and a "Lock now" beside it.
+- [x] Lock on suspend, via logind `PrepareForSleep` over the D-Bus GIO already provides.
+- [ ] Opt-in Secret Service storage, labelled as convenience and not as a boundary.
+- [ ] FIDO2 `hmac-secret` as a second wrap.
+- [ ] Lock on screensaver as well as on sleep — a locked session is the other ordinary way a
+      machine is left unattended.
+- PSBT export/import and device signing moved to M4a.
 
 ### M8 — Package and release — MAINNET GATE
 Flatpak (the only real app-to-app isolation on Linux), `org.freedesktop.portal.Secret`,
 AppStream metainfo and icon, reproducible builds, signed tags, external review of the vault
 format and signing path.
 
-**Mainnet stays unreachable from the UI until this milestone closes.**
+**Mainnet is *not* currently gated, and this line has been wrong for a while.**
+`ui/restore.rs` lets mainnet through behind an acknowledgement, and the wallet has been run
+against mainnet with real coins. Either the gate becomes real or this stops claiming one;
+what it must not do is keep saying something the code does not do.
 
 ## Running alongside
 

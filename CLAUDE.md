@@ -101,6 +101,13 @@ hardware wallet and importing a descriptor land in the same place on purpose. A 
 that what `hardware::descriptor` produces is what `watch::parse` reads, for all four script
 types — the two halves of that seam would otherwise only meet with a device on the desk.
 
+What is **not** built yet: signing. Every command Sieve sends a device is a read —
+`enumerate`, `get_version`, `get_master_fingerprint`, `get_extended_pubkey`, and
+`display_xpub(false)` to suppress a prompt — so a hardware wallet can fund and watch but not
+yet spend, and the send flow says so rather than failing at the last step. `ROADMAP.md` M4a
+lists what closing that costs, including why "verify address on device" works for taproot
+today and needs a registered wallet policy for the other three paths.
+
 Each backend is enumerated separately and a failure in one is logged rather than returned: a
 machine with no serial ports must not report "no devices" because the Specter probe failed while
 a Ledger sits right there. On Linux a device is invisible without udev rules, which is the

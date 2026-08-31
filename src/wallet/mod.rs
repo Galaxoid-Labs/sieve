@@ -28,6 +28,8 @@ use zeroize::Zeroizing;
 pub mod accounts;
 pub mod send;
 pub mod watch;
+pub mod labels;
+pub mod uri;
 pub mod node;
 
 use crate::vault;
@@ -346,6 +348,17 @@ pub struct Meta {
     /// that were never derived.
     #[serde(default = "default_script_types")]
     pub script_types: Vec<accounts::ScriptType>,
+    /// How many blocks the last completed scan had to fetch and read.
+    ///
+    /// A filter says a block *probably* touches this wallet; the block itself
+    /// is what proves it, and fetching them is the last and slowest phase of a
+    /// scan. Nothing in the node says how many are coming — but the same
+    /// wallet over the same chain matches the same blocks, its own
+    /// transactions plus a false-positive rate that depends only on how many
+    /// scripts are being matched. So the last count is a measurement, and the
+    /// only honest way to draw a bar for that phase.
+    #[serde(default)]
+    pub matched_blocks: Option<u32>,
     /// The path used for receiving.
     #[serde(default = "default_primary")]
     pub primary: accounts::ScriptType,
@@ -412,6 +425,7 @@ impl Meta {
             primary,
             scanned_to: None,
             scanned_hash: None,
+            matched_blocks: None,
             watch_only: false,
         }
     }
@@ -430,6 +444,30 @@ impl Meta {
         if let Err(e) = meta.save(paths) {
             tracing::debug!(%e, "could not record scan progress");
         }
+    }
+
+    /// Remember how many blocks the scan just finished had to read.
+    pub fn record_matched_blocks(paths: &Paths, blocks: u32) {
+        let Some(mut meta) = Self::load(paths) else { return };
+        if meta.matched_blocks == Some(blocks) {
+            return;
+        }
+        meta.matched_blocks = Some(blocks);
+        if let Err(e) = meta.save(paths) {
+            tracing::debug!(%e, "could not record the matched block count");
+        }
+    }
+
+    /// Forget how far a scan got, so the next one starts from the birthday.
+    ///
+    /// The counterpart to `record_scanned_to`, and the reason a rescan is a
+    /// rescan: leaving the resume point in place would have the fresh
+    /// databases skip straight back to where the old ones already were.
+    pub fn forget_scan_progress(paths: &Paths) -> Result<()> {
+        let Some(mut meta) = Self::load(paths) else { return Ok(()) };
+        meta.scanned_to = None;
+        meta.scanned_hash = None;
+        meta.save(paths)
     }
 
     /// The same, for a wallet whose keys live somewhere else.
@@ -473,6 +511,7 @@ impl Meta {
             primary: default_primary(),
             scanned_to: None,
             scanned_hash: None,
+            matched_blocks: None,
             // That format predates watch-only wallets, so it can only be one
             // with a vault.
             watch_only: false,
@@ -518,6 +557,61 @@ pub struct AccountSummary {
     pub next_address: String,
 }
 
+/// One spendable coin, as the coin picker needs it.
+///
+/// A coin is the unit a payment is actually made of, and which ones a payment
+/// spends is the single biggest thing a wallet leaks: two coins spent together
+/// tell anyone reading the chain that the same person held both. That is the
+/// decision this exists to let somebody make.
+#[derive(Debug, Clone)]
+pub struct CoinSummary {
+    pub outpoint: bdk_wallet::bitcoin::OutPoint,
+    pub sats: u64,
+    pub address: String,
+    pub script_type: accounts::ScriptType,
+    /// Written out in full, when the descriptor states an origin.
+    pub path: Option<String>,
+    /// `None` while it is still unconfirmed, which is also what makes it
+    /// unspendable.
+    pub height: Option<u32>,
+    /// The transaction that paid it in. What a label on that payment names.
+    pub from_txid: String,
+    /// Whether it landed on an address that has been paid more than once.
+    pub reused_address: bool,
+}
+
+impl CoinSummary {
+    pub fn confirmations(&self, tip: u32) -> u32 {
+        match self.height {
+            Some(height) if tip >= height => tip - height + 1,
+            _ => 0,
+        }
+    }
+
+    /// Spendable once it is in a block. A payment built on an unconfirmed coin
+    /// dies with the payment that produced it.
+    pub fn spendable(&self) -> bool {
+        self.height.is_some()
+    }
+}
+
+/// One address this wallet has handed out.
+#[derive(Debug, Clone)]
+pub struct AddressSummary {
+    pub address: String,
+    pub script_type: accounts::ScriptType,
+    /// Its position on the receive chain. What makes one of your addresses
+    /// distinguishable from the next.
+    pub index: u32,
+    /// Written out in full — `m/86'/0'/0'/0/3` — when the descriptor states an
+    /// origin to build it from.
+    pub path: Option<String>,
+    pub received_sats: u64,
+    /// How many separate payments landed on it. More than one is address
+    /// reuse, which is the thing this list can tell you that nothing else can.
+    pub payments: usize,
+}
+
 /// One transaction, as the activity list needs it.
 #[derive(Debug, Clone)]
 pub struct TxSummary {
@@ -543,9 +637,20 @@ pub struct TxSummary {
     pub paid_to: Vec<(String, u64)>,
     /// Outputs that came back to this wallet — change on a payment, the
     /// payment itself on a receive.
-    pub paid_to_self: Vec<(String, u64)>,
+    pub paid_to_self: Vec<OwnOutput>,
+    /// The account this transaction's path derives from, written out:
+    /// `m/84'/0'/0'`. Read from the descriptor, so an imported one shows
+    /// whatever account it actually names.
+    pub account_path: Option<String>,
     /// Whether any input signals it may be replaced while unconfirmed.
     pub replaceable: bool,
+    /// Payments this one replaced, by transaction id.
+    ///
+    /// Read back from the transaction graph rather than remembered separately:
+    /// a replacement spends the same coins as what it replaces, so the graph
+    /// already knows they conflict — and it keeps the loser, which is why this
+    /// survives a restart with no bookkeeping of ours.
+    pub replaces: Vec<String>,
     /// An address here has been paid more than once across this wallet's
     /// history. Worth saying: reuse is what links payments together for
     /// anybody watching the chain.
@@ -570,7 +675,7 @@ impl TxSummary {
         if self.is_incoming() {
             return 0;
         }
-        self.paid_to_self.iter().map(|(_, sats)| sats).sum()
+        self.paid_to_self.iter().map(|out| out.sats).sum()
     }
 
     /// How deep it is buried, given the tip the wallet has verified to.
@@ -598,6 +703,10 @@ pub struct Summary {
     pub accounts: Vec<AccountSummary>,
     /// Newest first, across every path.
     pub transactions: Vec<TxSummary>,
+    /// Every address handed out, oldest first within each path.
+    pub addresses: Vec<AddressSummary>,
+    /// Every unspent coin, largest first within each path.
+    pub coins: Vec<CoinSummary>,
 }
 
 impl Summary {
@@ -608,6 +717,9 @@ impl Summary {
         // Counted here because it takes the walk we are already doing, and
         // reuse is what ties one payment to another for anyone watching.
         let mut paid: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        // And how much landed on each, for the address list.
+        let mut landed_on: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
 
         for account in portfolio.accounts.iter_mut() {
@@ -639,8 +751,16 @@ impl Summary {
                 // What a payment actually paid, and what came back as change,
                 // are the two things a person wants from this screen.
                 let split = split_outputs(tx, &account.wallet, account.wallet.network());
-                for (address, _) in split.ours.iter().chain(split.theirs.iter()) {
+                for address in split
+                    .ours
+                    .iter()
+                    .map(|out| &out.address)
+                    .chain(split.theirs.iter().map(|(address, _)| address))
+                {
                     *paid.entry(address.clone()).or_insert(0usize) += 1;
+                }
+                for out in &split.ours {
+                    *landed_on.entry(out.address.clone()).or_insert(0) += out.sats;
                 }
 
                 let (height, seen_at, block_hash) = match wallet_tx.chain_position {
@@ -667,23 +787,99 @@ impl Summary {
                     outputs: tx.output.len(),
                     paid_to: split.theirs,
                     paid_to_self: split.ours,
+                    account_path: account_path(
+                        &account.wallet,
+                        bdk_wallet::KeychainKind::External,
+                    ),
                     // BIP-125: any input below the final sequence number says
                     // this may still be replaced.
                     replaceable: tx.input.iter().any(|i| i.sequence.is_rbf()),
+                    replaces: account
+                        .wallet
+                        .tx_graph()
+                        .direct_conflicts(tx)
+                        .map(|(_, conflicting)| conflicting.to_string())
+                        .collect(),
                     reused_address: false,
                     block_hash: block_hash.map(|hash| hash.to_string()),
                 });
             }
         }
 
+        // Every address this wallet has actually handed out — the revealed
+        // range of each receive chain. Derived rather than remembered: the
+        // keychain's revealed index is the record of what was given out, and
+        // deriving from it cannot drift from what the wallet is watching.
+        for account in portfolio.accounts.iter_mut() {
+            let last = account.wallet.derivation_index(bdk_wallet::KeychainKind::External);
+            let Some(last) = last else { continue };
+            let prefix = account_path(&account.wallet, bdk_wallet::KeychainKind::External);
+
+            for index in 0..=last {
+                let address = account
+                    .wallet
+                    .peek_address(bdk_wallet::KeychainKind::External, index)
+                    .address
+                    .to_string();
+                summary.addresses.push(AddressSummary {
+                    received_sats: landed_on.get(&address).copied().unwrap_or(0),
+                    payments: paid.get(&address).copied().unwrap_or(0),
+                    path: prefix.as_ref().map(|prefix| format!("{prefix}/0/{index}")),
+                    address,
+                    script_type: account.script_type,
+                    index,
+                });
+            }
+        }
+
+        // The coins themselves. Listed per path for the same reason a
+        // transaction is built from one path: each is its own wallet with its
+        // own UTXOs.
+        for account in portfolio.accounts.iter_mut() {
+            let network = account.wallet.network();
+            let mut coins: Vec<CoinSummary> = account
+                .wallet
+                .list_unspent()
+                .map(|utxo| {
+                    let address = bdk_wallet::bitcoin::Address::from_script(
+                        &utxo.txout.script_pubkey,
+                        network,
+                    )
+                    .map(|address| address.to_string())
+                    .unwrap_or_else(|_| "An unusual script, not an address".into());
+
+                    CoinSummary {
+                        height: match utxo.chain_position {
+                            bdk_wallet::chain::ChainPosition::Confirmed { anchor, .. } => {
+                                Some(anchor.block_id.height)
+                            }
+                            bdk_wallet::chain::ChainPosition::Unconfirmed { .. } => None,
+                        },
+                        reused_address: paid
+                            .get(&address)
+                            .is_some_and(|count| *count > 1),
+                        sats: utxo.txout.value.to_sat(),
+                        from_txid: utxo.outpoint.txid.to_string(),
+                        path: derivation_of(&account.wallet, &utxo.txout.script_pubkey),
+                        outpoint: utxo.outpoint,
+                        script_type: account.script_type,
+                        address,
+                    }
+                })
+                .collect();
+
+            // Largest first: the coin that covers a payment on its own is the
+            // one that leaks least, and it should be the easy answer.
+            coins.sort_by(|a, b| b.sats.cmp(&a.sats));
+            summary.coins.extend(coins);
+        }
+
         // Now that every transaction has been seen, say which of them touched
         // an address that has been paid more than once.
         for tx in &mut summary.transactions {
-            tx.reused_address = tx
-                .paid_to
-                .iter()
-                .chain(tx.paid_to_self.iter())
-                .any(|(address, _)| paid.get(address).is_some_and(|count| *count > 1));
+            let reused = |address: &String| paid.get(address).is_some_and(|count| *count > 1);
+            tx.reused_address = tx.paid_to.iter().map(|(address, _)| address).any(reused)
+                || tx.paid_to_self.iter().map(|out| &out.address).any(reused);
         }
 
         // Newest first: unconfirmed at the top, then by height, then by time so
@@ -966,6 +1162,115 @@ mod tests {
     }
 
     #[test]
+    fn the_address_list_covers_everything_handed_out() {
+        let paths = scratch("addresses");
+        let phrase = generate_mnemonic().unwrap();
+        create_for_test(&phrase, b"a good password", &paths);
+
+        let dir = data_dir(&paths).to_path_buf();
+        let db = dir.join(accounts::ScriptType::Taproot.db_file());
+        let mut account =
+            accounts::Account::load(accounts::ScriptType::Taproot, &db, Network::Signet)
+                .unwrap()
+                .unwrap();
+        for _ in 0..5 {
+            account.wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+        }
+        account.persist().unwrap();
+        drop(account);
+
+        let meta = Meta::load(&paths).unwrap();
+        let mut portfolio =
+            accounts::Portfolio::load(&dir, &meta.script_types, meta.primary, Network::Signet)
+                .unwrap();
+        let summary = Summary::from_portfolio(&mut portfolio).unwrap();
+
+        let taproot: Vec<_> = summary
+            .addresses
+            .iter()
+            .filter(|a| a.script_type == accounts::ScriptType::Taproot)
+            .collect();
+
+        // Index 0 through the last revealed, and no gaps: an address handed
+        // out and missing from this list is an address nobody can find again.
+        assert_eq!(taproot.len(), 6, "revealed 0..=5");
+        for (position, entry) in taproot.iter().enumerate() {
+            assert_eq!(entry.index, position as u32);
+            assert!(entry.address.starts_with("tb1p"), "{}", entry.address);
+            assert_eq!(entry.payments, 0, "nothing has been paid on a fresh wallet");
+        }
+
+        // The path is written out in full, so an address can be checked
+        // against a hardware wallet screen.
+        assert_eq!(taproot[3].path.as_deref(), Some("m/86'/1'/0'/0/3"));
+
+        // Addresses are unique: a repeat would mean the derivation is wrong.
+        let unique: std::collections::HashSet<_> =
+            summary.addresses.iter().map(|a| &a.address).collect();
+        assert_eq!(unique.len(), summary.addresses.len());
+
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    #[test]
+    fn a_rescan_keeps_the_wallet_and_forgets_the_chain() {
+        let paths = scratch("rescan");
+        let phrase = generate_mnemonic().unwrap();
+        let before = create_for_test(&phrase, b"a good password", &paths);
+
+        // Hand out a few addresses, as a wallet in use would have.
+        let dir = data_dir(&paths).to_path_buf();
+        let db = dir.join(accounts::ScriptType::Taproot.db_file());
+        let mut account =
+            accounts::Account::load(accounts::ScriptType::Taproot, &db, Network::Signet)
+                .unwrap()
+                .unwrap();
+        for _ in 0..8 {
+            account.wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+        }
+        let revealed = account
+            .wallet
+            .derivation_index(bdk_wallet::KeychainKind::External)
+            .unwrap();
+        account.persist().unwrap();
+        drop(account);
+
+        Meta::record_scanned_to(&paths, 205_008, "somehashvalue");
+        assert!(Meta::load(&paths).unwrap().scanned_to.is_some());
+
+        rescan(&paths).unwrap();
+
+        // Same wallet: the descriptors are what make it that wallet, and the
+        // addresses it has already given out must still be watched.
+        let after = accounts::Account::load(accounts::ScriptType::Taproot, &db, Network::Signet)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.wallet.derivation_index(bdk_wallet::KeychainKind::External),
+            Some(revealed),
+            "a rescan must not stop watching addresses already handed out"
+        );
+
+        // And the scan starts over: no resume point, and nothing verified.
+        let meta = Meta::load(&paths).unwrap();
+        assert_eq!(meta.scanned_to, None);
+        assert_eq!(meta.scanned_hash, None);
+        assert_eq!(after.wallet.latest_checkpoint().height(), 0);
+
+        let mut portfolio = accounts::Portfolio::load(
+            &dir,
+            &meta.script_types,
+            meta.primary,
+            Network::Signet,
+        )
+        .unwrap();
+        let reopened = Summary::from_portfolio(&mut portfolio).unwrap();
+        assert_eq!(reopened.next_address, before.next_address);
+
+        std::fs::remove_dir_all(&paths.dir).ok();
+    }
+
+    #[test]
     fn checkpoints_always_round_earlier() {
         // Rounding later would skip blocks the wallet may have coins in.
         let c = checkpoint_at_or_before(Network::Bitcoin, 899_999);
@@ -1224,7 +1529,7 @@ mod tests {
 /// A transaction's outputs, sorted by who they belong to.
 struct Outputs {
     /// Ours: change on a payment, or the payment itself on a receive.
-    ours: Vec<(String, u64)>,
+    ours: Vec<OwnOutput>,
     /// Somebody else's: where a payment actually went.
     theirs: Vec<(String, u64)>,
 }
@@ -1235,6 +1540,57 @@ struct Outputs {
 /// compare against what they were given. A script that is not a standard
 /// address — a bare multisig, an `OP_RETURN` — gets said plainly rather than
 /// rendered as hex nobody can act on.
+/// One output of a transaction that belongs to this wallet.
+#[derive(Debug, Clone)]
+pub struct OwnOutput {
+    pub address: String,
+    pub sats: u64,
+    /// Which key paid it, written out in full: `m/84'/0'/0'/1/7`. `None` for an
+    /// address the wallet recognises but has not handed out itself.
+    pub path: Option<String>,
+}
+
+/// The full derivation path behind one of this wallet's own outputs.
+///
+/// The account part comes from the descriptor's own origin rather than being
+/// assumed, so an imported descriptor shows the account it actually names
+/// instead of the one Sieve would have chosen.
+fn derivation_of(
+    wallet: &bdk_wallet::PersistedWallet<bdk_wallet::rusqlite::Connection>,
+    spk: &bdk_wallet::bitcoin::ScriptBuf,
+) -> Option<String> {
+    let (keychain, index) = wallet.derivation_of_spk(spk.clone())?;
+    let change = match keychain {
+        bdk_wallet::KeychainKind::External => 0,
+        bdk_wallet::KeychainKind::Internal => 1,
+    };
+    match account_path(wallet, keychain) {
+        Some(account) => Some(format!("{account}/{change}/{index}")),
+        // Without an origin there is nothing honest to put in front of it.
+        None => Some(format!("{change}/{index}")),
+    }
+}
+
+/// The account prefix of a keychain's descriptor, as `m/84'/0'/0'`.
+///
+/// Taken out of the key origin the descriptor carries. A descriptor with no
+/// origin — a bare xpub — has no account to name, and gets `None` rather than
+/// a guess.
+fn account_path(
+    wallet: &bdk_wallet::PersistedWallet<bdk_wallet::rusqlite::Connection>,
+    keychain: bdk_wallet::KeychainKind,
+) -> Option<String> {
+    let descriptor = wallet.public_descriptor(keychain).to_string();
+    let origin = descriptor.split_once('[')?.1.split_once(']')?.0;
+    // `[fingerprint/84h/0h/0h]` — the fingerprint identifies the seed, not the
+    // path, so it is dropped.
+    let path = origin.split_once('/')?.1;
+    if path.is_empty() {
+        return None;
+    }
+    Some(format!("m/{}", path.replace('h', "'")))
+}
+
 fn split_outputs(
     tx: &bdk_wallet::bitcoin::Transaction,
     wallet: &bdk_wallet::PersistedWallet<bdk_wallet::rusqlite::Connection>,
@@ -1255,7 +1611,11 @@ fn split_outputs(
             });
 
         if wallet.is_mine(out.script_pubkey.clone()) {
-            ours.push((address, out.value.to_sat()));
+            ours.push(OwnOutput {
+                address,
+                sats: out.value.to_sat(),
+                path: derivation_of(wallet, &out.script_pubkey),
+            });
         } else {
             theirs.push((address, out.value.to_sat()));
         }
@@ -1362,6 +1722,93 @@ pub fn open_watch_only(paths: &Paths) -> Result<Summary> {
 /// Refuses anything that is not a wallet directory of ours. A bug that passed
 /// the wrong path would otherwise delete an arbitrary tree, and this is the
 /// last place to catch it — `remove_dir_all` asks no questions.
+/// Throw away everything this wallet has learned from the chain and set it up
+/// to scan again from its birthday.
+///
+/// The databases hold public descriptors, transactions and checkpoints — no key
+/// material, which is what makes this safe to do: the descriptors are read out,
+/// the files are replaced, and the same descriptors go back in. A wallet with
+/// no checkpoint scans with `ScanType::Recovery` from the birthday, so simply
+/// having no chain data is what starts the rescan.
+///
+/// What is genuinely lost is local knowledge no peer will give back: a
+/// broadcast transaction that has not been mined yet. Everything else is
+/// re-derived from blocks.
+///
+/// The caller must have shut the node down first — these files are open while
+/// a session is running.
+pub fn rescan(paths: &Paths) -> Result<()> {
+    let meta = Meta::load(paths).context("this wallet has no metadata file")?;
+    let network = meta.network();
+    let dir = data_dir(paths).to_path_buf();
+
+    for script_type in &meta.script_types {
+        let db = dir.join(script_type.db_file());
+        let Some(account) = accounts::Account::load(*script_type, &db, network)? else {
+            continue;
+        };
+
+        let external = account
+            .wallet
+            .public_descriptor(bdk_wallet::KeychainKind::External)
+            .to_string();
+        let internal = account
+            .wallet
+            .public_descriptor(bdk_wallet::KeychainKind::Internal)
+            .to_string();
+        // How far this wallet had handed out addresses. A fresh database
+        // starts at nothing, and a recovery scan only checks the scripts it
+        // knows about — so without this, a rescan would stop looking at
+        // exactly the addresses this wallet has already given people.
+        let revealed = [
+            bdk_wallet::KeychainKind::External,
+            bdk_wallet::KeychainKind::Internal,
+        ]
+        .map(|keychain| account.wallet.derivation_index(keychain));
+        drop(account);
+
+        // sqlite keeps its journal beside the database; leaving those would
+        // have the new file inherit the old one's tail.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let file = db.with_file_name(format!("{}{suffix}", script_type.db_file()));
+            if file.exists() {
+                std::fs::remove_file(&file)
+                    .with_context(|| format!("could not clear {}", file.display()))?;
+            }
+        }
+
+        // A wallet imported from a bare key has one descriptor and no change
+        // chain; BDK refuses a pair that is the same descriptor twice.
+        let mut fresh = if external == internal {
+            accounts::Account::create_single(&external, *script_type, &db, network)?
+        } else {
+            accounts::Account::create_watching(&external, &internal, *script_type, &db, network)?
+        };
+
+        for (keychain, index) in [
+            bdk_wallet::KeychainKind::External,
+            bdk_wallet::KeychainKind::Internal,
+        ]
+        .into_iter()
+        .zip(revealed)
+        {
+            if let Some(index) = index {
+                let _ = fresh.wallet.reveal_addresses_to(keychain, index).count();
+            }
+        }
+        fresh.persist()?;
+
+        tracing::info!(
+            path = %script_type,
+            revealed = ?revealed,
+            "cleared chain data for a rescan"
+        );
+    }
+
+    Meta::forget_scan_progress(paths)?;
+    Ok(())
+}
+
 pub fn remove(paths: &Paths) -> Result<()> {
     let root = wallets_root();
     let canonical_root = root.canonicalize().unwrap_or(root);

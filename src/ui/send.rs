@@ -35,6 +35,18 @@ const DEFAULT_FEE_RATE: f64 = 2.0;
 
 #[derive(Debug)]
 pub enum SendMsg {
+    /// The "Pay to" field holds a `bitcoin:` URI: take it apart and fill the
+    /// form in from it.
+    UnpackUri(String),
+    /// The recipient field changed. The fields live in the widgets, so the
+    /// model has to be told when they are worth acting on.
+    RecipientEdited,
+    /// Open the coin picker.
+    ChooseCoins,
+    /// Spend exactly these, or go back to choosing automatically when empty.
+    SetCoins(Vec<bdk_wallet::bitcoin::OutPoint>),
+    /// The wallet's labels, so coins can be named rather than listed as hex.
+    SetLabels(Box<crate::wallet::labels::Labels>),
     Show(Box<Summary>),
     SetDenomination(Denomination),
     SetPrice(Option<crate::price::Price>),
@@ -71,6 +83,10 @@ pub enum SendOutput {
     /// Something worth saying once and not keeping. The toast overlay belongs
     /// to the wallet page, which wraps this one.
     Toast(String),
+    /// A payment request named who was being paid, and the payment just made
+    /// is now theirs. Carrying it through means the history says "Alice"
+    /// without anybody typing it.
+    NameTransaction { txid: String, text: String },
 }
 
 pub struct SendForm {
@@ -92,6 +108,27 @@ pub struct SendForm {
     suggested: Option<f64>,
     error: Option<String>,
     busy: bool,
+    /// Whether there is an address in the recipient field, and an amount worth
+    /// sending in the amount field. Held here because the button that acts on
+    /// them lives in the same view and must not offer to act on nothing.
+    to_filled: bool,
+    amount_filled: bool,
+    /// Which coins this payment will spend. Empty means "choose for me", which
+    /// is what most payments should be.
+    coins: Vec<bdk_wallet::bitcoin::OutPoint>,
+    /// Every coin on the path being spent from, for the picker.
+    available_coins: Vec<crate::wallet::CoinSummary>,
+    /// The height the wallet has verified to, so a coin's age can be stated.
+    tip: u32,
+    /// Names for coins, by the address they landed on and the payment that
+    /// brought them in.
+    labels: crate::wallet::labels::Labels,
+    /// What a pasted payment request said it was for, shown under the fields
+    /// so the numbers can be checked against the request that produced them.
+    request: Option<String>,
+    /// Who that request said was being paid, kept to name the payment once it
+    /// is made.
+    request_label: Option<String>,
     /// The reviewed transaction, held between the dialog opening and the
     /// password arriving. Public data — the signature is what needs a secret.
     plan: Option<Plan>,
@@ -124,7 +161,22 @@ impl SendForm {
         }
     }
 
+    /// What this payment can draw on.
+    ///
+    /// The whole path, unless coins have been chosen — then it is exactly
+    /// those, because that is what "available" means once somebody has said
+    /// which coins to use. Max filled this field from the path balance while a
+    /// selection was in force, which put a number on screen larger than the
+    /// payment could ever send.
     fn available_sats(&self) -> u64 {
+        if !self.coins.is_empty() {
+            return self
+                .coins_here()
+                .iter()
+                .filter(|coin| self.coins.contains(&coin.outpoint))
+                .map(|coin| coin.sats)
+                .sum();
+        }
         self.source().map_or(0, |a| a.balance_sats)
     }
 
@@ -142,6 +194,377 @@ impl SendForm {
 
     fn unit(&self) -> &'static str {
         self.settings.denomination.label(&self.network)
+    }
+
+    /// The coin picker, as a page over the form.
+    ///
+    /// Its own selection state rather than a round trip through the model for
+    /// every tick: the page has to redraw its own totals as boxes are ticked,
+    /// and rebuilding it on each toggle would throw away the scroll position
+    /// in the middle of a list somebody is reading.
+    fn show_coins(
+        &self,
+        root: &gtk::ScrolledWindow,
+        sender: &ComponentSender<Self>,
+        wanted: Option<u64>,
+        fee_rate: f64,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let Some(nav) = root
+            .ancestor(adw::NavigationView::static_type())
+            .and_then(|found| found.downcast::<adw::NavigationView>().ok())
+        else {
+            tracing::warn!("could not find a navigation view to show the coins on");
+            return;
+        };
+
+        let here: Vec<crate::wallet::CoinSummary> =
+            self.coins_here().into_iter().cloned().collect();
+        let selected = Rc::new(RefCell::new(self.coins.clone()));
+
+        let page = adw::PreferencesPage::new();
+
+        // What the selection adds up to, and whether it is enough. Restated
+        // as boxes are ticked, because the whole question here is arithmetic.
+        let tally = adw::PreferencesGroup::new();
+
+        // The default state, said as its own row rather than as a footnote
+        // under a question that does not apply yet. Nobody has to pick coins,
+        // and the screen should say so before it says anything else.
+        let automatic = adw::ActionRow::new();
+        automatic.set_title("Sieve is choosing for you");
+        automatic.set_subtitle(
+            "It takes the fewest coins that cover the payment, which is usually the choice \
+             that gives away least. Tick any below to choose yourself.",
+        );
+        automatic.set_subtitle_lines(4);
+        tally.add(&automatic);
+
+        let chosen_row = adw::ActionRow::new();
+        // "Coins selected", not "Selected": the number beside it is a total of
+        // coins, and one line above a payment amount it read as the amount.
+        chosen_row.set_title("Coins selected");
+        let chosen_value = gtk::Label::new(None);
+        chosen_value.add_css_class("numeric");
+        chosen_row.add_suffix(&chosen_value);
+        tally.add(&chosen_row);
+
+        let verdict = adw::ActionRow::new();
+        verdict.set_title("Enough?");
+        // Markup only for the amounts inside the sentence: the line itself
+        // stays where it was and at the size it was.
+        verdict.set_use_markup(true);
+        verdict.set_subtitle_lines(3);
+        // The platform dims every subtitle, so bold alone still left the one
+        // number that must not be misread greyed out. This row's subtitle is
+        // held at full contrast; nothing else changes.
+        verdict.add_css_class("full-contrast");
+        // Answered at a glance as well as in words: a tick for covered, a
+        // warning for short, and nothing at all while there is no question to
+        // answer yet.
+        let verdict_mark = gtk::Image::new();
+        verdict_mark.set_valign(gtk::Align::Center);
+        verdict.add_suffix(&verdict_mark);
+        tally.add(&verdict);
+
+        // The reason this screen exists, said in terms of the names given to
+        // the coins rather than in the abstract.
+        let linking = adw::ActionRow::new();
+        linking.set_subtitle_lines(4);
+        linking.add_prefix(&gtk::Image::from_icon_name("view-reveal-symbolic"));
+        tally.add(&linking);
+        page.add(&tally);
+
+        let list = adw::PreferencesGroup::new();
+        list.set_title("Coins on this path");
+        let clear = gtk::Button::with_label("Choose for me");
+        clear.set_valign(gtk::Align::Center);
+        clear.add_css_class("flat");
+        clear.set_tooltip_text(Some("Untick everything and let Sieve choose"));
+        list.set_header_suffix(Some(&clear));
+        list.set_description(Some(
+            "Largest first. A payment that one coin covers on its own gives away the least.",
+        ));
+
+        let mut checks: Vec<(gtk::CheckButton, crate::wallet::CoinSummary)> = Vec::new();
+        for coin in &here {
+            let row = adw::ActionRow::new();
+            row.set_use_markup(true);
+            row.set_title(&match self.coin_name(coin) {
+                Some(name) => gtk::glib::markup_escape_text(&name).to_string(),
+                None => "Not labelled".to_string(),
+            });
+
+            let confirmations = coin.confirmations(self.tip);
+            let age = if coin.spendable() {
+                crate::ui::wallet_page::plural(confirmations as usize, "confirmation", "confirmations")
+            } else {
+                "Unconfirmed — cannot be spent yet".to_string()
+            };
+            let reuse = if coin.reused_address { " · reused address" } else { "" };
+            row.set_subtitle(&format!(
+                "<tt>{}</tt>\n<span size=\"small\" alpha=\"60%\">{}{reuse}</span>",
+                gtk::glib::markup_escape_text(&coin.address),
+                gtk::glib::markup_escape_text(&format!(
+                    "{}{age}",
+                    coin.path.as_deref().map(|p| format!("{p} · ")).unwrap_or_default()
+                )),
+            ));
+            row.set_subtitle_lines(4);
+
+            let amount = gtk::Label::new(Some(
+                &self.settings.denomination.format(coin.sats, &self.network),
+            ));
+            amount.add_css_class("numeric");
+            amount.set_valign(gtk::Align::Center);
+            row.add_suffix(&amount);
+
+            let tick = gtk::CheckButton::new();
+            tick.set_valign(gtk::Align::Center);
+            tick.set_active(selected.borrow().contains(&coin.outpoint));
+            // An unconfirmed coin is not spendable, which is the same rule
+            // coin selection has followed since the day it was written.
+            tick.set_sensitive(coin.spendable());
+            row.add_prefix(&tick);
+            row.set_activatable_widget(Some(&tick));
+
+            checks.push((tick.clone(), coin.clone()));
+            list.add(&row);
+        }
+        page.add(&list);
+
+        // One closure owns both effects — the page's own totals and the
+        // form's idea of what is selected — so the two cannot disagree.
+        let refresh = {
+            let selected = Rc::clone(&selected);
+            let here = here.clone();
+            let denomination = self.settings.denomination;
+            let network = self.network.clone();
+            let names: Vec<Option<String>> = here.iter().map(|c| self.coin_name(c)).collect();
+            let from = self.from;
+            let draining = self.max;
+            let chosen_value = chosen_value.clone();
+            let verdict = verdict.clone();
+            let verdict_mark = verdict_mark.clone();
+            let automatic = automatic.clone();
+            let chosen_row = chosen_row.clone();
+            let clear = clear.clone();
+            let linking = linking.clone();
+            let sender = sender.clone();
+            move || {
+                let picked = selected.borrow().clone();
+
+                // One state or the other: either Sieve is choosing, or these
+                // are the coins. Showing both at once is what made the
+                // automatic case read as a footnote.
+                automatic.set_visible(picked.is_empty());
+                chosen_row.set_visible(!picked.is_empty());
+                verdict.set_visible(!picked.is_empty());
+                clear.set_sensitive(!picked.is_empty());
+
+                let total: u64 = here
+                    .iter()
+                    .filter(|coin| picked.contains(&coin.outpoint))
+                    .map(|coin| coin.sats)
+                    .sum();
+                chosen_value.set_label(&denomination.format(total, &network));
+
+                // Set together with the words, so the glyph and the sentence
+                // can never disagree.
+                // What the payment costs to make, not just what it sends:
+                // an exact-amount payment adds the fee on top, so a selection
+                // that covers only the amount fails at build time. Two
+                // outputs — the recipient's and change — which is the shape of
+                // an ordinary payment; draining has one, and is not measured
+                // against an amount anyway.
+                let fee = from
+                    .map(|from| {
+                        crate::wallet::send::estimated_fee(from, picked.len(), 2, fee_rate)
+                    })
+                    .unwrap_or(0);
+
+                let (mark, mark_class) = match (picked.is_empty(), wanted) {
+                    (true, _) | (false, None) => (None, "dim-label"),
+                    (false, _) if draining => (Some("object-select-symbolic"), "success"),
+                    (false, Some(wanted)) if total >= wanted + fee => {
+                        (Some("object-select-symbolic"), "success")
+                    }
+                    (false, Some(_)) => (Some("dialog-warning-symbolic"), "warning"),
+                };
+                verdict_mark.set_icon_name(mark);
+                verdict_mark.set_visible(mark.is_some());
+                verdict_mark.set_css_classes(&[mark_class]);
+
+                // The amount being paid in bold, so it cannot be taken for
+                // the coin total a row above it.
+                // The row's label is held at full contrast by CSS and the
+                // prose is dimmed back with markup, so only the amounts come
+                // forward. Doing it the other way round is not possible: the
+                // platform's dimming is opacity on the whole label, and pango
+                // can only ever take alpha away, never add it back.
+                let strong = |sats: u64| {
+                    format!(
+                        "<span alpha=\"100%\"><b>{}</b></span>",
+                        gtk::glib::markup_escape_text(&denomination.format(sats, &network))
+                    )
+                };
+                let answer = match (picked.is_empty(), wanted) {
+                    // Hidden in this state; the automatic row is what shows.
+                    (true, _) => String::new(),
+                    // Draining takes the fee out of what is sent rather than
+                    // adding it on top, so there is nothing to fall short of.
+                    (false, _) if draining => format!(
+                        "All of these will be sent, less about {} of fee.",
+                        strong(fee)
+                    ),
+                    (false, None) => {
+                        "Enter an amount and this will say whether these cover it.".to_string()
+                    }
+                    (false, Some(wanted)) if total >= wanted + fee => format!(
+                        "Covers {} plus about {} of fee.",
+                        strong(wanted),
+                        strong(fee)
+                    ),
+                    (false, Some(wanted)) => format!(
+                        "Short by about {}. The fee is on top of the amount, and these {} \
+                         coins cost about {} to spend at {fee_rate} sat/vB.",
+                        strong((wanted + fee).saturating_sub(total)),
+                        picked.len(),
+                        denomination.format(fee, &network)
+                    ),
+                };
+                // A row title is body size where a subtitle is smaller, so
+                // moving this line up made it grow. Held at the size it had:
+                // what changed is the weight and the contrast, which is what
+                // was wanted, not the prominence of a whole sentence.
+                verdict.set_subtitle(&if answer.is_empty() {
+                    String::new()
+                } else {
+                    // 55% is what Adwaita dims a subtitle by, so everything
+                    // except the amounts reads exactly as it did before.
+                    format!("<span alpha=\"55%\">{answer}</span>")
+                });
+
+                // Named coins make this concrete: two names is a sentence
+                // somebody can act on, where "these coins" is not.
+                let picked_names: Vec<String> = here
+                    .iter()
+                    .zip(names.iter())
+                    .filter(|(coin, _)| picked.contains(&coin.outpoint))
+                    .map(|(_, name)| name.clone().unwrap_or_else(|| "an unlabelled coin".into()))
+                    .collect();
+                linking.set_title(match picked_names.len() {
+                    0 | 1 => "Nothing is linked",
+                    _ => "Spending these together links them",
+                });
+                linking.set_subtitle(&match picked_names.len() {
+                    0 => "Whatever Sieve picks, it takes as few coins as it can.".to_string(),
+                    1 => "One coin says nothing about the others you hold.".to_string(),
+                    2 => format!(
+                        "Anyone watching the chain will see that whoever held {} also held {}.",
+                        picked_names[0], picked_names[1]
+                    ),
+                    n => format!(
+                        "Anyone watching the chain will see that one person held all {n} of \
+                         these — {} among them.",
+                        picked_names[..2].join(" and ")
+                    ),
+                });
+
+                let _ = sender.input_sender().send(SendMsg::SetCoins(picked));
+            }
+        };
+
+        {
+            // Unticking through the buttons rather than emptying the list
+            // directly, so every path to a change runs the same refresh.
+            let ticks: Vec<gtk::CheckButton> =
+                checks.iter().map(|(tick, _)| tick.clone()).collect();
+            clear.connect_clicked(move |_| {
+                for tick in &ticks {
+                    tick.set_active(false);
+                }
+            });
+        }
+
+        for (tick, coin) in checks {
+            let selected = Rc::clone(&selected);
+            let refresh = refresh.clone();
+            let outpoint = coin.outpoint;
+            tick.connect_toggled(move |tick| {
+                {
+                    let mut picked = selected.borrow_mut();
+                    match (tick.is_active(), picked.iter().position(|o| *o == outpoint)) {
+                        (true, None) => picked.push(outpoint),
+                        (false, Some(at)) => {
+                            picked.remove(at);
+                        }
+                        _ => {}
+                    }
+                }
+                refresh();
+            });
+        }
+        refresh();
+
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&page));
+        nav.push(&adw::NavigationPage::new(&toolbar, "Coins"));
+    }
+
+    /// The coins on the path being spent from, largest first.
+    fn coins_here(&self) -> Vec<&crate::wallet::CoinSummary> {
+        let Some(from) = self.from else { return Vec::new() };
+        self.available_coins.iter().filter(|coin| coin.script_type == from).collect()
+    }
+
+    /// What the Coins row says about itself.
+    fn coins_note(&self) -> String {
+        let here = self.coins_here();
+        if here.is_empty() {
+            return "Nothing to spend on this path".into();
+        }
+        if self.coins.is_empty() {
+            return format!(
+                "Sieve is choosing, from {}",
+                crate::ui::wallet_page::plural(here.len(), "coin", "coins")
+            );
+        }
+        let chosen: u64 = here
+            .iter()
+            .filter(|coin| self.coins.contains(&coin.outpoint))
+            .map(|coin| coin.sats)
+            .sum();
+        format!(
+            "{} of {} · {}",
+            self.coins.len(),
+            here.len(),
+            self.settings.denomination.format(chosen, &self.network)
+        )
+    }
+
+    /// What a coin is called: the name on the payment that brought it in, or
+    /// the name on the address it landed on. Either is a person's own word for
+    /// it, and either beats a transaction id.
+    fn coin_name(&self, coin: &crate::wallet::CoinSummary) -> Option<String> {
+        use crate::wallet::labels::Kind;
+        self.labels
+            .get(Kind::Tx, &coin.from_txid)
+            .or_else(|| self.labels.get(Kind::Addr, &coin.address))
+            .map(str::to_owned)
+    }
+
+    /// Whether the form describes a payment yet.
+    fn ready_to_review(&self) -> bool {
+        self.not_ready_because().is_none()
+    }
+
+    /// What is still missing, for the button that cannot be pressed.
+    fn not_ready_because(&self) -> Option<&'static str> {
+        why_not_ready(self.to_filled, self.amount_filled, self.max, self.has_funds())
     }
 
     fn has_funds(&self) -> bool {
@@ -176,7 +599,7 @@ impl SendForm {
         let price = self.price.as_ref()?;
         self.settings
             .show_fiat
-            .then(|| format!("≈ ${:.2}", price.value_of(sats)))
+            .then(|| format!("≈ ${}", crate::price::usd(price.value_of(sats))))
     }
 
     /// The transaction, shortened. The whole thing is 64 characters of hex
@@ -304,8 +727,12 @@ impl Component for SendForm {
                                 adw::ActionRow {
                                     set_title: "Transaction",
                                     add_css_class: "property",
+                                    set_use_markup: true,
                                     #[watch]
-                                    set_subtitle: &model.short_txid(),
+                                    set_subtitle: &format!(
+                                        "<tt>{}</tt>",
+                                        gtk::glib::markup_escape_text(&model.short_txid())
+                                    ),
 
                                     add_suffix = &gtk::Button {
                                         set_icon_name: "edit-copy-symbolic",
@@ -357,11 +784,39 @@ impl Component for SendForm {
 
                         adw::PreferencesGroup {
                             #[watch]
-                            set_description: Some(&format!("Available: {}", model.available())),
+                            set_description: Some(&match &model.request {
+                                // What the request said about itself, so the
+                                // numbers below can be checked against it.
+                                Some(request) => request.clone(),
+                                None if !model.coins.is_empty() => format!(
+                                    "Available in the {}: {}",
+                                    crate::ui::wallet_page::plural(
+                                        model.coins.len(),
+                                        "chosen coin",
+                                        "chosen coins"
+                                    ),
+                                    model.available()
+                                ),
+                                None => format!("Available: {}", model.available()),
+                            }),
 
                             #[name(to_row)]
                             adw::EntryRow {
                                 set_title: "Pay to",
+                                // A payment request pasted whole. Unpacked on
+                                // arrival rather than at Review, so the amount
+                                // it asks for is on screen to be checked
+                                // before anything is built.
+                                connect_changed[sender] => move |row| {
+                                    let text = row.text().to_string();
+                                    if text.trim_start().len() > 8
+                                        && text.trim_start()[..8]
+                                            .eq_ignore_ascii_case("bitcoin:")
+                                    {
+                                        sender.input(SendMsg::UnpackUri(text));
+                                    }
+                                    sender.input(SendMsg::RecipientEdited);
+                                },
                                 // An address is checked character by character
                                 // against another screen, and a proportional
                                 // font makes l/1 and O/0 the reader's problem.
@@ -397,9 +852,15 @@ impl Component for SendForm {
                                 add_suffix = &gtk::ToggleButton {
                                     set_label: "Max",
                                     set_valign: gtk::Align::Center,
-                                    set_tooltip_text: Some(
+                                    // Max means everything that is available,
+                                    // and choosing coins is a way of saying
+                                    // what "available" means.
+                                    #[watch]
+                                    set_tooltip_text: Some(if model.coins.is_empty() {
                                         "Send everything on this path, fee included"
-                                    ),
+                                    } else {
+                                        "Send all the chosen coins, fee included"
+                                    }),
                                     connect_toggled[sender] => move |button| {
                                         sender.input(SendMsg::ToggleMax(button.is_active()));
                                     },
@@ -418,6 +879,25 @@ impl Component for SendForm {
                                 connect_selected_notify[sender] => move |row| {
                                     sender.input(SendMsg::SelectFrom(row.selected()));
                                 },
+                            },
+
+                            // Automatic by default: most payments should not
+                            // require a decision. Offered, though, because
+                            // which coins a payment spends is the one thing a
+                            // wallet gives away that cannot be taken back.
+                            adw::ActionRow {
+                                set_title: "Coins",
+                                #[watch]
+                                set_subtitle: &model.coins_note(),
+                                set_subtitle_lines: 2,
+                                set_activatable: true,
+                                #[watch]
+                                set_sensitive: !model.busy && !model.available_coins.is_empty(),
+                                add_suffix = &gtk::Image {
+                                    set_icon_name: Some("go-next-symbolic"),
+                                    add_css_class: "dim-label",
+                                },
+                                connect_activated => SendMsg::ChooseCoins,
                             },
                         },
 
@@ -453,8 +933,14 @@ impl Component for SendForm {
                             add_css_class: "suggested-action",
                             add_css_class: "pill",
                             set_halign: gtk::Align::Center,
+                            // Nothing to review until there is a recipient
+                            // and an amount. Greyed out says "not yet" where a
+                            // live button followed by "enter an address to
+                            // send to" says "you got that wrong".
                             #[watch]
-                            set_sensitive: !model.busy,
+                            set_sensitive: !model.busy && model.ready_to_review(),
+                            #[watch]
+                            set_tooltip_text: model.not_ready_because(),
                             #[watch]
                             set_label: if model.busy { "Working…" } else { "Review payment" },
                             connect_clicked => SendMsg::Review,
@@ -490,6 +976,14 @@ impl Component for SendForm {
             from_labels: Vec::new(),
             to_row: None,
             amount_row: None,
+            to_filled: false,
+            amount_filled: false,
+            coins: Vec::new(),
+            available_coins: Vec::new(),
+            tip: 0,
+            labels: crate::wallet::labels::Labels::default(),
+            request: None,
+            request_label: None,
         };
 
         let widgets = view_output!();
@@ -522,7 +1016,39 @@ impl Component for SendForm {
             SendMsg::Show(summary) => {
                 self.network = summary.network.clone();
                 self.accounts = summary.accounts.clone();
+                self.tip = summary.tip;
+                self.available_coins = summary.coins.clone();
+                // A coin spent since the picker was last open is not a coin
+                // any more, and building on it would fail at the last step
+                // with nothing to point at.
+                self.coins
+                    .retain(|chosen| summary.coins.iter().any(|c| c.outpoint == *chosen));
                 self.sync_sources();
+            }
+
+            SendMsg::SetLabels(labels) => self.labels = *labels,
+
+            SendMsg::ChooseCoins => {
+                // The amount is in the field, not the model, and the picker
+                // needs it to say whether a selection covers the payment.
+                let wanted = self
+                    .settings
+                    .denomination
+                    .parse(&widgets.amount_row.text())
+                    .ok()
+                    .filter(|sats| *sats > 0);
+                self.show_coins(root, &sender, wanted, widgets.fee_row.value());
+            }
+
+            SendMsg::SetCoins(chosen) => {
+                self.coins = chosen;
+                // Max means "everything available", and the selection has just
+                // changed what that is. Refilling keeps the field and the
+                // button telling the same story.
+                if self.max {
+                    widgets.amount_row.set_text(&self.available_amount());
+                }
+                self.update_view(widgets, sender.clone());
             }
 
             SendMsg::SetDenomination(denomination) => {
@@ -571,6 +1097,10 @@ impl Component for SendForm {
             }
 
             SendMsg::SelectFrom(index) => {
+                // Coins belong to a path. Carrying a selection across would
+                // mean spending coins from a wallet that is no longer the one
+                // being spent from.
+                self.coins.clear();
                 self.from = self
                     .fundable()
                     .get(index as usize)
@@ -584,6 +1114,11 @@ impl Component for SendForm {
                 if max {
                     widgets.amount_row.set_text(&self.available_amount());
                 }
+            }
+
+            SendMsg::RecipientEdited => {
+                self.to_filled = !widgets.to_row.text().trim().is_empty();
+                self.update_view(widgets, sender.clone());
             }
 
             SendMsg::AmountEdited => {
@@ -607,6 +1142,54 @@ impl Component for SendForm {
                     self.max = false;
                     widgets.max_button.set_active(false);
                 }
+
+                // An amount of zero is not an amount, and neither is a lone
+                // decimal point on the way to one.
+                self.amount_filled = self
+                    .settings
+                    .denomination
+                    .parse(&widgets.amount_row.text())
+                    .is_ok_and(|sats| sats > 0);
+                self.update_view(widgets, sender.clone());
+            }
+
+            SendMsg::UnpackUri(text) => {
+                match crate::wallet::uri::parse(&text) {
+                    Ok(Some(payment)) => {
+                        widgets.to_row.set_text(&payment.address);
+                        widgets.to_row.set_position(-1);
+
+                        if let Some(sats) = payment.amount_sats {
+                            // In whichever unit is on display, and without the
+                            // unit itself: this field takes a number.
+                            let shown = self.settings.denomination.format(sats, &self.network);
+                            let number = shown
+                                .rsplit_once(' ')
+                                .map_or(shown.clone(), |(amount, _)| amount.to_owned());
+                            widgets.amount_row.set_text(&number);
+                            self.max = false;
+                        }
+
+                        // Both are the request's own words about itself. Shown
+                        // rather than trusted: a label is written by whoever
+                        // wrote the URI, which on a bad day is not who you
+                        // think you are paying.
+                        self.request_label = payment.label.clone();
+                        self.request = match (&payment.label, &payment.message) {
+                            (Some(who), Some(what)) => Some(format!("Request from {who} — {what}")),
+                            (Some(who), None) => Some(format!("Request from {who}")),
+                            (None, Some(what)) => Some(format!("Request: {what}")),
+                            (None, None) => None,
+                        };
+                        self.error = None;
+                    }
+                    // A URI that is one and cannot be honoured — a bad amount,
+                    // a `req-` parameter we do not implement. The address is
+                    // left as pasted rather than half-unpacked.
+                    Err(e) => self.error = Some(capitalise(&e.to_string())),
+                    Ok(None) => {}
+                }
+                self.update_view(widgets, sender.clone());
             }
 
             SendMsg::Review => {
@@ -661,6 +1244,7 @@ impl Component for SendForm {
                     to,
                     amount,
                     fee_rate,
+                    coins: self.coins.clone(),
                 })));
             }
 
@@ -695,6 +1279,14 @@ impl Component for SendForm {
                 self.busy = false;
                 match *result {
                     Ok(txid) => {
+                        // The name came from the request; the payment it was
+                        // made for is the thing worth naming.
+                        if let Some(text) = self.request_label.clone() {
+                            let _ = sender.output(SendOutput::NameTransaction {
+                                txid: txid.clone(),
+                                text,
+                            });
+                        }
                         self.sent = Some(txid);
                         self.error = None;
                     }
@@ -730,6 +1322,10 @@ impl Component for SendForm {
                 widgets.max_button.set_active(false);
                 widgets.to_row.set_text("");
                 widgets.amount_row.set_text("");
+                self.request = None;
+                self.request_label = None;
+                self.to_filled = false;
+                self.amount_filled = false;
             }
         }
 
@@ -750,17 +1346,26 @@ impl SendForm {
         let fee = unit.format(plan.fee.to_sat(), network);
         let total = unit.format(plan.total().to_sat(), network);
 
-        let mut body = format!("Send {amount} to\n{}", plan.to);
+        let escape = gtk::glib::markup_escape_text;
+        let to = format!("<tt>{}</tt>", escape(&plan.to.to_string()));
+
+        let mut body = format!("Send {} to\n{to}", escape(&amount));
         if let Some(fiat) = self.fiat(plan.spend.to_sat()) {
-            body = format!("Send {amount} ({fiat}) to\n{}", plan.to);
+            body = format!("Send {} ({}) to\n{to}", escape(&amount), escape(&fiat));
         }
-        body.push_str(&format!("\n\nFee {fee}\nLeaving this wallet {total}"));
+        body.push_str(&format!(
+            "\n\nFee {}\nLeaving this wallet {}",
+            escape(&fee),
+            escape(&total)
+        ));
         if self.many_sources() {
-            body.push_str(&format!("\nFrom {}", plan.from.label()));
+            body.push_str(&format!("\nFrom {}", escape(plan.from.label())));
         }
 
         let dialog = adw::AlertDialog::new(Some("Send this payment?"), Some(&body));
-        dialog.set_body_use_markup(false);
+        // The address is monospaced, so the body is markup — which is why
+        // every part of it above is escaped.
+        dialog.set_body_use_markup(true);
         dialog.add_response("cancel", "Cancel");
         dialog.add_response("send", "Send");
         dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
@@ -788,6 +1393,27 @@ impl SendForm {
         }
 
         dialog.present(Some(root));
+    }
+}
+
+/// What stops this form being reviewable, or `None` when nothing does.
+///
+/// Max is its own answer: it means "everything", which is an amount even
+/// before the field catches up with it.
+fn why_not_ready(
+    to_filled: bool,
+    amount_filled: bool,
+    max: bool,
+    has_funds: bool,
+) -> Option<&'static str> {
+    if !has_funds {
+        return Some("There is nothing on this path to send");
+    }
+    match (to_filled, max || amount_filled) {
+        (false, false) => Some("Enter who to pay and how much"),
+        (false, true) => Some("Enter an address to pay"),
+        (true, false) => Some("Enter an amount to send"),
+        (true, true) => None,
     }
 }
 
@@ -842,12 +1468,37 @@ pub(crate) fn capitalise(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::capitalise;
     use adw::prelude::*;
     use relm4::adw;
 
+    #[test]
+    fn review_waits_for_both_fields() {
+        // The button is the promise that something will happen. Offering it
+        // over an empty form and answering with an error is a worse way of
+        // saying "not yet".
+        assert_eq!(
+            why_not_ready(false, false, false, true),
+            Some("Enter who to pay and how much")
+        );
+        assert_eq!(why_not_ready(true, false, false, true), Some("Enter an amount to send"));
+        assert_eq!(why_not_ready(false, true, false, true), Some("Enter an address to pay"));
+        assert_eq!(why_not_ready(true, true, false, true), None);
+
+        // Max is an amount before the field catches up with it.
+        assert_eq!(why_not_ready(true, false, true, true), None);
+
+        // And an empty path has nothing to send, whatever the fields say.
+        assert_eq!(
+            why_not_ready(true, true, true, false),
+            Some("There is nothing on this path to send")
+        );
+    }
+
     /// Proves the filter is attached where the signal is actually emitted.
     /// Needs a display, so it is not part of the default run.
+
     #[test]
     #[ignore = "needs a display"]
     fn the_amount_field_refuses_letters() {

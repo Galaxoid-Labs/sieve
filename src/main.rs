@@ -1,5 +1,6 @@
 //! Sieve — a privacy-focused Bitcoin wallet.
 
+mod about;
 mod app;
 mod peers;
 mod fees;
@@ -17,7 +18,7 @@ use relm4::RelmApp;
 
 /// Reverse-DNS ID. Must match the .desktop file or GNOME won't associate the
 /// window with the app icon.
-const APP_ID: &str = "com.galaxoidlabs.Sieve";
+pub const APP_ID: &str = "com.galaxoidlabs.Sieve";
 
 /// Best-effort process hardening, applied before any secret exists.
 ///
@@ -97,7 +98,10 @@ fn main() {
          .welcome-line { font-size: 1.05em; } \
          /* Under the tagline, and quieter than it: same words at the same \
             weight would make the reader choose between two claims. */ \
-         .welcome-note { font-size: 0.85em; font-style: italic; opacity: 0.45; }",
+         .welcome-note { font-size: 0.85em; font-style: italic; opacity: 0.45; } \
+         /* Adwaita dims every row subtitle, which is right everywhere except \
+            where the subtitle carries the number a decision turns on. */ \
+         .full-contrast .subtitle { opacity: 1; }",
     );
 
     // Sieve's own icons, compiled into the binary. Adwaita has no plain

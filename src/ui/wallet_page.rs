@@ -15,7 +15,18 @@ use crate::wallet::send::{Draft, Plan};
 #[derive(Debug)]
 pub enum WalletPageOutput {
     SwitchWallet,
-    RefreshChain,
+    /// Throw away this wallet's chain data and scan again from its birthday.
+    /// The app owns the node, so it owns the confirmation too.
+    AskRescan,
+    /// Name a transaction or an address, or clear its name. The app owns the
+    /// label file, so it does the writing.
+    SetLabel { kind: crate::wallet::labels::Kind, reference: String, text: String },
+    /// Rebuild an unconfirmed payment at a higher fee.
+    PlanBump {
+        txid: String,
+        from: crate::wallet::accounts::ScriptType,
+        fee_rate: f64,
+    },
     ShowPreferences,
     /// Ask for the password again — the wallet is on screen but locked.
     Unlock,
@@ -107,7 +118,18 @@ pub enum TxRowOutput {
 
 #[relm4::factory(pub)]
 impl FactoryComponent for TxRow {
-    type Init = (crate::wallet::TxSummary, Denomination, u32, Option<crate::price::Price>, String);
+    type Init = (
+        crate::wallet::TxSummary,
+        Denomination,
+        u32,
+        Option<crate::price::Price>,
+        String,
+        // Whether to name the derivation path: only useful on a wallet that
+        // watches more than one.
+        bool,
+        // What this payment was for, when it has been named.
+        Option<String>,
+    );
     type Input = ();
     type Output = TxRowOutput;
     type CommandOutput = ();
@@ -178,7 +200,7 @@ impl FactoryComponent for TxRow {
     }
 
     fn init_model(
-        (tx, denomination, tip, price, network): Self::Init,
+        (tx, denomination, tip, price, network, show_path, label): Self::Init,
         _index: &DynamicIndex,
         _sender: FactorySender<Self>,
     ) -> Self {
@@ -186,18 +208,37 @@ impl FactoryComponent for TxRow {
         let magnitude = tx.net_sats.unsigned_abs();
         let confirmations = tx.confirmations(tip);
 
+        let when = match (tx.height, confirmations) {
+            // A filter wallet cannot see the mempool, so this is rare and
+            // worth naming rather than showing a blank.
+            (None, _) => "Unconfirmed".to_string(),
+            // While a payment is shallow the confirmation count is the thing
+            // being watched; after that, when it happened is.
+            (Some(_), c) if c < 6 => {
+                format!("{} · {}", format_relative(tx.seen_at), plural_confirmations(c))
+            }
+            (Some(_), _) => format_relative(tx.seen_at),
+        };
+        // A payment whose fee has already been raised says so on the row,
+        // because the alternative is opening it and raising it again on one
+        // that is simply waiting its turn.
+        let when = if tx.replaces.is_empty() { when } else { format!("{when} · fee raised") };
+
         TxRow {
-            title: if incoming { "Received".into() } else { "Sent".into() },
-            subtitle: match (tx.height, confirmations) {
-                // A filter wallet cannot see the mempool, so this is rare and
-                // worth naming rather than showing a blank.
-                (None, _) => "Unconfirmed".to_string(),
-                // While a payment is shallow the confirmation count is the
-                // thing being watched; after that, when it happened is.
-                (Some(_), c) if c < 6 => {
-                    format!("{} · {}", format_relative(tx.seen_at), plural_confirmations(c))
+            // Direction first, always: which way the money went is what the
+            // row is for, and a label answers a different question. The name
+            // joins it rather than replacing it.
+            title: {
+                let direction = if incoming { "Received" } else { "Sent" };
+                match &label {
+                    Some(label) => format!("{direction} · {label}"),
+                    None => direction.to_owned(),
                 }
-                (Some(_), _) => format_relative(tx.seen_at),
+            },
+            subtitle: if show_path {
+                format!("{when} · {}", tx.script_type.label())
+            } else {
+                when
             },
             amount: format!(
                 "{}{}",
@@ -206,7 +247,7 @@ impl FactoryComponent for TxRow {
             ),
             incoming,
             pending: tx.height.is_none(),
-            fiat: price.map(|p| format!("≈ ${:.2}", p.value_of(magnitude))),
+            fiat: price.map(|p| format!("≈ ${}", crate::price::usd(p.value_of(magnitude)))),
             txid: tx.txid,
         }
     }
@@ -228,17 +269,60 @@ fn mark_classes(network: Option<&str>) -> &'static [&'static str] {
 }
 
 /// "1 coin", "3 coins".
-fn plural(n: usize, one: &str, many: &str) -> String {
+/// Said as an offer, not a question: an address works perfectly well without
+/// a name, and the field must not read as something owed before you can use it.
+const UNLABELLED_TX: &str = "Optional — say what this payment was for, so it still \
+                             means something in a year";
+
+const UNNAMED_ADDRESS: &str = "Optional — name who this address is for, so their \
+                               payment is recognisable when it arrives";
+
+/// The navigation stack pages are pushed onto: BreakpointBin → ToastOverlay →
+/// NavigationView. Written once, because two pages now need it and a second
+/// copy of this walk would be a second thing to get wrong.
+fn navigation_view(root: &adw::BreakpointBin) -> Option<adw::NavigationView> {
+    let found = root
+        .child()
+        .and_then(|child| child.downcast::<adw::ToastOverlay>().ok())
+        .and_then(|overlay| overlay.child())
+        .and_then(|child| child.downcast::<adw::NavigationView>().ok());
+    if found.is_none() {
+        tracing::warn!("could not find the wallet's navigation view");
+    }
+    found
+}
+
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
+}
+
+/// An identifier as Pango markup, in a monospaced face.
+///
+/// Addresses, transaction ids and block hashes are read character by character
+/// or not at all, and a proportional face makes `1`/`l` and `0`/`O` the same
+/// shape. Escaped, because an address arrives from outside.
+fn mono(text: &str) -> String {
+    format!("<tt>{}</tt>", gtk::glib::markup_escape_text(text))
 }
 
 /// An address with an amount beside it, monospaced and wrapped without
 /// hyphens — the same treatment addresses get everywhere else, because a
 /// wrong character in an address is money.
-fn address_row(address: &str, amount: &str) -> adw::ActionRow {
+fn address_row(address: &str, amount: &str, name: Option<&str>) -> adw::ActionRow {
     let row = adw::ActionRow::new();
-    row.set_title(amount);
-    row.set_subtitle(address);
+    // A name in front of the amount, when the address has one: "Alice · 0.01"
+    // reads as a payment, where a bare address reads as a puzzle.
+    row.set_title(&match name {
+        Some(name) => format!(
+            "{} · {amount}",
+            gtk::glib::markup_escape_text(name)
+        ),
+        None => amount.to_owned(),
+    });
+    // Markup rather than a css class on the row: the class would take the
+    // amount in the title with it.
+    row.set_use_markup(true);
+    row.set_subtitle(&mono(address));
     row.set_subtitle_lines(3);
     row.add_css_class("property");
 
@@ -256,6 +340,28 @@ fn address_row(address: &str, amount: &str) -> adw::ActionRow {
     row
 }
 
+/// The same, for an address of this wallet's own, which can also say which key
+/// produced it. The index is what makes one of your addresses distinguishable
+/// from another, so it is shown rather than left to be worked out.
+fn own_address_row(
+    out: &crate::wallet::OwnOutput,
+    amount: &str,
+    name: Option<&str>,
+) -> adw::ActionRow {
+    let row = address_row(&out.address, amount, name);
+    if let Some(path) = &out.path {
+        // The address is the thing being checked; the path only says which of
+        // your keys produced it, so it sits under the address and steps back.
+        row.set_subtitle(&format!(
+            "{}\n<span size=\"small\" alpha=\"60%\">{}</span>",
+            mono(&out.address),
+            mono(path)
+        ));
+        row.set_subtitle_lines(4);
+    }
+    row
+}
+
 fn plural_confirmations(n: u32) -> String {
     match n {
         0 => "Awaiting confirmation".into(),
@@ -265,7 +371,18 @@ fn plural_confirmations(n: u32) -> String {
 }
 
 /// Group digits so six-figure block heights stay readable.
-fn thousands(n: u32) -> String {
+/// How far through the header chain a sync has got, against an estimated tip.
+///
+/// Never quite full: the estimate can be short, and a bar that sits at 100%
+/// while work continues is worse than one that stops at 99.
+fn header_fraction(height: u32, from: u32, tip: u32) -> Option<f64> {
+    if tip <= from || height <= from {
+        return None;
+    }
+    Some((f64::from(height - from) / f64::from(tip - from)).clamp(0.0, 0.99))
+}
+
+pub(crate) fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -347,6 +464,15 @@ pub struct WalletPage {
     /// Labels currently in `path_model`, so it is only rewritten when the set
     /// of paths genuinely changes.
     path_labels: Vec<String>,
+    /// Which derivation path the activity list is limited to, or `None` for
+    /// all of them together, which is what it opens on.
+    activity_path: Option<crate::wallet::accounts::ScriptType>,
+    /// What each row of the activity filter means, by position. The source of
+    /// truth for reading a selection back, since the model holds only labels.
+    activity_choices: Vec<Option<crate::wallet::accounts::ScriptType>>,
+    /// Backing model for that filter, held and spliced for the same reason
+    /// `path_model` is.
+    activity_model: gtk::StringList,
     receive_index: u32,
     /// Which path the receive view is showing. By type, not by position: the
     /// account list is rebuilt on every sync and an index would drift.
@@ -354,6 +480,14 @@ pub struct WalletPage {
     /// The view stack, so locking can put it back on the one view that has
     /// something to say while locked.
     stack: Option<adw::ViewStack>,
+    /// The receive screen's name field, held for the same reason the stack is:
+    /// its text follows the address on show, and a `#[watch]` would rewrite it
+    /// under someone who was typing.
+    address_label_row: Option<adw::EntryRow>,
+    /// The line that field hides behind until asked for.
+    address_label_shown: Option<adw::ActionRow>,
+    /// The header's menu, held only so choosing something can close it.
+    main_menu: Option<gtk::MenuButton>,
     /// The send form, which owns its own form/review/sent states.
     send: Controller<SendForm>,
     /// How connections are being made, when they go through Tor.
@@ -361,6 +495,21 @@ pub struct WalletPage {
     /// The height this wallet scans from. What makes a sync long or short, and
     /// the difference between "slow" and "working".
     birthday: Option<u32>,
+    /// How many blocks the last completed scan had to read, when there has
+    /// been one. The only total available for the final phase of a sync.
+    matched_blocks: Option<u32>,
+    /// Names for transactions and addresses. Held for display; the app owns
+    /// the file and is what writes to it.
+    labels: crate::wallet::labels::Labels,
+    /// This wallet holds no keys, so nothing here may offer to sign.
+    watch_only: bool,
+    /// Which network this wallet is on, held separately from the summary.
+    ///
+    /// A summary arrives only when a scan produces one, which on a long sync is
+    /// at the very end — and restarting a session clears it. Anything the sync
+    /// view needs *while* syncing cannot be read from there. The header
+    /// progress bar was, so it fell back to a spinner for the whole phase.
+    network: Option<String>,
     /// Why nothing is connecting, when Tor is on and could not be started.
     tor_problem: Option<String>,
     /// The addresses currently in the list, so it is only rebuilt when they
@@ -393,13 +542,38 @@ pub enum WalletPageMsg {
     SetPrice(Option<crate::price::Price>),
     Toast(String),
     SetChain(Option<crate::wallet::node::ChainInfo>),
-    RefreshChain,
+    /// Start over from the birthday, after the app has asked.
+    AskRescan,
     /// How connections are being made: `Some` when they go through Tor.
     SetTor(Option<String>),
     /// The connected peers, arriving faster than the chain view can.
     SetPeers(Vec<crate::wallet::node::PeerInfo>),
     /// The height this wallet scans from.
     SetBirthday(u32),
+    /// Which network it is on, known from metadata before any scan has
+    /// produced a summary.
+    SetNetwork(String),
+    /// How many blocks the last scan of this wallet had to read.
+    SetMatchedBlocks(Option<u32>),
+    /// The wallet's labels, freshly read from disk.
+    SetLabels(Box<crate::wallet::labels::Labels>),
+    /// Name the address currently on the receive screen.
+    NameAddress(String),
+    /// What this program is, and whose work it stands on.
+    ShowAbout,
+    /// Every address this wallet has handed out.
+    ShowAddresses,
+    /// Name a payment just made, from what its request called itself.
+    NameTransaction { txid: String, text: String },
+    /// Ask for a new fee rate for an unconfirmed payment.
+    AskBump(String),
+    /// Build the replacement at this rate.
+    Bump { txid: String, fee_rate: f64 },
+    /// The replacement, built and waiting for a password.
+    BumpPlanned(Box<Result<crate::wallet::send::Plan, String>>),
+    /// A replacement was broadcast. The old payment is gone from the wallet's
+    /// view, so the page showing it has to go too.
+    Replaced { replaced: String, with: String },
     /// This wallet holds no keys: the device that does is what signs.
     SetWatchOnly(bool),
     /// Tor is on and could not be started, so nothing is connecting.
@@ -416,6 +590,8 @@ pub enum WalletPageMsg {
     Sent(Box<Result<String, String>>),
     /// Choose which derivation path to receive on.
     SelectReceivePath(u32),
+    /// Limit the activity list to one derivation path, or lift the limit.
+    FilterActivity(u32),
     SelectPath(crate::wallet::accounts::ScriptType),
     /// Ask for an address that has not been handed to anyone yet.
     NewAddress,
@@ -487,7 +663,7 @@ impl WalletPage {
     fn fiat(&self) -> Option<String> {
         let price = self.price?;
         let summary = self.summary.as_ref()?;
-        Some(format!("≈ ${:.2}", price.value_of(summary.balance_sats)))
+        Some(format!("≈ ${}", crate::price::usd(price.value_of(summary.balance_sats))))
     }
 
     /// The line under the balance: what qualifies the number above it.
@@ -599,6 +775,11 @@ impl WalletPage {
         if !self.syncing() {
             return label;
         }
+        // The filters are done by then; "blocks of history to check" would be
+        // counting work that has already happened.
+        if matches!(self.progress, Progress::Blocks(_)) {
+            return label;
+        }
 
         let (Some(birthday), Some(chain)) = (self.birthday, self.chain.as_ref()) else {
             return label;
@@ -642,20 +823,31 @@ impl WalletPage {
     /// a known block plus the clock estimates the tip closely enough to fill a
     /// bar, which beats a spinner that says nothing for a quarter of an hour.
     fn progress_fraction(&self) -> Option<f64> {
+        // The last phase of a sync — fetching the blocks the filters matched —
+        // has no total anywhere in the node: a filter match is only known when
+        // the block arrives. But the same wallet over the same chain matches
+        // the same blocks, so the count from the last scan is a measurement
+        // rather than a guess, and the only honest bar available here.
+        if let Progress::Blocks(read) = self.progress {
+            let expected = self.matched_blocks? as f64;
+            if expected <= 0.0 {
+                return None;
+            }
+            return Some((read as f64 / expected).clamp(0.0, 0.99));
+        }
+
         let Progress::Headers(height) = self.progress else {
             return self.progress.fraction();
         };
 
-        let network: bdk_wallet::bitcoin::Network =
-            self.summary.as_ref()?.network.parse().ok()?;
+        let network: bdk_wallet::bitcoin::Network = self
+            .network
+            .clone()
+            .or_else(|| self.summary.as_ref().map(|s| s.network.clone()))?
+            .parse()
+            .ok()?;
         let tip = crate::wallet::estimated_tip(network)?;
-        let from = self.birthday.unwrap_or(0);
-        if tip <= from || height <= from {
-            return None;
-        }
-        // Never quite full: the estimate can be short, and a bar that sits at
-        // 100% while work continues is worse than one that stops at 99.
-        Some((f64::from(height - from) / f64::from(tip - from)).clamp(0.0, 0.99))
+        header_fraction(height, self.birthday.unwrap_or(0), tip)
     }
 
     /// What the peers list says about itself.
@@ -920,10 +1112,43 @@ impl Component for WalletPage {
 
                 // Preferences belong in a dialog reached from the header, not
                 // in the switcher beside the things you actually do with money.
-                pack_end = &gtk::Button {
+                // The hamburger opens a menu, because that is what the icon
+                // promises: it used to go straight to preferences, which made
+                // About unreachable and the icon a lie.
+                #[name(main_menu)]
+                pack_end = &gtk::MenuButton {
                     set_icon_name: "open-menu-symbolic",
-                    set_tooltip_text: Some("Preferences"),
-                    connect_clicked => WalletPageMsg::ShowPreferences,
+                    set_tooltip_text: Some("Main menu"),
+
+                    #[wrap(Some)]
+                    set_popover = &gtk::Popover {
+                        set_width_request: 200,
+
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 2,
+
+                            gtk::Button {
+                                add_css_class: "flat",
+                                #[wrap(Some)]
+                                set_child = &gtk::Label {
+                                    set_label: "Preferences",
+                                    set_xalign: 0.0,
+                                },
+                                connect_clicked => WalletPageMsg::ShowPreferences,
+                            },
+
+                            gtk::Button {
+                                add_css_class: "flat",
+                                #[wrap(Some)]
+                                set_child = &gtk::Label {
+                                    set_label: "About Sieve",
+                                    set_xalign: 0.0,
+                                },
+                                connect_clicked => WalletPageMsg::ShowAbout,
+                            },
+                        },
+                    },
                 },
             },
 
@@ -1091,13 +1316,33 @@ impl Component for WalletPage {
                                 },
                             },
 
-                            gtk::Label {
-                                add_css_class: "heading",
-                                set_halign: gtk::Align::Start,
+                            gtk::Box {
                                 set_margin_top: 12,
-                                set_label: "Transactions",
+                                set_spacing: 12,
                                 #[watch]
                                 set_visible: model.has_transactions() && !model.locked,
+
+                                gtk::Label {
+                                    add_css_class: "heading",
+                                    set_halign: gtk::Align::Start,
+                                    set_valign: gtk::Align::Center,
+                                    set_hexpand: true,
+                                    set_label: "Transactions",
+                                },
+
+                                // Only worth offering when the wallet watches
+                                // more than one path.
+                                gtk::DropDown {
+                                    set_model: Some(&activity_model),
+                                    set_valign: gtk::Align::Center,
+                                    add_css_class: "flat",
+                                    set_tooltip_text: Some("Show one derivation path"),
+                                    #[watch]
+                                    set_visible: model.has_path_choice(),
+                                    connect_selected_notify[sender] => move |list| {
+                                        sender.input(WalletPageMsg::FilterActivity(list.selected()));
+                                    },
+                                },
                             },
 
                             #[local_ref]
@@ -1106,7 +1351,21 @@ impl Component for WalletPage {
                                 set_selection_mode: gtk::SelectionMode::None,
                                 set_margin_top: 12,
                                 #[watch]
-                                set_visible: model.has_transactions() && !model.locked,
+                                set_visible: model.has_transactions()
+                                    && !model.locked
+                                    && !model.transactions.is_empty(),
+                            },
+
+                            // The filter can empty the list without the wallet
+                            // being empty, and that needs saying, or the
+                            // picker looks broken.
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Center,
+                                set_margin_all: 24,
+                                set_label: "No transactions on this path",
+                                #[watch]
+                                set_visible: model.filtered_to_nothing() && !model.locked,
                             },
 
                             adw::StatusPage {
@@ -1140,30 +1399,44 @@ impl Component for WalletPage {
                             // A white card behind the code, in both themes. An
                             // inverted QR looks better in dark mode and scans
                             // worse, so the code keeps its own ground.
-                            gtk::Box {
-                                // Its own white ground, not the theme's card:
-                                // a card is dark in dark mode, which is
-                                // exactly when a QR code needs light.
-                                add_css_class: "qr-ground",
+                            // Square, and made square by the layout rather
+                            // than by a pair of matching numbers. The card
+                            // used to take its width from the texture's own
+                            // 512px natural size while its height stayed at
+                            // the requested minimum, so it stretched sideways
+                            // into whatever width was going. An AspectFrame
+                            // allocates its child a square, whatever it is
+                            // handed.
+                            gtk::AspectFrame {
+                                set_ratio: 1.0,
+                                set_obey_child: false,
                                 set_halign: gtk::Align::Center,
                                 set_valign: gtk::Align::Center,
-                                set_overflow: gtk::Overflow::Hidden,
-                                // Fixed, so the card does not resize with the
-                                // code. A longer address needs a denser QR
-                                // version, and sizing to the texture made the
-                                // card jump every time the type changed.
-                                set_size_request: (280, 280),
+                                // 240 rather than 280: still comfortably
+                                // scannable across a table, and it buys the
+                                // row of vertical space the address list needs
+                                // without the screen having to scroll.
+                                set_size_request: (240, 240),
 
-                                gtk::Picture {
-                                    set_hexpand: true,
-                                    set_vexpand: true,
-                                    // Clipped to the rounded ground, or the
-                                    // code's white square fills the corners
-                                    // the radius is trying to cut away.
+                                gtk::Box {
+                                    // Its own white ground, not the theme's
+                                    // card: a card is dark in dark mode, which
+                                    // is exactly when a QR code needs light.
+                                    add_css_class: "qr-ground",
                                     set_overflow: gtk::Overflow::Hidden,
-                                    set_content_fit: gtk::ContentFit::Contain,
-                                    #[watch]
-                                    set_paintable: model.qr().as_ref(),
+
+                                    gtk::Picture {
+                                        set_hexpand: true,
+                                        set_vexpand: true,
+                                        // Clipped to the rounded ground, or
+                                        // the code's white square fills the
+                                        // corners the radius is trying to cut
+                                        // away.
+                                        set_overflow: gtk::Overflow::Hidden,
+                                        set_content_fit: gtk::ContentFit::Contain,
+                                        #[watch]
+                                        set_paintable: model.qr().as_ref(),
+                                    },
                                 },
                             },
 
@@ -1300,6 +1573,60 @@ impl Component for WalletPage {
                                     connect_clicked => WalletPageMsg::NewAddress,
                                 },
                             },
+
+                            // Naming the address before handing it out is what
+                            // makes the payment recognisable when it lands —
+                            // and it is the moment you actually know who it is
+                            // for. Offered, never demanded: an open field here
+                            // reads as a question that must be answered before
+                            // the address can be used.
+                            adw::PreferencesGroup {
+                                set_margin_top: 12,
+
+                                #[name(address_label_shown)]
+                                adw::ActionRow {
+                                    set_title: "Label",
+                                    set_subtitle: UNNAMED_ADDRESS,
+                                    set_subtitle_lines: 2,
+                                    set_activatable: true,
+
+                                    #[name(address_label_edit)]
+                                    add_suffix = &gtk::Button {
+                                        set_icon_name: "document-edit-symbolic",
+                                        set_tooltip_text: Some("Name this address"),
+                                        set_valign: gtk::Align::Center,
+                                        add_css_class: "flat",
+                                    },
+                                },
+
+                                #[name(address_label_row)]
+                                adw::EntryRow {
+                                    set_title: "Label (optional)",
+                                    set_show_apply_button: true,
+                                    set_visible: false,
+                                    connect_apply[sender] => move |row| {
+                                        sender.input(WalletPageMsg::NameAddress(
+                                            row.text().to_string(),
+                                        ));
+                                    },
+                                },
+
+                                // Everything already handed out. Without this
+                                // the only address you can ever see is the
+                                // next one, which makes naming them pointless
+                                // and reuse invisible.
+                                adw::ActionRow {
+                                    set_title: "Addresses",
+                                    #[watch]
+                                    set_subtitle: &model.addresses_note(),
+                                    set_activatable: true,
+                                    add_suffix = &gtk::Image {
+                                        set_icon_name: Some("go-next-symbolic"),
+                                        add_css_class: "dim-label",
+                                    },
+                                    connect_activated => WalletPageMsg::ShowAddresses,
+                                },
+                            },
                         },
                     },
                 },
@@ -1358,11 +1685,18 @@ impl Component for WalletPage {
 
                         #[wrap(Some)]
                         set_header_suffix = &gtk::Button {
-                            set_icon_name: "view-refresh-symbolic",
-                            set_tooltip_text: Some("Refresh"),
+                            set_label: "Rescan",
                             add_css_class: "flat",
                             set_valign: gtk::Align::Center,
-                            connect_clicked => WalletPageMsg::RefreshChain,
+                            set_tooltip_text: Some(
+                                "Forget what has been scanned and check the chain again \
+                                 from this wallet's birthday"
+                            ),
+                            // Nothing to rescan while the wallet is shut, and
+                            // no node to restart while one is not running.
+                            #[watch]
+                            set_sensitive: !model.locked,
+                            connect_clicked => WalletPageMsg::AskRescan,
                         },
 
                         adw::ActionRow {
@@ -1594,15 +1928,25 @@ impl Component for WalletPage {
                 SendOutput::Plan(draft) => WalletPageMsg::PlanSend(draft),
                 SendOutput::Send { plan, password } => WalletPageMsg::SendNow { plan, password },
                 SendOutput::Toast(message) => WalletPageMsg::Toast(message),
+                SendOutput::NameTransaction { txid, text } => {
+                    WalletPageMsg::NameTransaction { txid, text }
+                }
             },
         );
 
         let mut model = WalletPage {
             settings: Settings::load(),
             stack: None,
+            address_label_row: None,
+            address_label_shown: None,
+            main_menu: None,
             send,
             tor: None,
             birthday: None,
+            network: None,
+            watch_only: false,
+            matched_blocks: None,
+            labels: crate::wallet::labels::Labels::default(),
             tor_problem: None,
             peer_addresses: Vec::new(),
             distinct_peers: 0,
@@ -1615,6 +1959,9 @@ impl Component for WalletPage {
             transactions,
             path_model: gtk::StringList::new(&[]),
             path_labels: Vec::new(),
+            activity_path: None,
+            activity_choices: Vec::new(),
+            activity_model: gtk::StringList::new(&[]),
             receive_index: 0,
             receive_path: None,
             fresh_address: None,
@@ -1632,11 +1979,33 @@ impl Component for WalletPage {
         unhyphenated.insert(gtk::pango::AttrInt::new_insert_hyphens(false));
         let peers_box = model.peers_list.widget();
         let path_model = model.path_model.clone();
+        let activity_model = model.activity_model.clone();
         let widgets = view_output!();
 
         // Both switchers are declared above the stack they drive, so the links
         // are made once the whole tree exists.
         model.stack = Some(widgets.view_stack.clone());
+        model.address_label_row = Some(widgets.address_label_row.clone());
+        model.address_label_shown = Some(widgets.address_label_shown.clone());
+        model.main_menu = Some(widgets.main_menu.clone());
+
+        // The line hands over to the field, and the field hands back once the
+        // name is saved — so the group is always one row tall and the QR above
+        // it never moves.
+        {
+            let shown = widgets.address_label_shown.clone();
+            let editing = widgets.address_label_row.clone();
+            let open = move || {
+                shown.set_visible(false);
+                editing.set_visible(true);
+                editing.grab_focus();
+            };
+            widgets.address_label_edit.connect_clicked({
+                let open = open.clone();
+                move |_| open()
+            });
+            widgets.address_label_shown.connect_activated(move |_| open());
+        }
         widgets.send_slot.append(model.send.widget());
 
         // Both fee sources cost something — a block download or a disclosure —
@@ -1676,11 +2045,22 @@ impl Component for WalletPage {
                 self.receive_path = Some(path);
                 // The fresh address belonged to the path being left.
                 self.fresh_address = None;
+                self.refresh_address_label();
+            }
+            WalletPageMsg::FilterActivity(index) => {
+                let chosen = self.activity_choices.get(index as usize).copied().flatten();
+                if chosen != self.activity_path {
+                    self.activity_path = chosen;
+                    if let Some(summary) = self.summary.clone() {
+                        self.rebuild_transactions(&summary);
+                    }
+                }
             }
             WalletPageMsg::SelectReceivePath(index) => {
                 self.receive_index = index;
                 // The fresh address belonged to the path being left.
                 self.fresh_address = None;
+                self.refresh_address_label();
             }
             WalletPageMsg::NewAddress => {
                 if let Some(summary) = &self.summary
@@ -1689,11 +2069,13 @@ impl Component for WalletPage {
                     let _ = sender.output(WalletPageOutput::NewAddress(account.script_type));
                 }
             }
-            WalletPageMsg::ShowFreshAddress(address) => self.fresh_address = Some(address),
-            WalletPageMsg::Toast(message) => self.toaster.add_toast(adw::Toast::new(&message)),
-            WalletPageMsg::RefreshChain => {
-                let _ = sender.output(WalletPageOutput::RefreshChain);
+            WalletPageMsg::ShowFreshAddress(address) => {
+                self.fresh_address = Some(address);
+                // A brand new address has no name yet, and the field must not
+                // keep showing the last one's.
+                self.refresh_address_label();
             }
+            WalletPageMsg::Toast(message) => self.toaster.add_toast(adw::Toast::new(&message)),
             WalletPageMsg::SetChain(chain) => {
                 if let Some(info) = &chain {
                     self.distinct_peers = info.peers.len();
@@ -1719,8 +2101,86 @@ impl Component for WalletPage {
             WalletPageMsg::SetTor(tor) => self.tor = tor,
 
             WalletPageMsg::SetBirthday(height) => self.birthday = Some(height),
+            WalletPageMsg::SetNetwork(network) => self.network = Some(network),
+            WalletPageMsg::SetMatchedBlocks(blocks) => self.matched_blocks = blocks,
+            WalletPageMsg::NameTransaction { txid, text } => {
+                let _ = sender.output(WalletPageOutput::SetLabel {
+                    kind: crate::wallet::labels::Kind::Tx,
+                    reference: txid,
+                    text,
+                });
+            }
+            WalletPageMsg::ShowAddresses => self.show_addresses(root, &sender),
+
+            WalletPageMsg::AskBump(txid) => self.ask_bump(&txid, root, &sender),
+
+            WalletPageMsg::Bump { txid, fee_rate } => {
+                let Some(from) = self
+                    .summary
+                    .as_ref()
+                    .and_then(|s| s.transactions.iter().find(|t| t.txid == txid))
+                    .map(|tx| tx.script_type)
+                else {
+                    return;
+                };
+                self.toaster.add_toast(adw::Toast::new("Building the replacement…"));
+                let _ = sender.output(WalletPageOutput::PlanBump { txid, from, fee_rate });
+            }
+
+            WalletPageMsg::Replaced { replaced, with } => {
+                // Off the page that was showing the payment that no longer
+                // exists, and onto the one that took its place — which is
+                // where somebody would go looking to check it worked.
+                if let Some(nav) = navigation_view(root) {
+                    nav.pop();
+                }
+                self.show_transaction(&with, root, &sender);
+
+                let short: String = with.chars().take(12).collect();
+                let toast = adw::Toast::new(&format!("Fee raised — this is now {short}…"));
+                toast.set_timeout(6);
+                self.toaster.add_toast(toast);
+                tracing::info!(%replaced, %with, "replaced a payment with a higher fee");
+            }
+
+            WalletPageMsg::BumpPlanned(result) => match *result {
+                Ok(plan) => self.confirm_bump(plan, root, &sender),
+                Err(message) => {
+                    self.toaster.add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                        &message,
+                    )));
+                }
+            },
+
+            WalletPageMsg::ShowAbout => {
+                // Closes the menu it was chosen from: a popover left open
+                // behind a dialog is still there when the dialog goes.
+                if let Some(popover) = self.main_menu.as_ref().and_then(|b| b.popover()) {
+                    popover.popdown();
+                }
+                crate::about::present(root);
+            }
+            WalletPageMsg::NameAddress(text) => {
+                let _ = sender.output(WalletPageOutput::SetLabel {
+                    kind: crate::wallet::labels::Kind::Addr,
+                    reference: self.address(),
+                    text,
+                });
+            }
+            WalletPageMsg::SetLabels(labels) => {
+                self.send.emit(SendMsg::SetLabels(labels.clone()));
+                self.labels = *labels;
+                self.refresh_address_label();
+                // The list carries labels in its rows, so it is rebuilt.
+                if let Some(summary) = self.summary.clone() {
+                    self.rebuild_transactions(&summary);
+                }
+            }
 
             WalletPageMsg::SetWatchOnly(watch_only) => {
+                // Kept here too: the transaction page offers to replace a
+                // payment, and a wallet with no keys cannot sign one.
+                self.watch_only = watch_only;
                 self.send.emit(SendMsg::SetWatchOnly(watch_only));
             }
 
@@ -1764,6 +2224,9 @@ impl Component for WalletPage {
                     self.rebuild_transactions(&summary);
                 }
             }
+            WalletPageMsg::AskRescan => {
+                let _ = sender.output(WalletPageOutput::AskRescan);
+            }
             WalletPageMsg::SetDenomination(denomination) => {
                 self.settings.denomination = denomination;
                 self.send.emit(SendMsg::SetDenomination(denomination));
@@ -1795,6 +2258,9 @@ impl Component for WalletPage {
                 self.progress = Progress::Connecting;
                 self.peers = None;
                 self.birthday = None;
+                self.network = None;
+                self.matched_blocks = None;
+                self.labels = crate::wallet::labels::Labels::default();
                 self.distinct_peers = 0;
                 self.peer_addresses.clear();
                 self.note = None;
@@ -1804,6 +2270,9 @@ impl Component for WalletPage {
                 self.fresh_address = None;
                 self.path_labels.clear();
                 self.path_model.splice(0, self.path_model.n_items(), &[]);
+                self.activity_path = None;
+                self.activity_choices.clear();
+                self.activity_model.splice(0, self.activity_model.n_items(), &[]);
                 self.transactions.guard().clear();
                 // The chain belongs to a network, not just a wallet: leaving
                 // it up meant a signet wallet briefly showing mainnet's
@@ -1822,6 +2291,7 @@ impl Component for WalletPage {
                 self.rebuild_transactions(&summary);
                 self.send.emit(SendMsg::Show(Box::new(summary.clone())));
                 self.summary = Some(summary);
+                self.refresh_address_label();
             }
 
             WalletPageMsg::PlanSend(draft) => {
@@ -1872,17 +2342,35 @@ impl WalletPage {
     /// Rebuild the activity list. Rows carry formatted text, so they are
     /// rebuilt when the summary or the denomination changes.
     fn rebuild_transactions(&mut self, summary: &Summary) {
+        self.sync_activity_filter(summary);
+
+        // Worth naming on each row only when there is more than one path for a
+        // transaction to be on, and not when the list is already down to one.
+        let show_path = summary.accounts.len() > 1 && self.activity_path.is_none();
+
         let mut guard = self.transactions.guard();
         guard.clear();
         for tx in &summary.transactions {
+            if self.activity_path.is_some_and(|only| only != tx.script_type) {
+                continue;
+            }
             guard.push_back((
                     tx.clone(),
                     self.settings.denomination,
                     summary.tip,
                     self.price,
                     summary.network.clone(),
+                    show_path,
+                    self.labels
+                        .get(crate::wallet::labels::Kind::Tx, &tx.txid)
+                        .map(str::to_owned),
                 ));
         }
+    }
+
+    /// Whether the filter is hiding everything the wallet has.
+    fn filtered_to_nothing(&self) -> bool {
+        self.has_transactions() && self.transactions.is_empty()
     }
 
     /// Open one transaction as a page over the wallet.
@@ -1900,16 +2388,7 @@ impl WalletPage {
         let Some(tx) = summary.transactions.iter().find(|t| t.txid == txid) else {
             return;
         };
-        // BreakpointBin -> ToastOverlay -> NavigationView.
-        let Some(nav) = root
-            .child()
-            .and_then(|child| child.downcast::<adw::ToastOverlay>().ok())
-            .and_then(|overlay| overlay.child())
-            .and_then(|child| child.downcast::<adw::NavigationView>().ok())
-        else {
-            tracing::warn!("could not find the wallet's navigation view");
-            return;
-        };
+        let Some(nav) = navigation_view(root) else { return };
 
         let page = adw::PreferencesPage::new();
         let incoming = tx.is_incoming();
@@ -1942,16 +2421,18 @@ impl WalletPage {
             // Current price against a past amount, so this is what the coins
             // are worth now rather than when they moved. The approximation
             // sign carries that; spelling it out read as clutter.
-            let value = gtk::Label::new(Some(&format!(
-                "≈ ${:.2}",
-                price.value_of(magnitude)
-            )));
+            let value = gtk::Label::new(Some(&format!("≈ ${}", crate::price::usd(price.value_of(magnitude)))));
             value.add_css_class("dim-label");
             value.add_css_class("numeric");
             stack.append(&value);
         }
         headline.add(&stack);
         page.add(&headline);
+
+        // What this payment was for, in your words. A field standing open at
+        // the top read as something waiting to be filled in; this reads as a
+        // fact about the payment, which is what it is once written.
+        page.add(&self.label_group(&tx.txid, sender));
 
         let status = adw::PreferencesGroup::new();
         status.set_title("Status");
@@ -1971,33 +2452,81 @@ impl WalletPage {
         }
         if tx.height.is_none() {
             // Only worth saying while it can still happen.
-            status.add(&detail_row(
+            let replaceable = detail_row(
                 "Replaceable",
                 if tx.replaceable {
                     "Yes — signals BIP-125, so it can be replaced by a higher fee"
                 } else {
                     "No — it cannot be replaced, only waited for"
                 },
-            ));
+            );
+
+            status.add(&replaceable);
+
+            // Already raised once. Worth saying plainly, because without it
+            // the only way to find out is to open the dialog and be told the
+            // floor is higher than you expected.
+            if !tx.replaces.is_empty() {
+                let history = detail_row(
+                    "Already raised",
+                    "This payment is itself a replacement — its fee has been raised once \
+                     already. Only one of them can ever confirm.",
+                );
+                history.set_subtitle_lines(3);
+                if let Some(earlier) = tx.replaces.first() {
+                    history.set_tooltip_text(Some(&format!("It replaced {earlier}")));
+                }
+                status.add(&history);
+            }
+
+            // Its own row rather than a button crushed into the suffix of a
+            // two-line one: the phrase fits by construction, and it reads as
+            // the action it is instead of an afterthought. A payment somebody
+            // else made is not ours to replace — we cannot sign its inputs —
+            // and neither is one on a wallet that holds no keys.
+            if tx.replaceable && !incoming && !self.watch_only {
+                let raise = adw::ActionRow::new();
+                raise.set_title("Raise the fee");
+                raise.set_subtitle("Replace it with a payment that pays more");
+                raise.set_activatable(true);
+                raise.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                {
+                    let sender = sender.clone();
+                    let txid = tx.txid.clone();
+                    raise.connect_activated(move |_| {
+                        sender.input(WalletPageMsg::AskBump(txid.clone()));
+                    });
+                }
+                status.add(&raise);
+            }
         }
         if let Some(hash) = &tx.block_hash {
-            status.add(&detail_row("Block hash", hash));
+            status.add(&mono_row("Block hash", hash));
         }
         page.add(&status);
 
         // Where the money actually went. The headline nets everything into one
         // number; this is the part that says who was paid, which is the thing
         // worth checking against what you meant to do.
-        if !tx.paid_to.is_empty() {
+        //
+        // On a payment you made that is the headline question, so it goes
+        // first. On one you received it is somebody else's business — the
+        // other outputs of a transaction that happened to pay you — so it
+        // follows what you actually received.
+        let others_paid = (!tx.paid_to.is_empty()).then(|| {
             let sent_to = adw::PreferencesGroup::new();
             sent_to.set_title(if incoming { "Also paid" } else { "Paid to" });
             for (address, sats) in &tx.paid_to {
                 sent_to.add(&address_row(
                     address,
                     &self.settings.denomination.format(*sats, &summary.network),
+                    self.labels.get(crate::wallet::labels::Kind::Addr, address),
                 ));
             }
-            page.add(&sent_to);
+            sent_to
+        });
+        if !incoming && let Some(group) = &others_paid {
+            page.add(group);
         }
 
         if !tx.paid_to_self.is_empty() {
@@ -2009,13 +2538,20 @@ impl WalletPage {
                      to a fresh address of yours.",
                 ));
             }
-            for (address, sats) in &tx.paid_to_self {
-                mine.add(&address_row(
-                    address,
-                    &self.settings.denomination.format(*sats, &summary.network),
+            for out in &tx.paid_to_self {
+                mine.add(&own_address_row(
+                    out,
+                    &self.settings.denomination.format(out.sats, &summary.network),
+                    self.labels.get(crate::wallet::labels::Kind::Addr, &out.address),
                 ));
             }
             page.add(&mine);
+        }
+
+        // Money you received comes first; the rest of the transaction's
+        // outputs are somebody else's business and follow it.
+        if incoming && let Some(group) = &others_paid {
+            page.add(group);
         }
 
         // A privacy observation, not a warning: nothing is broken, but reuse
@@ -2029,7 +2565,9 @@ impl WalletPage {
                  together. Sieve hands out a fresh address each time you ask.",
             );
             row.set_subtitle_lines(3);
-            row.add_prefix(&gtk::Image::from_icon_name("channel-secure-symbolic"));
+            // Not a padlock: this is a privacy observation, and a padlock
+            // says the opposite of what it means.
+            row.add_prefix(&gtk::Image::from_icon_name("view-reveal-symbolic"));
             note.add(&row);
             page.add(&note);
         }
@@ -2065,11 +2603,21 @@ impl WalletPage {
                 &self.settings.denomination.format(tx.change_sats(), &summary.network),
             ));
         }
-        detail.add(&detail_row("Derivation path", &tx.script_type.to_string()));
+        // The account, then what it means. An imported descriptor can name an
+        // account Sieve would not have chosen, so this is read from the
+        // descriptor rather than assumed from the script type.
+        detail.add(&detail_row(
+            "Derivation path",
+            &match &tx.account_path {
+                Some(path) => format!("{path} · {}", tx.script_type),
+                None => tx.script_type.to_string(),
+            },
+        ));
 
         let txid_row = adw::ActionRow::new();
+        txid_row.set_use_markup(true);
         txid_row.set_title("Transaction ID");
-        txid_row.set_subtitle(&tx.txid);
+        txid_row.set_subtitle(&mono(&tx.txid));
         txid_row.set_subtitle_lines(2);
         txid_row.add_css_class("property");
         let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
@@ -2119,6 +2667,374 @@ impl WalletPage {
         nav.push(&nav_page);
     }
 
+    /// How many addresses this wallet has handed out, and how many are spent.
+    fn addresses_note(&self) -> String {
+        let Some(summary) = &self.summary else { return "Nothing handed out yet".into() };
+        let all = summary.addresses.len();
+        if all == 0 {
+            return "Nothing handed out yet".into();
+        }
+        let used = summary.addresses.iter().filter(|a| a.payments > 0).count();
+        format!("{}, {used} paid to", plural(all, "address", "addresses"))
+    }
+
+    /// Every address handed out, as a page over the wallet.
+    ///
+    /// Receive addresses only. Change belongs to transactions rather than to
+    /// anybody, and listing it here would offer addresses to hand out that
+    /// were never meant to be handed out.
+    fn show_addresses(&self, root: &adw::BreakpointBin, sender: &ComponentSender<Self>) {
+        let Some(summary) = &self.summary else { return };
+        let Some(nav) = navigation_view(root) else { return };
+
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Handed out");
+        group.set_description(Some(
+            "Every address this wallet has given out, oldest first. Change addresses are not \
+             here: they belong to a payment rather than to anybody.",
+        ));
+
+        // Oldest first within a path, and paths in the order the ecosystem
+        // grew — the same order everything else in Sieve lists them.
+        for entry in &summary.addresses {
+            let row = adw::ActionRow::new();
+            row.set_use_markup(true);
+
+            let name = self.labels.get(crate::wallet::labels::Kind::Addr, &entry.address);
+            row.set_title(&match name {
+                Some(name) => gtk::glib::markup_escape_text(name).to_string(),
+                None => format!("Address {}", entry.index),
+            });
+
+            // The address, then the path that produced it, a size down and
+            // stepped back: the address is what gets checked, the path is what
+            // explains it.
+            row.set_subtitle(&match &entry.path {
+                Some(path) => format!(
+                    "{}\n<span size=\"small\" alpha=\"60%\">{}</span>",
+                    mono(&entry.address),
+                    mono(path)
+                ),
+                None => mono(&entry.address),
+            });
+            row.set_subtitle_lines(4);
+            row.add_css_class("property");
+
+            // What happened to it, which is the question the list answers.
+            let state = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            state.set_valign(gtk::Align::Center);
+            state.set_halign(gtk::Align::End);
+
+            let amount = gtk::Label::new(None);
+            amount.set_halign(gtk::Align::End);
+            amount.add_css_class("numeric");
+            match entry.payments {
+                0 => {
+                    amount.set_label("Unused");
+                    amount.add_css_class("dim-label");
+                }
+                _ => {
+                    amount.set_label(
+                        &self
+                            .settings
+                            .denomination
+                            .format(entry.received_sats, &summary.network),
+                    );
+                    amount.add_css_class("success");
+                }
+            }
+            state.append(&amount);
+
+            // Reuse is the fact this screen can state that no other screen
+            // can, so it is said in words under the amount rather than left to
+            // an icon: a glyph here has to be recognised before it can be
+            // understood, and the wrong one reads as reassurance.
+            if entry.payments > 1 {
+                let reused = gtk::Label::new(Some(&format!("Paid {} times", entry.payments)));
+                reused.set_halign(gtk::Align::End);
+                reused.add_css_class("caption");
+                reused.add_css_class("warning");
+                reused.set_tooltip_text(Some(
+                    "Anyone watching the chain can tie those payments to each other. \
+                     Press New address to hand out a fresh one instead.",
+                ));
+                state.append(&reused);
+            }
+            row.add_suffix(&state);
+
+            let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+            copy.set_tooltip_text(Some("Copy address"));
+            copy.set_valign(gtk::Align::Center);
+            copy.add_css_class("flat");
+            {
+                let address = entry.address.clone();
+                let sender = sender.clone();
+                copy.connect_clicked(move |_| {
+                    if let Some(display) = gtk::gdk::Display::default() {
+                        display.clipboard().set_text(&address);
+                    }
+                    sender.input(WalletPageMsg::Toast("Address copied".into()));
+                });
+            }
+            row.add_suffix(&copy);
+            group.add(&row);
+        }
+
+        page.add(&group);
+
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&page));
+        nav.push(&adw::NavigationPage::new(&toolbar, "Addresses"));
+    }
+
+    /// Ask what fee rate to replace an unconfirmed payment at.
+    ///
+    /// The floor is what the network will actually relay: a replacement must
+    /// pay the original's fee *and* at least a satoshi per virtual byte for
+    /// its own size. Below that it is dropped by every node it reaches, which
+    /// looks exactly like the network ignoring you.
+    fn ask_bump(&self, txid: &str, root: &adw::BreakpointBin, sender: &ComponentSender<Self>) {
+        let Some(summary) = &self.summary else { return };
+        let Some(tx) = summary.transactions.iter().find(|t| t.txid == txid) else {
+            return;
+        };
+        let Some(window) = root.root() else { return };
+
+        let was = tx.fee_rate().unwrap_or(1.0);
+        let floor = (was + 1.0).max(2.0);
+
+        let body = format!(
+            "This payment is paying {was:.2} sat/vB. A replacement spends the same coins, so \
+             only one of them can ever confirm — and if the original confirms first, the \
+             replacement simply never happens and costs nothing.\n\nSieve cannot see the \
+             mempool, so it cannot tell you which one the network prefers. The chain decides."
+        );
+
+        let dialog = adw::AlertDialog::new(Some("Raise the fee?"), Some(&body));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("bump", "Replace it");
+        dialog.set_response_appearance("bump", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let group = adw::PreferencesGroup::new();
+        let rate = adw::SpinRow::new(
+            Some(&gtk::Adjustment::new(floor, floor, 5_000.0, 1.0, 10.0, 0.0)),
+            1.0,
+            1,
+        );
+        rate.set_title("New fee rate");
+        rate.set_subtitle(&format!(
+            "At least {floor:.2} sat/vB — a replacement has to pay for its own size on top of \
+             what the original paid"
+        ));
+        rate.set_subtitle_lines(3);
+        group.add(&rate);
+        dialog.set_extra_child(Some(&group));
+
+        {
+            let sender = sender.clone();
+            let txid = txid.to_owned();
+            dialog.connect_response(None, move |_, response| {
+                if response == "bump" {
+                    sender.input(WalletPageMsg::Bump {
+                        txid: txid.clone(),
+                        fee_rate: rate.value(),
+                    });
+                }
+            });
+        }
+        dialog.present(Some(&window));
+    }
+
+    /// The last step before a replacement is signed and broadcast.
+    ///
+    /// Every number restated, as the send confirmation does: what the
+    /// recipient still gets, what the fee was, what it becomes, and what the
+    /// difference costs.
+    fn confirm_bump(
+        &self,
+        plan: crate::wallet::send::Plan,
+        root: &adw::BreakpointBin,
+        sender: &ComponentSender<Self>,
+    ) {
+        let Some(window) = root.root() else { return };
+        let Some(summary) = &self.summary else { return };
+        let unit = self.settings.denomination;
+        let network = &summary.network;
+
+        let was = plan.was_fee.unwrap_or(0);
+        let now = plan.fee.to_sat();
+        let body = format!(
+            "The recipient still gets {}.\n\nFee was {}\nFee becomes {}\nThat is {} more.\n\n\
+             The replacement spends the same coins as the original, so only one of them can \
+             confirm.",
+            unit.format(plan.spend.to_sat(), network),
+            unit.format(was, network),
+            unit.format(now, network),
+            unit.format(now.saturating_sub(was), network),
+        );
+
+        let dialog = adw::AlertDialog::new(Some("Replace this payment?"), Some(&body));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("send", "Replace");
+        dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        // The password buys one signature, here as everywhere else.
+        let password = gtk::PasswordEntry::new();
+        password.set_show_peek_icon(true);
+        password.set_placeholder_text(Some("Wallet password"));
+        password.set_margin_top(6);
+        dialog.set_extra_child(Some(&password));
+
+        {
+            let sender = sender.clone();
+            let password = password.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "send" {
+                    let _ = sender.output(WalletPageOutput::Send {
+                        plan: Box::new(plan.clone()),
+                        password: Password(zeroize::Zeroizing::new(
+                            password.text().to_string(),
+                        )),
+                    });
+                }
+            });
+        }
+        dialog.present(Some(&window));
+    }
+
+    /// The transaction's name: shown as a line, edited when asked for.
+    ///
+    /// Two rows in one group, one visible at a time. An entry that is always
+    /// open invites typing into it and makes an unlabelled payment look
+    /// unfinished; a line that says what the payment is, with a pencil beside
+    /// it, says the same thing without the demand.
+    fn label_group(
+        &self,
+        txid: &str,
+        sender: &ComponentSender<Self>,
+    ) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::new();
+        let existing = self
+            .labels
+            .get(crate::wallet::labels::Kind::Tx, txid)
+            .unwrap_or_default()
+            .to_owned();
+
+        let shown = adw::ActionRow::new();
+        shown.set_title("Label");
+        shown.set_subtitle(if existing.is_empty() { UNLABELLED_TX } else { &existing });
+        shown.set_subtitle_lines(2);
+        shown.set_activatable(true);
+
+        let edit = gtk::Button::from_icon_name("document-edit-symbolic");
+        edit.set_tooltip_text(Some("Edit this label"));
+        edit.set_valign(gtk::Align::Center);
+        edit.add_css_class("flat");
+        shown.add_suffix(&edit);
+
+        let editing = adw::EntryRow::new();
+        editing.set_title("Label (optional)");
+        editing.set_text(&existing);
+        editing.set_show_apply_button(true);
+        editing.set_visible(false);
+
+        // Either row hands over to the other, so the group is always exactly
+        // one row tall and nothing below it moves.
+        let open = {
+            let shown = shown.clone();
+            let editing = editing.clone();
+            move || {
+                shown.set_visible(false);
+                editing.set_visible(true);
+                editing.grab_focus();
+            }
+        };
+        edit.connect_clicked({
+            let open = open.clone();
+            move |_| open()
+        });
+        shown.connect_activated(move |_| open());
+
+        editing.connect_apply({
+            let sender = sender.clone();
+            let txid = txid.to_owned();
+            let shown = shown.clone();
+            move |row| {
+                let text = row.text().to_string();
+                let _ = sender.output(WalletPageOutput::SetLabel {
+                    kind: crate::wallet::labels::Kind::Tx,
+                    reference: txid.clone(),
+                    text: text.clone(),
+                });
+                shown.set_subtitle(if text.trim().is_empty() {
+                    UNLABELLED_TX
+                } else {
+                    text.trim()
+                });
+                row.set_visible(false);
+                shown.set_visible(true);
+            }
+        });
+
+        group.add(&shown);
+        group.add(&editing);
+        group
+    }
+
+    /// Put the current address's name on screen, and close the editor.
+    ///
+    /// Called whenever the address changes as well as when a name is saved: a
+    /// name belongs to one address, and leaving the last one's on screen would
+    /// claim something false about this one.
+    fn refresh_address_label(&self) {
+        let name = self
+            .labels
+            .get(crate::wallet::labels::Kind::Addr, &self.address())
+            .unwrap_or_default();
+
+        if let Some(row) = &self.address_label_row {
+            if row.text() != name {
+                row.set_text(name);
+            }
+            row.set_visible(false);
+        }
+        if let Some(shown) = &self.address_label_shown {
+            shown.set_subtitle(if name.is_empty() { UNNAMED_ADDRESS } else { name });
+            shown.set_visible(true);
+        }
+    }
+
+    /// Offer the paths this wallet actually watches, and no others.
+    ///
+    /// Rewritten only when that set changes, for the same reason the receive
+    /// picker is: splicing the model resets the selection, and the selection
+    /// is the filter.
+    fn sync_activity_filter(&mut self, summary: &Summary) {
+        let mut choices: Vec<Option<crate::wallet::accounts::ScriptType>> = vec![None];
+        choices.extend(summary.accounts.iter().map(|a| Some(a.script_type)));
+        if choices == self.activity_choices {
+            return;
+        }
+
+        let labels: Vec<String> = std::iter::once("All paths".to_string())
+            .chain(summary.accounts.iter().map(|a| a.script_type.to_string()))
+            .collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        self.activity_model.splice(0, self.activity_model.n_items(), &refs);
+        self.activity_choices = choices;
+
+        // A path the wallet has stopped watching cannot stay selected.
+        if self.activity_path.is_some_and(|only| !self.activity_choices.contains(&Some(only))) {
+            self.activity_path = None;
+        }
+    }
+
     /// Rewrite the picker only when the set of paths actually changes, so a
     /// routine sync update cannot reset a selection someone just made.
     fn sync_path_picker(&mut self, summary: &Summary) {
@@ -2166,6 +3082,14 @@ pub(crate) fn explorer_url(network: &str, txid: &str) -> Option<String> {
 }
 
 /// A read-only label/value row, as used throughout the detail sheet.
+/// A detail row whose value is an identifier rather than prose.
+fn mono_row(title: &str, value: &str) -> adw::ActionRow {
+    let row = detail_row(title, "");
+    row.set_use_markup(true);
+    row.set_subtitle(&mono(value));
+    row
+}
+
 fn detail_row(title: &str, value: &str) -> adw::ActionRow {
     let row = adw::ActionRow::new();
     row.set_title(title);
@@ -2177,6 +3101,24 @@ fn detail_row(title: &str, value: &str) -> adw::ActionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_progress_is_measured_from_the_birthday() {
+        // Half the blocks between the birthday and the tip.
+        let half = header_fraction(500_000, 0, 1_000_000).unwrap();
+        assert!((half - 0.5).abs() < 0.001, "{half}");
+
+        // A wallet born recently is not 99% synced the moment it starts.
+        let from_birthday = header_fraction(900_100, 900_000, 900_200).unwrap();
+        assert!((from_birthday - 0.5).abs() < 0.001, "{from_birthday}");
+
+        // Nothing to measure yet, or an estimate the chain has overtaken.
+        assert!(header_fraction(900_000, 900_000, 1_000_000).is_none());
+        assert!(header_fraction(1_000_000, 900_000, 899_000).is_none());
+
+        // Past the estimate, hold short of full rather than claiming done.
+        assert_eq!(header_fraction(1_000_000, 0, 900_000), Some(0.99));
+    }
 
     /// The tint is how you tell at a glance which chain the money is on, so
     /// mainnet must never wear a test network's colour or the reverse.

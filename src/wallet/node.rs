@@ -111,6 +111,15 @@ pub enum Progress {
     Headers(u32),
     /// Filters downloading, 0.0 to 1.0.
     Scanning(f64),
+    /// Every filter is in and the blocks they matched are being fetched and
+    /// read. Carries how many blocks have arrived.
+    ///
+    /// A filter only says a block *probably* touches this wallet; the block
+    /// itself is what holds the transaction. So this is the phase where the
+    /// balance is actually worked out, it runs after the bar is full, and it
+    /// takes as long as fetching those blocks from peers takes. Left unsaid,
+    /// it reads as a finished sync that has hung.
+    Blocks(usize),
     Synced,
     /// The node has been silent long enough to be worth mentioning.
     Waiting,
@@ -155,6 +164,14 @@ impl Progress {
             Progress::Scanning(f) => {
                 format!("Downloading and checking filters — {:.2}%", f * 100.0)
             }
+            // Named for what it is rather than "finishing up": these are
+            // the blocks that matched, and reading them is what produces the
+            // balance. One is a real step; a hundred is a wallet with a lot of
+            // history, and either way something is happening.
+            Progress::Blocks(1) => "Reading 1 block that matched this wallet…".into(),
+            Progress::Blocks(n) => {
+                format!("Reading blocks that matched this wallet — {n} so far…")
+            }
             Progress::Synced => "Up to date".into(),
             Progress::Waiting => "Waiting for peers to respond…".into(),
         }
@@ -183,6 +200,12 @@ pub struct Session {
     /// Set once the node reports real scan progress, after which connection
     /// events stop driving the status line.
     scanning: Arc<AtomicBool>,
+    /// Set when filter progress reaches the end. Until then a received block
+    /// is one match among many and must not interrupt the bar; after it, it is
+    /// the only thing still happening.
+    filters_done: Arc<AtomicBool>,
+    /// Blocks fetched and read this session.
+    blocks_read: Arc<std::sync::atomic::AtomicUsize>,
     /// Which chain this session is on, so remembered peers never cross over.
     network: bdk_wallet::bitcoin::Network,
     /// The last thing the node actually said about progress.
@@ -399,6 +422,8 @@ impl Session {
             median_time: std::sync::Mutex::new(None),
             synced: Arc::new(AtomicBool::new(false)),
             scanning: Arc::new(AtomicBool::new(false)),
+            filters_done: Arc::new(AtomicBool::new(false)),
+            blocks_read: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             network,
         })
     }
@@ -408,6 +433,9 @@ impl Session {
     /// Returns once the node has caught up to the tip or a new block arrives,
     /// so the caller loops on it.
     pub async fn next_update(&self) -> Result<Summary> {
+        // Timed in three parts, because the gap between a full progress bar
+        // and a balance on screen is made of all three and nothing said which.
+        let waited = std::time::Instant::now();
         let updates: Vec<_> = {
             let mut subscriber = self.updates.lock().await;
             subscriber
@@ -416,7 +444,9 @@ impl Session {
                 .map_err(|e| anyhow!("sync failed: {e}"))?
                 .collect()
         };
+        let waited = waited.elapsed();
 
+        let applying = std::time::Instant::now();
         let mut portfolio = self.portfolio.lock().await;
         for (id, update) in updates {
             // Updates arrive tagged by descriptor, because one node feeds
@@ -430,6 +460,14 @@ impl Session {
                 None => tracing::warn!(?id, "update for an unknown descriptor"),
             }
         }
+
+        let applying = applying.elapsed();
+        tracing::debug!(
+            waited_ms = waited.as_millis(),
+            applied_ms = applying.as_millis(),
+            blocks_read = self.blocks_read.load(Ordering::Relaxed),
+            "wallet updates arrived"
+        );
 
         // A recovery scan only tests scripts that have been derived. If the
         // last used address sits near the edge of the derived window, there may
@@ -446,7 +484,13 @@ impl Session {
             self.synced.store(true, Ordering::Relaxed);
         }
 
-        Summary::from_portfolio(&mut portfolio)
+        // The last of the three: walking every transaction on every path and
+        // writing the changeset back to sqlite. Nothing on screen moves while
+        // it runs, so if it is the expensive part it is worth knowing.
+        let summarising = std::time::Instant::now();
+        let summary = Summary::from_portfolio(&mut portfolio);
+        tracing::debug!(summarised_ms = summarising.elapsed().as_millis(), "summary built");
+        summary
     }
 
     /// Reveal a fresh receive address on one path.
@@ -477,6 +521,75 @@ impl Session {
         Ok((address, summary))
     }
 
+    /// Rebuild an unconfirmed payment at a higher fee.
+    ///
+    /// The replacement spends the same coins as the original, so only one of
+    /// them can ever confirm — and if the original wins, the replacement
+    /// becomes permanently invalid and costs nothing. That reconciliation is
+    /// not ours to do: a confirmed transaction outranks an unconfirmed
+    /// conflict in BDK's canonicalisation, so the wallet corrects itself when
+    /// the block arrives.
+    ///
+    /// Watch-only builds this happily; only signing needs a key.
+    pub async fn plan_bump(
+        &self,
+        txid: &str,
+        script_type: super::accounts::ScriptType,
+        fee_rate: bdk_wallet::bitcoin::FeeRate,
+    ) -> Result<super::send::Plan> {
+        let txid: bdk_wallet::bitcoin::Txid =
+            txid.parse().map_err(|_| anyhow!("that is not a transaction id"))?;
+
+        let mut portfolio = self.portfolio.lock().await;
+        let account = portfolio
+            .accounts
+            .iter_mut()
+            .find(|a| a.script_type == script_type)
+            .context("that derivation path is not part of this wallet")?;
+
+        // What the original paid, and to whom: the replacement pays the same
+        // people, and the screen has to be able to say so.
+        let original = account
+            .wallet
+            .get_tx(txid)
+            .context("this wallet does not hold that transaction")?;
+        let was = account
+            .wallet
+            .calculate_fee(&original.tx_node.tx)
+            .map(|fee| fee.to_sat())
+            .unwrap_or(0);
+        let (spend, change) = super::send::split_outputs_of(
+            &original.tx_node.tx,
+            &account.wallet,
+        );
+
+        let psbt = {
+            let mut builder = account
+                .wallet
+                .build_fee_bump(txid)
+                .map_err(|e| anyhow!("{}", explain_bump(e)))?;
+            builder.fee_rate(fee_rate);
+            builder
+                .finish()
+                .map_err(|e| anyhow!("the replacement could not be built: {e}"))?
+        };
+
+        let fee = psbt
+            .fee()
+            .map_err(|e| anyhow!("the replacement has no readable fee: {e}"))?;
+
+        Ok(super::send::Plan {
+            from: script_type,
+            to: spend.0,
+            spend: spend.1,
+            change,
+            fee,
+            replaces: Some(txid.to_string()),
+            was_fee: Some(was),
+            psbt,
+        })
+    }
+
     /// Build a transaction from one account, without signing it.
     ///
     /// Watch-only is enough for this: BDK needs public descriptors and UTXOs to
@@ -504,12 +617,26 @@ impl Session {
             let mut builder = account.wallet.build_tx();
             builder.unspendable(pending);
             builder.fee_rate(draft.fee_rate);
+
+            // Chosen coins mean exactly those. `manually_selected_only` is
+            // what makes that true: without it BDK treats them as a starting
+            // point and adds more when they fall short, which would quietly
+            // undo the decision that was made.
+            if !draft.coins.is_empty() {
+                builder
+                    .add_utxos(&draft.coins)
+                    .map_err(|e| anyhow!("those coins cannot be spent: {e}"))?;
+                builder.manually_selected_only();
+            }
+
             match draft.amount {
                 Sending::Exact(amount) => {
                     builder.add_recipient(script.clone(), amount);
                 }
                 // No change output, and the fee comes out of what is sent
-                // rather than being added to it.
+                // rather than being added to it. With coins chosen this drains
+                // exactly those, which is how somebody empties one source
+                // deliberately.
                 Sending::Everything => {
                     builder.drain_wallet();
                     builder.drain_to(script.clone());
@@ -543,6 +670,9 @@ impl Session {
             spend,
             fee,
             change,
+            // An ordinary payment replaces nothing.
+            replaces: None,
+            was_fee: None,
         })
     }
 
@@ -697,9 +827,24 @@ impl Session {
         // own row for that.
         let scanning = self.scanning.load(Ordering::Relaxed);
         return Some(match event {
+            // The tail of a scan: the filters are all in and what remains is
+            // fetching the blocks they matched, which is the only work left
+            // and the only thing worth saying.
+            Info::BlockReceived(hash)
+                if scanning && self.filters_done.load(Ordering::Relaxed) =>
+            {
+                let read = self.blocks_read.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::debug!(%hash, read, "reading a block that matched a filter");
+                Progress::Blocks(read)
+            }
             Info::SuccessfulHandshake | Info::ConnectionsMet | Info::BlockReceived(_)
                 if scanning =>
             {
+                // Mid-scan a matched block is one of many and arrives between
+                // filters; letting it speak would flicker against the bar.
+                if matches!(event, Info::BlockReceived(_)) {
+                    self.blocks_read.fetch_add(1, Ordering::Relaxed);
+                }
                 continue;
             }
             Info::SuccessfulHandshake => Progress::Connecting,
@@ -707,6 +852,9 @@ impl Session {
             Info::Progress(p) => {
                 self.scanning.store(true, Ordering::Relaxed);
                 let fraction = p.fraction_complete() as f64;
+                // What separates "a block matched along the way" from "the
+                // filters are done and this is the last of the work".
+                self.filters_done.store(fraction >= 1.0, Ordering::Relaxed);
                 // A zero fraction means no filter header has arrived yet, so
                 // the node is still walking the header chain. Reporting that as
                 // "scanning filters, 0%" reads as stuck when it is not.
@@ -769,6 +917,14 @@ impl Session {
         })
     }
 
+    /// How many blocks this session has fetched because a filter matched.
+    ///
+    /// Recorded when a scan completes, so the next scan of the same wallet has
+    /// a measured total to draw a bar against.
+    pub fn blocks_read(&self) -> usize {
+        self.blocks_read.load(Ordering::Relaxed)
+    }
+
     pub fn shutdown(&self) {
         let _ = self.requester.shutdown();
     }
@@ -799,6 +955,39 @@ mod tests {
         assert!(Progress::Connecting.fraction().is_none());
         assert_eq!(Progress::Scanning(0.5).fraction(), Some(0.5));
         assert_eq!(Progress::Synced.fraction(), Some(1.0));
+        // Nor for the tail: nothing says how many matched blocks are left.
+        assert!(Progress::Blocks(3).fraction().is_none());
+    }
+
+    #[test]
+    fn the_block_phase_says_what_it_is_doing() {
+        // The gap between a full bar and a balance was silent, and silence
+        // after 100% reads as a hang.
+        assert!(Progress::Blocks(1).label().contains("1 block"));
+        assert!(Progress::Blocks(7).label().contains("7 so far"));
+    }
+}
+
+/// BDK's fee-bump refusals, said as sentences.
+///
+/// Each of these is a real situation somebody can be in, and the raw error
+/// names the internal state rather than what happened.
+fn explain_bump(error: bdk_wallet::error::BuildFeeBumpError) -> String {
+    use bdk_wallet::error::BuildFeeBumpError as E;
+    match error {
+        E::TransactionConfirmed(_) => {
+            "that payment is already in a block, so it cannot be replaced".into()
+        }
+        E::IrreplaceableTransaction(_) => {
+            "that payment did not signal that it could be replaced, so the network will not \
+             take a replacement for it"
+                .into()
+        }
+        E::TransactionNotFound(_) => {
+            "this wallet does not hold that payment, so it cannot rebuild it".into()
+        }
+        E::FeeRateUnavailable => "the original payment's fee cannot be worked out".into(),
+        other => format!("that payment cannot be replaced: {other}"),
     }
 }
 

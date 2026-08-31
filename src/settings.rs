@@ -159,6 +159,54 @@ impl Appearance {
     }
 }
 
+/// How long the wallet stays open with nobody touching it.
+///
+/// Not about the seed — that is decrypted only at the moment of signing, and
+/// an idle wallet holds no key. It is about what is on the screen: the balance,
+/// the history, the addresses, and a payment somebody could drive as far as the
+/// password prompt while you are away from the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum IdleLock {
+    Never,
+    #[default]
+    After5Minutes,
+    After15Minutes,
+    After30Minutes,
+    AfterHour,
+}
+
+impl IdleLock {
+    pub const ALL: [IdleLock; 5] = [
+        IdleLock::Never,
+        IdleLock::After5Minutes,
+        IdleLock::After15Minutes,
+        IdleLock::After30Minutes,
+        IdleLock::AfterHour,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IdleLock::Never => "Never",
+            IdleLock::After5Minutes => "After 5 minutes",
+            IdleLock::After15Minutes => "After 15 minutes",
+            IdleLock::After30Minutes => "After 30 minutes",
+            IdleLock::AfterHour => "After an hour",
+        }
+    }
+
+    /// `None` means never.
+    pub fn duration(self) -> Option<std::time::Duration> {
+        let minutes = match self {
+            IdleLock::Never => return None,
+            IdleLock::After5Minutes => 5,
+            IdleLock::After15Minutes => 15,
+            IdleLock::After30Minutes => 30,
+            IdleLock::AfterHour => 60,
+        };
+        Some(std::time::Duration::from_secs(minutes * 60))
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -192,6 +240,13 @@ pub struct Settings {
     /// Where that proxy is, when it is not in the usual place.
     #[serde(default)]
     pub tor_proxy: Option<String>,
+    /// How long an untouched wallet stays open.
+    ///
+    /// Five minutes by default. A wallet is not a document: leaving one open
+    /// on an unattended screen shows a stranger the balance and every payment
+    /// ever made, and the cost of being wrong is a password typed again.
+    #[serde(default)]
+    pub idle_lock: IdleLock,
     /// The wallet opened last, so a restart returns to it.
     ///
     /// Without this, startup opens whichever wallet sorts first by name, which
@@ -225,6 +280,26 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_lock_choices_are_ordered_and_finite() {
+        use IdleLock::*;
+        // Never is first because it is the exception, and the rest climb.
+        assert_eq!(IdleLock::ALL[0], Never);
+        assert_eq!(Never.duration(), None);
+
+        let minutes: Vec<u64> = IdleLock::ALL
+            .iter()
+            .filter_map(|choice| choice.duration())
+            .map(|d| d.as_secs() / 60)
+            .collect();
+        assert_eq!(minutes, vec![5, 15, 30, 60]);
+        assert!(minutes.windows(2).all(|pair| pair[0] < pair[1]), "must climb");
+
+        // The default locks. A wallet that ships with this off protects
+        // nobody who never opens preferences.
+        assert!(IdleLock::default().duration().is_some());
+    }
 
     #[test]
     fn btc_amounts_are_read_without_floating_point() {

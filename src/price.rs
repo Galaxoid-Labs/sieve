@@ -29,6 +29,26 @@ impl Price {
     }
 }
 
+/// Money written the way money is written: grouped to the thousand, cut to
+/// cents. A five-figure balance shown as a bare run of digits has to be
+/// counted rather than read.
+pub fn usd(amount: f64) -> String {
+    let negative = amount < 0.0;
+    let cents = (amount.abs() * 100.0).round() as u64;
+    let whole = cents / 100;
+
+    let digits = whole.to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+
+    format!("{}{grouped}.{:02}", if negative { "-" } else { "" }, cents % 100)
+}
+
 /// Fetch the last traded price.
 ///
 /// Blocking: call it from a command, never on the main thread.
@@ -70,6 +90,15 @@ fn parse(body: &str) -> Result<Price> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dollars_are_grouped() {
+        assert_eq!(usd(0.0), "0.00");
+        assert_eq!(usd(9.5), "9.50");
+        assert_eq!(usd(1234.567), "1,234.57");
+        assert_eq!(usd(1_234_567.0), "1,234,567.00");
+        assert_eq!(usd(-42.0), "-42.00");
+    }
 
     #[test]
     fn reads_the_last_price_not_the_bid() {

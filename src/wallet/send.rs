@@ -45,6 +45,11 @@ pub struct Draft {
     pub to: Address,
     pub amount: Sending,
     pub fee_rate: FeeRate,
+    /// Which coins to spend. Empty means "choose for me", which is what most
+    /// payments should be; a non-empty list means exactly these and nothing
+    /// else, because the point of choosing is that nothing is added behind
+    /// your back.
+    pub coins: Vec<bdk_wallet::bitcoin::OutPoint>,
 }
 
 /// A built, unsigned transaction, with the numbers to show before signing.
@@ -59,6 +64,12 @@ pub struct Plan {
     pub fee: Amount,
     /// Returning to this wallet on the change chain, if there is any.
     pub change: Option<Amount>,
+    /// The payment this one replaces, when it is a fee bump. Both spend the
+    /// same coins, so only one of them can ever confirm.
+    pub replaces: Option<String>,
+    /// What that payment was paying, so the increase can be shown rather than
+    /// only the new figure.
+    pub was_fee: Option<u64>,
 }
 
 impl Plan {
@@ -85,6 +96,13 @@ pub fn parse_address(text: &str, network: Network) -> Result<Address> {
     if text.is_empty() {
         bail!("enter an address to send to");
     }
+
+    // A payment request is normally taken apart by the form as it is pasted.
+    // Doing it again here means nothing can reach a signature with a URI in
+    // the field — and the amount in one is never read from this path, so a
+    // request cannot quietly change what is being sent.
+    let unpacked = super::uri::parse(text)?.map(|payment| payment.address);
+    let text = unpacked.as_deref().unwrap_or(text);
 
     let parsed: Address<NetworkUnchecked> = text
         .parse()
@@ -194,6 +212,80 @@ pub(super) fn unconfirmed_outpoints(wallet: &Wallet) -> Vec<bdk_wallet::bitcoin:
         .collect()
 }
 
+/// Roughly how big a payment will be, in virtual bytes.
+///
+/// For telling somebody whether their chosen coins cover a payment *including*
+/// its fee, before anything is built. A selection that covers only the amount
+/// fails at build time, because an exact-amount payment adds the fee on top —
+/// so saying "covers it, before the fee" was true and useless.
+///
+/// An estimate, and labelled as one wherever it is shown. It assumes
+/// single-signature spends and both outputs on this wallet's own script type,
+/// which is what makes it cheap enough to recompute on every tick of a
+/// checkbox. Sizes are the standard ones for each type.
+pub fn estimated_vbytes(script_type: ScriptType, inputs: usize, outputs: usize) -> u64 {
+    let (input, output) = match script_type {
+        // Signature and public key in the scriptSig, all of it counted.
+        ScriptType::Legacy => (148, 34),
+        // Witness discount on the signature, redeem script still on-chain.
+        ScriptType::NestedSegwit => (91, 32),
+        ScriptType::NativeSegwit => (68, 31),
+        // Key-path spend: one 64-byte signature, witness-discounted.
+        ScriptType::Taproot => (58, 43),
+    };
+    // Version, locktime and the two counts, plus the segwit marker and flag
+    // where there is a witness at all.
+    let overhead = if matches!(script_type, ScriptType::Legacy) { 10 } else { 11 };
+    overhead + input * inputs as u64 + output * outputs as u64
+}
+
+/// What that payment would cost at a given rate, rounded up: a fee estimate
+/// that rounds down is an estimate that says yes and then fails.
+pub fn estimated_fee(
+    script_type: ScriptType,
+    inputs: usize,
+    outputs: usize,
+    sats_per_vbyte: f64,
+) -> u64 {
+    (estimated_vbytes(script_type, inputs, outputs) as f64 * sats_per_vbyte).ceil() as u64
+}
+
+/// The same question for a transaction already built: who was paid, how much,
+/// and what came back.
+///
+/// A fee bump starts from a payment somebody made earlier rather than from a
+/// form, so the recipient has to be read back off it. The first output that is
+/// not ours is the payment; ours is change.
+pub(super) fn split_outputs_of(
+    tx: &bdk_wallet::bitcoin::Transaction,
+    wallet: &Wallet,
+) -> ((String, Amount), Option<Amount>) {
+    let network = wallet.network();
+    let mut paid = None;
+    let mut change = Amount::ZERO;
+
+    for out in &tx.output {
+        if wallet.is_mine(out.script_pubkey.clone()) {
+            change += out.value;
+            continue;
+        }
+        if paid.is_none() {
+            let address =
+                bdk_wallet::bitcoin::Address::from_script(&out.script_pubkey, network)
+                    .map(|address| address.to_string())
+                    .unwrap_or_else(|_| "an unusual script, not an address".into());
+            paid = Some((address, out.value));
+        }
+    }
+
+    (
+        // A payment with no outputs of its own is a self-send; naming it that
+        // way beats an empty string where an address belongs.
+        paid.unwrap_or_else(|| ("yourself".to_string(), Amount::ZERO)),
+        (change > Amount::ZERO).then_some(change),
+    )
+}
+
 /// Which output is the recipient's, and which is change.
 pub(super) fn split_outputs(psbt: &Psbt, to: &ScriptBuf) -> (Amount, Option<Amount>) {
     let mut spend = Amount::ZERO;
@@ -217,6 +309,24 @@ mod tests {
 
     const PHRASE: &str = "abandon abandon abandon abandon abandon abandon \
                           abandon abandon abandon abandon abandon about";
+
+    const MAINNET: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+
+    #[test]
+    fn a_payment_uri_is_accepted_where_an_address_is() {
+        let uri = format!("bitcoin:{}?amount=0.1&label=Alice", MAINNET);
+        let address = parse_address(&uri, Network::Bitcoin).unwrap();
+        assert_eq!(address.to_string(), MAINNET);
+    }
+
+    #[test]
+    fn a_uri_for_the_wrong_network_is_still_refused() {
+        // The network check is the one that must not be softened by unpacking
+        // a URI first.
+        let uri = format!("bitcoin:{MAINNET}");
+        let err = parse_address(&uri, Network::Signet).unwrap_err().to_string();
+        assert!(err.contains("different network"), "{err}");
+    }
 
     #[test]
     fn a_mainnet_address_is_refused_on_signet() {
@@ -311,6 +421,175 @@ mod tests {
 
     /// Change from a transaction still waiting for a block is not available
     /// to spend, however tempting the balance looks.
+    /// Choosing coins has to mean *only* those coins. BDK will happily treat
+    /// a manual selection as a starting point and add more to cover the
+    /// amount, which would silently undo the one decision this screen exists
+    /// to let somebody make — and link coins they had deliberately kept apart.
+    #[test]
+    fn a_fee_estimate_is_close_to_what_a_real_transaction_costs() {
+        // One input, two outputs, on each script type. The numbers are the
+        // standard sizes; what matters is that they are the right order and
+        // never optimistic, since an estimate that rounds down says "enough"
+        // and then fails to build.
+        assert_eq!(estimated_vbytes(ScriptType::Taproot, 1, 2), 11 + 58 + 86);
+        assert_eq!(estimated_vbytes(ScriptType::NativeSegwit, 1, 2), 11 + 68 + 62);
+        assert_eq!(estimated_vbytes(ScriptType::Legacy, 1, 2), 10 + 148 + 68);
+
+        // Taproot spends smaller than native segwit, which spends smaller than
+        // legacy. If that ever inverts, the constants are wrong.
+        let taproot = estimated_vbytes(ScriptType::Taproot, 3, 2);
+        let segwit = estimated_vbytes(ScriptType::NativeSegwit, 3, 2);
+        let legacy = estimated_vbytes(ScriptType::Legacy, 3, 2);
+        assert!(taproot < segwit && segwit < legacy, "{taproot} {segwit} {legacy}");
+
+        // Each extra coin costs another input, which is the whole reason
+        // choosing more coins costs more money.
+        let one = estimated_vbytes(ScriptType::Taproot, 1, 2);
+        let two = estimated_vbytes(ScriptType::Taproot, 2, 2);
+        assert_eq!(two - one, 58);
+
+        // Rounded up, never down.
+        assert_eq!(estimated_fee(ScriptType::Taproot, 1, 2, 1.0), 155);
+        assert_eq!(estimated_fee(ScriptType::Taproot, 1, 2, 1.5), 233, "232.5 rounds up");
+    }
+
+    /// A replacement spends the same coins as the payment it replaces — that
+    /// is what makes them mutually exclusive, and what makes it safe when the
+    /// original wins the race.
+    #[test]
+    fn a_replacement_spends_the_same_coins_and_pays_more() {
+        let network = Network::Signet;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let mut wallet = hd_signer(xprv, ScriptType::Taproot, network).unwrap();
+
+        let funded = wallet.reveal_next_address(KeychainKind::External).address;
+        let funding = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(
+                    "0000000000000000000000000000000000000000000000000000000000000001"
+                        .parse::<Txid>()
+                        .unwrap(),
+                    0,
+                ),
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(200_000),
+                script_pubkey: funded.script_pubkey(),
+            }],
+        };
+        wallet.apply_unconfirmed_txs([(funding, 0u64)]);
+
+        let to = parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+        let mut builder = wallet.build_tx();
+        builder.add_recipient(to.script_pubkey(), Amount::from_sat(50_000));
+        builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+        let mut psbt = builder.finish().unwrap();
+        assert!(wallet.sign(&mut psbt, Default::default()).unwrap());
+        let original = psbt.extract_tx().unwrap();
+        let original_txid = original.compute_txid();
+        let original_fee = wallet.calculate_fee(&original).unwrap();
+        let spent: Vec<OutPoint> =
+            original.input.iter().map(|input| input.previous_output).collect();
+        wallet.apply_unconfirmed_txs([(original, 0u64)]);
+
+        // Every payment Sieve makes signals BIP-125, because that is BDK's
+        // default sequence. If that ever changes, nothing can be bumped.
+        assert!(
+            wallet
+                .get_tx(original_txid)
+                .unwrap()
+                .tx_node
+                .tx
+                .input
+                .iter()
+                .any(|i| i.sequence.is_rbf()),
+            "payments must signal that they can be replaced"
+        );
+
+        let replacement = {
+            let mut builder = wallet.build_fee_bump(original_txid).unwrap();
+            builder.fee_rate(FeeRate::from_sat_per_vb(10).unwrap());
+            builder.finish().unwrap()
+        };
+
+        let replaced: Vec<OutPoint> = replacement
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        assert_eq!(replaced, spent, "a replacement must spend the same coins");
+        assert!(
+            replacement.fee().unwrap() > original_fee,
+            "a replacement must pay more than what it replaces"
+        );
+        assert_ne!(
+            replacement.unsigned_tx.compute_txid(),
+            original_txid,
+            "the replacement is a different transaction"
+        );
+    }
+
+    #[test]
+    fn chosen_coins_are_the_only_ones_spent() {
+        let network = Network::Signet;
+        let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+        let mut wallet = hd_signer(xprv, ScriptType::Taproot, network).unwrap();
+
+        // Three separate coins, on three separate addresses, as three
+        // separate payments would arrive.
+        let mut outpoints = Vec::new();
+        for (index, sats) in [50_000u64, 40_000, 30_000].into_iter().enumerate() {
+            let funded = wallet.reveal_next_address(KeychainKind::External).address;
+            let funding = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(
+                        format!("{:064x}", index + 1).parse::<Txid>().unwrap(),
+                        0,
+                    ),
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(sats),
+                    script_pubkey: funded.script_pubkey(),
+                }],
+            };
+            outpoints.push(OutPoint::new(funding.compute_txid(), 0));
+            wallet.apply_unconfirmed_txs([(funding, index as u64)]);
+        }
+
+        let to = parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+        let chosen = vec![outpoints[1]];
+
+        let mut builder = wallet.build_tx();
+        builder.add_utxos(&chosen).unwrap();
+        builder.manually_selected_only();
+        builder.add_recipient(to.script_pubkey(), Amount::from_sat(20_000));
+        builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+        let psbt = builder.finish().expect("40,000 covers 20,000 and the fee");
+
+        let spent: Vec<OutPoint> =
+            psbt.unsigned_tx.input.iter().map(|input| input.previous_output).collect();
+        assert_eq!(spent, chosen, "only the chosen coin may be spent");
+
+        // And a selection that cannot cover the payment fails rather than
+        // quietly reaching for another coin.
+        let mut builder = wallet.build_tx();
+        builder.add_utxos(&[outpoints[2]]).unwrap();
+        builder.manually_selected_only();
+        builder.add_recipient(to.script_pubkey(), Amount::from_sat(90_000));
+        builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+        assert!(
+            builder.finish().is_err(),
+            "a short selection must fail, not top itself up from elsewhere"
+        );
+    }
+
     #[test]
     fn unconfirmed_coins_are_not_spent() {
         let network = Network::Signet;

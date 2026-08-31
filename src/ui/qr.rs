@@ -126,3 +126,47 @@ mod tests {
         assert!(width >= 21, "version 1 is 21 modules across");
     }
 }
+
+/// Icon names Sieve asks the theme for.
+///
+/// Every one must exist, or GTK silently draws the "missing image" glyph —
+/// which is what `emblem-ok-symbolic` did in the coin picker, in the one place
+/// meant to say "this is fine". Sieve's own icons are compiled in as resources
+/// and are covered by the icon tests beside them.
+#[cfg(test)]
+mod icon_names {
+    /// Names taken from the theme rather than from our own resources.
+    const FROM_THEME: &[&str] = &[
+        "object-select-symbolic",
+        "dialog-warning-symbolic",
+        "go-next-symbolic",
+        "edit-copy-symbolic",
+        "document-edit-symbolic",
+        "document-open-symbolic",
+        "document-save-symbolic",
+        "document-open-recent-symbolic",
+        "open-menu-symbolic",
+        "view-refresh-symbolic",
+        "view-reveal-symbolic",
+        "web-browser-symbolic",
+        "network-wireless-symbolic",
+        "network-offline-symbolic",
+        "network-idle-symbolic",
+        "channel-secure-symbolic",
+    ];
+
+    /// Needs a display and an icon theme, so it is not part of the default
+    /// run — but it is the only way to catch a name that does not resolve
+    /// before somebody sees a broken glyph.
+    #[test]
+    #[ignore = "needs a display and an icon theme"]
+    fn every_icon_name_resolves() {
+        relm4::gtk::init().expect("a display");
+        let theme = relm4::gtk::IconTheme::for_display(
+            &relm4::gtk::gdk::Display::default().expect("a display"),
+        );
+        let missing: Vec<&str> =
+            FROM_THEME.iter().copied().filter(|name| !theme.has_icon(name)).collect();
+        assert!(missing.is_empty(), "the icon theme has no {missing:?}");
+    }
+}

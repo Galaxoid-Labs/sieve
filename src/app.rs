@@ -90,6 +90,20 @@ pub struct App {
     chooser: Controller<Chooser>,
     onboarding: Controller<Onboarding>,
     restore: Controller<Restore>,
+    /// Whether this session's block count has been written down yet. Once per
+    /// session: later updates are new tips arriving, not this scan.
+    blocks_recorded: bool,
+    /// The payment a replacement is replacing, held between building it and
+    /// broadcasting it so the label can follow.
+    bumping: Option<String>,
+    /// When somebody last touched this window. What the idle lock counts from.
+    ///
+    /// A plain `Instant` rather than a timer that gets cancelled and rebuilt on
+    /// every keystroke: input is continuous and timers are not free.
+    last_seen: std::time::Instant,
+    /// How many events have reached the window. Only for working out whether
+    /// an idle wallet is genuinely idle.
+    stirs: u64,
     unlock: Controller<Unlock>,
     wallet: Controller<WalletPage>,
     reveal: Controller<Reveal>,
@@ -106,6 +120,77 @@ pub struct App {
 /// in the theme ships silently. Add to this list when adding an icon.
 /// How often the peer list may be re-read while connections are churning.
 const PEER_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often to ask whether the wallet has been left alone. Coarse on purpose:
+/// see `watch_for_idle`.
+const IDLE_CHECK: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Lock when the computer goes to sleep.
+///
+/// A closed laptop is the most ordinary way a wallet is left unattended, and it
+/// beats every idle timeout to it: the screen is shut, the machine may travel,
+/// and the countdown would still be running when it opens.
+///
+/// Over the system bus that GIO already provides rather than a D-Bus crate —
+/// this is one signal subscription, and it costs nothing to have. A machine
+/// with no logind simply never signals, which is why every step here fails
+/// quietly: locking is a precaution, and a precaution that cannot be armed is
+/// not an error worth putting in front of anybody.
+fn watch_for_sleep(sender: &ComponentSender<App>) {
+    let Ok(bus) = gtk::gio::bus_get_sync(gtk::gio::BusType::System, gtk::gio::Cancellable::NONE)
+    else {
+        tracing::debug!("no system bus; the wallet will not lock on sleep");
+        return;
+    };
+
+    let sender = sender.clone();
+    bus.signal_subscribe(
+        Some("org.freedesktop.login1"),
+        Some("org.freedesktop.login1.Manager"),
+        Some("PrepareForSleep"),
+        Some("/org/freedesktop/login1"),
+        None,
+        gtk::gio::DBusSignalFlags::NONE,
+        move |_, _, _, _, _, parameters| {
+            // The signal fires twice: `true` on the way down, `false` on the
+            // way back. Locking on the way down is the point — afterwards the
+            // machine has already been asleep with the wallet open.
+            let going_to_sleep = parameters.child_value(0).get::<bool>().unwrap_or(false);
+            if going_to_sleep {
+                sender.input(AppMsg::Lock(LockReason::Suspend));
+            }
+        },
+    );
+    tracing::debug!("will lock when this computer goes to sleep");
+}
+
+/// Whether an untouched wallet has been untouched for long enough.
+///
+/// Its own function so the rule can be tested: the branch that matters only
+/// runs on a wallet somebody has unlocked, which is exactly the state a test
+/// cannot reach through the interface.
+fn should_lock(
+    setting: crate::settings::IdleLock,
+    unlocked: bool,
+    untouched: std::time::Duration,
+) -> bool {
+    // A locked wallet is already locked, and a watch-only one that was never
+    // unlocked has nothing to shut.
+    if !unlocked {
+        return false;
+    }
+    setting.duration().is_some_and(|after| untouched >= after)
+}
+
+/// Why a wallet was shut. Only the wording differs, but a lock that does not
+/// say why reads as a fault.
+#[derive(Debug, Clone, Copy)]
+pub enum LockReason {
+    Idle,
+    Suspend,
+    /// Somebody asked for it.
+    Asked,
+}
 /// How far behind the estimated scan position to record a resume point.
 ///
 /// Two thousand blocks — a difficulty period. The position is derived from a
@@ -176,6 +261,23 @@ pub enum AppMsg {
     ShowRecoveryPhrase,
     /// Ask whether to delete the open wallet from this computer.
     AskRemoveWallet,
+    /// Name a transaction or an address, or clear its name.
+    SetLabel { kind: wallet::labels::Kind, reference: String, text: String },
+    /// Rebuild an unconfirmed payment at a higher fee, without signing it.
+    PlanBump { txid: String, from: wallet::accounts::ScriptType, fee_rate: f64 },
+    /// Write every label out as a BIP-329 file, or read one in.
+    ExportLabels,
+    ImportLabels,
+    LabelFile { path: std::path::PathBuf, importing: bool },
+    /// Somebody touched the window. Not a state change — it only moves the
+    /// clock the idle lock counts from.
+    Stirred,
+    SetIdleLock(crate::settings::IdleLock),
+    /// Shut the wallet: the password is needed again to see it.
+    Lock(LockReason),
+    /// Confirm, then throw away this wallet's chain data and scan again.
+    AskRescan,
+    Rescan,
     /// Asked and answered.
     RemoveWallet(Paths),
     /// Re-present the password dialog for the wallet already on screen.
@@ -219,6 +321,12 @@ pub enum AppCmd {
     Sent(Result<(String, Summary), String>),
     Tick,
     Priced(Result<crate::price::Price, String>),
+    /// The chain data has been cleared, or could not be.
+    Rescanned(Result<(), String>),
+    /// A replacement was built, or could not be.
+    PlannedBump(Result<Box<crate::wallet::send::Plan>, String>),
+    /// Time to ask whether the wallet has been left alone long enough.
+    Idle,
     /// A watch-only wallet, opened without a password.
     Opened(Result<(Paths, Summary), String>),
     /// Who is connected, without waiting for the chain.
@@ -309,12 +417,18 @@ impl Component for App {
                 crate::ui::wallet_page::WalletPageOutput::ShowPreferences => {
                     AppMsg::ShowPreferences
                 }
-                crate::ui::wallet_page::WalletPageOutput::RefreshChain => AppMsg::RefreshChain,
                 crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
                 crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                     AppMsg::RevealAddress(script_type)
                 }
                 crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
+                crate::ui::wallet_page::WalletPageOutput::AskRescan => AppMsg::AskRescan,
+                crate::ui::wallet_page::WalletPageOutput::PlanBump { txid, from, fee_rate } => {
+                    AppMsg::PlanBump { txid, from, fee_rate }
+                }
+                crate::ui::wallet_page::WalletPageOutput::SetLabel { kind, reference, text } => {
+                    AppMsg::SetLabel { kind, reference, text }
+                }
                 crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
                 crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
                     AppMsg::PlanSend(draft)
@@ -412,6 +526,10 @@ impl Component for App {
         });
 
         let model = App {
+            blocks_recorded: false,
+            bumping: None,
+            last_seen: std::time::Instant::now(),
+            stirs: 0,
             nav: nav.clone(),
             prefs: {
                 let dialog = adw::PreferencesDialog::new();
@@ -453,6 +571,28 @@ impl Component for App {
             unlocked: false,
         };
         let widgets = view_output!();
+
+        // Everything that reaches this window, in the capture phase, before
+        // any widget gets a say. A key, a click, a scroll, a moved pointer:
+        // all of it is somebody being here, and it only ever moves a clock.
+        //
+        // One controller on the window rather than handlers on the widgets:
+        // every future screen is covered by construction, which is the sort of
+        // thing that is otherwise forgotten exactly once and quietly stops
+        // working.
+        {
+            let watching = gtk::EventControllerLegacy::new();
+            watching.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let sender = sender.clone();
+            watching.connect_event(move |_, _| {
+                sender.input(AppMsg::Stirred);
+                // Seen, never swallowed.
+                gtk::glib::Propagation::Proceed
+            });
+            root.add_controller(watching);
+        }
+        model.watch_for_idle(&sender);
+        watch_for_sleep(&sender);
 
         // The one opened last, if it is still there. Falling back to the
         // first by name is a sort order, not a choice anybody made.
@@ -704,6 +844,208 @@ impl Component for App {
                 self.prefs.push_subpage(&self.chooser_page);
             }
 
+            AppMsg::SetLabel { kind, reference, text } => {
+                let Some(paths) = self.active.clone() else { return };
+                let mut labels = wallet::labels::Labels::load(&paths.dir);
+                labels.set(kind, &reference, &text);
+                if let Err(e) = labels.save(&paths.dir) {
+                    tracing::error!(%e, "could not save a label");
+                    self.wallet.emit(WalletPageMsg::Toast(crate::ui::send::capitalise(
+                        &e.to_string(),
+                    )));
+                    return;
+                }
+                self.wallet.emit(WalletPageMsg::SetLabels(Box::new(labels)));
+            }
+
+            AppMsg::ExportLabels | AppMsg::ImportLabels => {
+                let importing = matches!(msg, AppMsg::ImportLabels);
+                let Some(window) = self.nav.root().and_downcast::<gtk::Window>() else { return };
+
+                let filter = gtk::FileFilter::new();
+                filter.set_name(Some("BIP-329 labels"));
+                filter.add_pattern("*.jsonl");
+                let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+
+                let dialog = gtk::FileDialog::builder()
+                    .title(if importing { "Import labels" } else { "Export labels" })
+                    .filters(&filters)
+                    .modal(true)
+                    .build();
+
+                let sender = sender.clone();
+                let chosen = move |file: Result<gtk::gio::File, _>| {
+                    if let Ok(file) = file
+                        && let Some(path) = file.path()
+                    {
+                        sender.input(AppMsg::LabelFile { path, importing });
+                    }
+                };
+                if importing {
+                    dialog.open(Some(&window), gtk::gio::Cancellable::NONE, move |file| {
+                        chosen(file)
+                    });
+                } else {
+                    dialog.set_initial_name(Some("labels.jsonl"));
+                    dialog.save(Some(&window), gtk::gio::Cancellable::NONE, move |file| {
+                        chosen(file)
+                    });
+                }
+            }
+
+            AppMsg::LabelFile { path, importing } => {
+                let Some(paths) = self.active.clone() else { return };
+                let result = if importing {
+                    self.import_labels(&paths, &path)
+                } else {
+                    self.export_labels(&paths, &path)
+                };
+                let message = match result {
+                    Ok(message) => message,
+                    Err(e) => {
+                        tracing::error!(%e, importing, "labels");
+                        crate::ui::send::capitalise(&e.to_string())
+                    }
+                };
+                self.prefs.add_toast(adw::Toast::new(&message));
+            }
+
+            AppMsg::Stirred => {
+                self.stirs += 1;
+                self.last_seen = std::time::Instant::now();
+            }
+
+            AppMsg::SetIdleLock(choice) => {
+                let was_off = self.settings.idle_lock.duration().is_none();
+                self.settings.idle_lock = choice;
+                self.settings.save();
+                // Turning it back on has to restart the poller, which stopped
+                // itself when it was turned off.
+                self.last_seen = std::time::Instant::now();
+                if was_off {
+                    self.watch_for_idle(&sender);
+                }
+            }
+
+            AppMsg::Lock(reason) => {
+                // Nothing to shut, or nothing to shut it against.
+                if !self.unlocked || self.active.is_none() {
+                    return;
+                }
+                tracing::info!(?reason, "locking the wallet");
+
+                // Only the view is shut. The node keeps running: syncing is
+                // watch-only work that needs no key, and stopping it would
+                // mean re-downloading filters to see a balance that was on
+                // screen a minute ago.
+                self.unlocked = false;
+                self.wallet.emit(WalletPageMsg::SetLocked(true));
+                self.close_prefs();
+                self.reveal.emit(RevealMsg::Clear);
+
+                // Said out loud, because a wallet that shut itself while you
+                // were reading it otherwise looks like a bug.
+                self.wallet.emit(WalletPageMsg::Toast(
+                    match reason {
+                        LockReason::Idle => "Locked after a while untouched",
+                        LockReason::Suspend => "Locked because this computer went to sleep",
+                        LockReason::Asked => "Locked",
+                    }
+                    .into(),
+                ));
+            }
+
+            AppMsg::PlanBump { txid, from, fee_rate } => {
+                // Remembered now so the label can follow the payment if this
+                // one is the one that gets broadcast.
+                self.bumping = Some(txid.clone());
+                let Some(session) = self.session.clone() else {
+                    self.wallet.emit(WalletPageMsg::BumpPlanned(Box::new(Err(
+                        "Not connected to the network yet — wait for peers".into(),
+                    ))));
+                    return;
+                };
+                // Rounded up: a replacement that pays fractionally less than
+                // it promised is a replacement the network will not relay.
+                let Some(rate) =
+                    bdk_wallet::bitcoin::FeeRate::from_sat_per_vb(fee_rate.ceil() as u64)
+                else {
+                    self.wallet.emit(WalletPageMsg::BumpPlanned(Box::new(Err(
+                        "That fee rate cannot be used".into(),
+                    ))));
+                    return;
+                };
+                sender.oneshot_command(async move {
+                    AppCmd::PlannedBump(
+                        session
+                            .plan_bump(&txid, from, rate)
+                            .await
+                            .map(Box::new)
+                            .map_err(|e| crate::ui::send::capitalise(&e.to_string())),
+                    )
+                });
+            }
+
+            AppMsg::AskRescan => {
+                let Some(paths) = self.active.clone() else { return };
+                let birthday = wallet::Meta::load(&paths).map(|m| m.birthday_height);
+
+                // Said in terms of what it costs, because that is the whole
+                // question: the wallet is not at risk, the afternoon might be.
+                let mut body = String::from(
+                    "Sieve will forget every block it has checked for this wallet and check \
+                     them again, one compact filter at a time, from the wallet's \
+                     birthday.\n\nNothing here puts your coins at risk — the keys are \
+                     untouched and the history is rebuilt from the chain itself. But a \
+                     wallet that goes back years can take hours to catch up, and a payment \
+                     you have broadcast but that no block holds yet will be forgotten until \
+                     it confirms.",
+                );
+                if let Some(height) = birthday {
+                    body.push_str(&format!("\n\nScanning again from block {}.", crate::ui::wallet_page::thousands(height)));
+                }
+
+                let dialog =
+                    adw::AlertDialog::new(Some("Scan the chain again?"), Some(&body));
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("rescan", "Rescan");
+                // Destructive of work, not of money — but the hours are real,
+                // so it is not the answer a stray Return key gives.
+                dialog.set_response_appearance("rescan", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                {
+                    let sender = sender.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response == "rescan" {
+                            sender.input(AppMsg::Rescan);
+                        }
+                    });
+                }
+
+                if let Some(window) = self.nav.root() {
+                    dialog.present(Some(&window));
+                }
+            }
+
+            AppMsg::Rescan => {
+                let Some(paths) = self.active.clone() else { return };
+
+                // The node holds these database files open, so it goes first.
+                if let Some(session) = self.session.take() {
+                    session.shutdown();
+                }
+                self.generation += 1;
+                self.wallet.emit(WalletPageMsg::Reset);
+                self.restate_wallet(&sender);
+
+                sender.spawn_oneshot_command(move || {
+                    AppCmd::Rescanned(wallet::rescan(&paths).map_err(|e| e.to_string()))
+                });
+            }
+
             AppMsg::AskRemoveWallet => {
                 let Some(paths) = self.active.clone() else { return };
                 let id = paths
@@ -932,7 +1274,12 @@ impl Component for App {
                     // So the sync status can say how big the job is, rather
                     // than only how far through it is.
                     self.wallet.emit(WalletPageMsg::SetBirthday(meta.birthday_height));
+                    self.wallet.emit(WalletPageMsg::SetNetwork(meta.network.clone()));
+                    self.wallet.emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
                 }
+                self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
+                    wallet::labels::Labels::load(&paths.dir),
+                )));
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetLocked(false));
                 self.chooser.emit(ChooserMsg::Refresh);
@@ -1053,6 +1400,34 @@ impl Component for App {
                 self.chain_tip = Some(info.tip_height);
                 self.wallet.emit(WalletPageMsg::SetChain(Some(info)));
             }
+            AppCmd::Rescanned(Ok(())) => {
+                tracing::info!("chain data cleared; scanning again from the birthday");
+                self.start_session(&sender);
+            }
+            AppCmd::Rescanned(Err(message)) => {
+                tracing::error!(%message, "could not clear the chain data");
+                self.wallet.emit(WalletPageMsg::Toast(crate::ui::send::capitalise(&message)));
+                // Whatever survived, the wallet is still watchable.
+                self.start_session(&sender);
+            }
+            AppCmd::Idle => {
+                // Trace, not debug: this fires every fifteen seconds for the
+                // life of the process, and it has already answered the
+                // question it was added for.
+                tracing::trace!(
+                    idle_s = self.last_seen.elapsed().as_secs(),
+                    stirs = self.stirs,
+                    unlocked = self.unlocked,
+                    setting = ?self.settings.idle_lock,
+                    "idle check"
+                );
+                if should_lock(self.settings.idle_lock, self.unlocked, self.last_seen.elapsed())
+                {
+                    sender.input(AppMsg::Lock(LockReason::Idle));
+                }
+                self.watch_for_idle(&sender);
+            }
+
             AppCmd::Tick => {
                 self.check_tor(&sender);
                 // The peers separately from the chain. kyoto stops warning
@@ -1069,6 +1444,20 @@ impl Component for App {
             }
             AppCmd::Update { generation, result: Ok(summary) } if self.current(generation) => {
                 tracing::debug!(balance = summary.balance_sats, "wallet updated");
+                // What this scan cost in blocks, so the next one can draw a
+                // bar for the phase the node reports no total for. Once per
+                // session: later updates are new tips, not this scan.
+                if !self.blocks_recorded
+                    && let (Some(session), Some(paths)) = (&self.session, &self.active)
+                {
+                    let read = session.blocks_read() as u32;
+                    if read > 0 {
+                        wallet::Meta::record_matched_blocks(paths, read);
+                        self.wallet.emit(WalletPageMsg::SetMatchedBlocks(Some(read)));
+                        tracing::debug!(blocks = read, "recorded what this scan had to read");
+                    }
+                    self.blocks_recorded = true;
+                }
                 self.balance_sats = Some(summary.balance_sats);
                 self.wallet.emit(WalletPageMsg::Show(summary));
                 self.wallet.emit(WalletPageMsg::SetProgress(Progress::Synced));
@@ -1194,12 +1583,51 @@ impl Component for App {
             AppCmd::Planned(result) => {
                 self.wallet.emit(WalletPageMsg::Planned(Box::new(result)));
             }
+            AppCmd::PlannedBump(result) => {
+                self.wallet
+                    .emit(WalletPageMsg::BumpPlanned(Box::new(result.map(|plan| *plan))));
+            }
+
             AppCmd::Sent(Ok((txid, summary))) => {
+                // A replacement is the same payment to the same person for the
+                // same reason, so it carries the same name. Written to the new
+                // id *as well as* the old rather than moved: either of them can
+                // still be the one that confirms, and moving it would leave
+                // whichever wins unlabelled.
+                let replaced = self.bumping.take();
+                if let Some(replaced) = &replaced
+                    && let Some(paths) = self.active.clone()
+                {
+                    let mut labels = wallet::labels::Labels::load(&paths.dir);
+                    if let Some(name) =
+                        labels.get(wallet::labels::Kind::Tx, replaced).map(str::to_owned)
+                    {
+                        labels.set(wallet::labels::Kind::Tx, &txid, &name);
+                        if let Err(e) = labels.save(&paths.dir) {
+                            tracing::warn!(%e, "could not carry the label to the replacement");
+                        } else {
+                            self.wallet
+                                .emit(WalletPageMsg::SetLabels(Box::new(labels)));
+                        }
+                    }
+                }
+
                 // The wallet has already recorded it as pending, so the
                 // activity list shows the payment straight away rather than
                 // waiting for a block.
                 self.wallet.emit(WalletPageMsg::Show(summary));
-                self.wallet.emit(WalletPageMsg::Sent(Box::new(Ok(txid))));
+
+                match replaced {
+                    // A replacement leaves the page it was started from
+                    // showing a payment that no longer exists. Saying so and
+                    // going to the one that does is the difference between
+                    // "it worked" and a toast over a stale screen.
+                    Some(replaced) => self.wallet.emit(WalletPageMsg::Replaced {
+                        replaced,
+                        with: txid,
+                    }),
+                    None => self.wallet.emit(WalletPageMsg::Sent(Box::new(Ok(txid)))),
+                }
             }
             AppCmd::Sent(Err(message)) => {
                 self.wallet.emit(WalletPageMsg::Sent(Box::new(Err(message))));
@@ -1211,6 +1639,7 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::ShowFreshAddress(address));
             }
             AppCmd::Priced(Ok(price)) => {
+                tracing::debug!(usd = price.usd, "price fetched");
                 self.wallet.emit(WalletPageMsg::SetPrice(Some(price)));
             }
             AppCmd::Priced(Err(message)) => {
@@ -1294,6 +1723,23 @@ impl App {
     /// caught up: next_update parks until a new block, and the node only warns
     /// about connections while it is below its target. Without a tick the
     /// Network tab freezes at whatever was true when the sync finished.
+    /// Ask again shortly whether the wallet has been left alone.
+    ///
+    /// Polling rather than a timer armed on each keystroke: input is
+    /// continuous, and rebuilding a timer per event costs more than a check
+    /// every fifteen seconds that almost always says no. The cost of the
+    /// coarseness is that the lock can be up to that late, which nobody can
+    /// perceive against a five-minute setting.
+    fn watch_for_idle(&self, sender: &ComponentSender<Self>) {
+        if self.settings.idle_lock.duration().is_none() {
+            return;
+        }
+        sender.oneshot_command(async move {
+            tokio::time::sleep(IDLE_CHECK).await;
+            AppCmd::Idle
+        });
+    }
+
     fn schedule_tick(&self, sender: &ComponentSender<Self>) {
         if self.session.is_none() {
             return;
@@ -1616,6 +2062,7 @@ impl App {
         // A new session, so anything still in flight for the last one is
         // from a wallet that is no longer on screen.
         self.generation += 1;
+        self.blocks_recorded = false;
         let generation = self.generation;
         let tor = self.tor_proxy();
         sender.oneshot_command(async move {
@@ -1638,8 +2085,64 @@ impl App {
             tracing::info!("restarting the light client with new connection settings");
             session.shutdown();
             self.wallet.emit(WalletPageMsg::Reset);
+            self.restate_wallet(sender);
         }
         self.start_session(sender);
+    }
+
+    /// Write every label to a file in BIP-329's format.
+    fn export_labels(&self, paths: &Paths, to: &std::path::Path) -> anyhow::Result<String> {
+        let labels = wallet::labels::Labels::load(&paths.dir);
+        let count = labels.len();
+        std::fs::write(to, labels.to_jsonl()?)
+            .map_err(|e| anyhow::anyhow!("could not write {}: {e}", to.display()))?;
+        Ok(match count {
+            1 => "Exported 1 label".to_string(),
+            n => format!("Exported {n} labels"),
+        })
+    }
+
+    /// Merge a BIP-329 file into this wallet's labels.
+    fn import_labels(&self, paths: &Paths, from: &std::path::Path) -> anyhow::Result<String> {
+        let text = std::fs::read_to_string(from)
+            .map_err(|e| anyhow::anyhow!("could not read {}: {e}", from.display()))?;
+        let mut labels = wallet::labels::Labels::load(&paths.dir);
+        let read = labels.import(&text)?;
+        labels.save(&paths.dir)?;
+        self.wallet.emit(WalletPageMsg::SetLabels(Box::new(labels)));
+        Ok(match read {
+            0 => "That file held no labels".to_string(),
+            1 => "Imported 1 label".to_string(),
+            n => format!("Imported {n} labels"),
+        })
+    }
+
+    /// Put back what `Reset` cleared but a scan will not replace.
+    ///
+    /// The birthday and the network come from metadata and are known long
+    /// before any summary exists. Without them the sync view cannot say how
+    /// big the job is or how far along it is, and falls back to a spinner for
+    /// the whole of it.
+    fn restate_wallet(&self, sender: &ComponentSender<Self>) {
+        let Some(paths) = &self.active else { return };
+        let Some(meta) = wallet::Meta::load(paths) else { return };
+        self.wallet.emit(WalletPageMsg::SetBirthday(meta.birthday_height));
+        self.wallet.emit(WalletPageMsg::SetNetwork(meta.network.clone()));
+        self.wallet.emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
+        self.wallet.emit(WalletPageMsg::SetWatchOnly(meta.watch_only));
+        self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
+            wallet::labels::Labels::load(&paths.dir),
+        )));
+        // The price goes with the page, and the page was just cleared. Nothing
+        // else asks for it again, so a restarted session lost the dollar
+        // figure until the setting was toggled off and on.
+        self.fetch_price(sender);
+        let id = paths
+            .dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.wallet.emit(WalletPageMsg::SetName(meta.display_name(&id)));
     }
 
     /// Close a dialog only if it is on screen. Closing one that was never
@@ -1759,6 +2262,56 @@ impl App {
 
         page.add(&display);
 
+        // Its own group rather than an entry under Display: this is not about
+        // how the wallet looks.
+        let privacy = adw::PreferencesGroup::new();
+        privacy.set_title("Locking");
+
+        let idle = adw::ComboRow::new();
+        idle.set_title("Lock when untouched");
+        // On the row rather than on the group: a paragraph in a group
+        // description sits above every row in it and pushes the controls off
+        // the screen. What is worth saying fits in a sentence.
+        idle.set_subtitle(
+            "Shuts the balance and history. Your recovery phrase is sealed either way — it is \
+             only ever decrypted at the moment of signing.",
+        );
+        idle.set_subtitle_lines(3);
+        idle.set_model(Some(&gtk::StringList::new(
+            &crate::settings::IdleLock::ALL.map(|i| i.label()),
+        )));
+        idle.set_selected(
+            crate::settings::IdleLock::ALL
+                .iter()
+                .position(|i| *i == self.settings.idle_lock)
+                .unwrap_or(0) as u32,
+        );
+        // Connected after the initial selection, so setting it does not fire.
+        {
+            let sender = sender.clone();
+            idle.connect_selected_notify(move |row| {
+                if let Some(choice) = crate::settings::IdleLock::ALL.get(row.selected() as usize)
+                {
+                    sender.input(AppMsg::SetIdleLock(*choice));
+                }
+            });
+        }
+        privacy.add(&idle);
+
+        // The same thing, now, without waiting.
+        let now = adw::ActionRow::new();
+        now.set_title("Lock now");
+        now.set_subtitle("Shut the wallet and ask for the password again");
+        now.set_activatable(true);
+        now.set_sensitive(self.unlocked);
+        now.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        {
+            let sender = sender.clone();
+            now.connect_activated(move |_| sender.input(AppMsg::Lock(LockReason::Asked)));
+        }
+        privacy.add(&now);
+        page.add(&privacy);
+
         // Connections first among the privacy settings: it changes what every
         // other one discloses.
         let connection = adw::PreferencesGroup::new();
@@ -1854,6 +2407,52 @@ impl App {
         sending.add(&mempool);
         page.add(&sending);
 
+        // Labels are written in BIP-329's format precisely so they can leave.
+        // A wallet that holds your notes hostage is a wallet you cannot
+        // replace, which is the opposite of what a recovery phrase is for.
+        if let Some(paths) = self.active.clone() {
+            let labels = adw::PreferencesGroup::new();
+            labels.set_title("Labels");
+            let count = wallet::labels::Labels::load(&paths.dir).len();
+            labels.set_description(Some(&match count {
+                0 => "Names you give transactions and addresses are stored beside this wallet, unencrypted, readable only by you."
+                    .to_string(),
+                1 => "1 label, stored beside this wallet, unencrypted and readable only by you."
+                    .to_string(),
+                n => format!(
+                    "{n} labels, stored beside this wallet, unencrypted and readable only by you."
+                ),
+            }));
+
+            let export = adw::ActionRow::new();
+            export.set_title("Export labels…");
+            export.set_subtitle("A BIP-329 file any wallet that reads the standard can import");
+            export.set_subtitle_lines(2);
+            export.set_activatable(true);
+            export.set_sensitive(count > 0);
+            export.add_suffix(&gtk::Image::from_icon_name("document-save-symbolic"));
+            {
+                let sender = sender.clone();
+                export.connect_activated(move |_| sender.input(AppMsg::ExportLabels));
+            }
+            labels.add(&export);
+
+            let import = adw::ActionRow::new();
+            import.set_title("Import labels…");
+            import.set_subtitle(
+                "Merges a BIP-329 file into this wallet. Where both name the same thing, the imported name wins.",
+            );
+            import.set_subtitle_lines(3);
+            import.set_activatable(true);
+            import.add_suffix(&gtk::Image::from_icon_name("document-open-symbolic"));
+            {
+                let sender = sender.clone();
+                import.connect_activated(move |_| sender.input(AppMsg::ImportLabels));
+            }
+            labels.add(&import);
+            page.add(&labels);
+        }
+
         let this = adw::PreferencesGroup::new();
         this.set_title("This wallet");
 
@@ -1921,7 +2520,7 @@ impl App {
                 .is_some_and(|m| m.watch_only);
             phrase.set_subtitle(match (watch_only, self.unlocked) {
                 // Nothing was ever sealed here, so there is nothing to open.
-                (true, _) => "This wallet holds no keys — its recovery phrase lives                               wherever the keys do",
+                (true, _) => "This wallet holds no keys — its recovery phrase lives wherever the keys do",
                 (false, true) => "Show the words again to write them down",
                 (false, false) => "Unlock this wallet to show the words",
             });
@@ -2033,5 +2632,31 @@ impl App {
         sender.oneshot_command(async move {
             AppCmd::Warning { generation, notice: session.next_warning().await }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::IdleLock;
+    use std::time::Duration;
+
+    #[test]
+    fn an_untouched_wallet_locks_once_its_interval_passes() {
+        let five = Duration::from_secs(5 * 60);
+
+        // The ordinary case, and the one that cannot be reached from a test
+        // through the interface: a wallet somebody unlocked and walked away
+        // from.
+        assert!(!should_lock(IdleLock::After5Minutes, true, five - Duration::from_secs(1)));
+        assert!(should_lock(IdleLock::After5Minutes, true, five));
+        assert!(should_lock(IdleLock::After5Minutes, true, Duration::from_secs(3600)));
+
+        // Never means never, however long it has been.
+        assert!(!should_lock(IdleLock::Never, true, Duration::from_secs(86_400)));
+
+        // And a wallet that is already shut is not shut again — that would
+        // toast "Locked" at somebody staring at a password prompt.
+        assert!(!should_lock(IdleLock::After5Minutes, false, Duration::from_secs(86_400)));
     }
 }

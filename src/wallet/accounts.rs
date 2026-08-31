@@ -349,6 +349,53 @@ impl fmt::Debug for Account {
 mod tests {
     use super::*;
 
+    /// The published BIP-44/49/84/86 test vectors for the standard test
+    /// mnemonic. If Sieve ever derives a different address from the same
+    /// words, it is handing out addresses the seed's owner cannot recover
+    /// from — which is why this is checked against numbers written down
+    /// outside this codebase rather than against ourselves.
+    #[test]
+    fn the_first_address_of_each_path_matches_the_published_vectors() {
+        use bdk_wallet::bitcoin::bip32::Xpriv;
+        use bdk_wallet::keys::{DerivableKey, ExtendedKey, bip39::{Language, Mnemonic}};
+        use bdk_wallet::miniscript::Tap;
+
+        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon \
+                              abandon abandon abandon abandon abandon about";
+
+        let expected = [
+            (ScriptType::Legacy, "1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA"),
+            (ScriptType::NestedSegwit, "37VucYSaXLCAsxYyAPfbSi9eh4iEcbShgf"),
+            (ScriptType::NativeSegwit, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"),
+            (
+                ScriptType::Taproot,
+                "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+            ),
+        ];
+
+        let mnemonic = Mnemonic::parse_in(Language::English, PHRASE).unwrap();
+        let xkey: ExtendedKey<Tap> = (mnemonic, None).into_extended_key().unwrap();
+        let xprv: Xpriv = xkey.into_xprv(Network::Bitcoin.into()).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("sieve-vectors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for (script_type, address) in expected {
+            let db = dir.join(script_type.db_file());
+            let mut account =
+                Account::create(xprv, script_type, &db, Network::Bitcoin, 25).unwrap();
+            let first = account
+                .wallet
+                .peek_address(KeychainKind::External, 0)
+                .address
+                .to_string();
+            assert_eq!(first, address, "{script_type} derived the wrong first address");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn every_path_has_its_own_database() {
         let files: Vec<String> = ScriptType::ALL.iter().map(|s| s.db_file()).collect();

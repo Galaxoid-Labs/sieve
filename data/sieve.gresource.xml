@@ -11,5 +11,10 @@
   </gresource>
   <gresource prefix="/com/galaxoidlabs/Sieve/icons/scalable/apps">
     <file preprocess="xml-stripblanks" alias="bitcoin-logo.svg">icons/hicolor/scalable/apps/bitcoin-logo.svg</file>
+    <!-- The same drawing again under the application id, because that is the
+         name the .desktop file and every GNOME surface look for. Until Sieve
+         has an icon of its own this is what it wears; a placeholder that is
+         findable beats a correct name that resolves to nothing. -->
+    <file preprocess="xml-stripblanks" alias="com.galaxoidlabs.Sieve.svg">icons/hicolor/scalable/apps/bitcoin-logo.svg</file>
   </gresource>
 </gresources>
