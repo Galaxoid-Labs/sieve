@@ -305,20 +305,22 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
 - PSBT export/import and device signing moved to M4a.
 
 ### M8 — Package and release — MAINNET GATE
-See `PACKAGING.md`, which was written after checking the target machine and changes the
-order: Omarchy — the distribution this is built on — ships an AUR helper and **no Flatpak**,
-so an AUR package comes first and Flathub second.
+Native packages, three of them, and no Flatpak. See `PACKAGING.md` for why, what it costs,
+and the order of work.
 
-- [ ] A PKGBUILD, built locally with `makepkg -si`. No bundled Tor needed: `tor::daemon::find`
-      already looks on `PATH`, so `optdepends=('tor')` is the whole story on Arch.
-- [ ] Install the icon and desktop entry properly — the gresource is for the app's own use and
+- [ ] udev rules for the hardware signers, shipped by the package — the thing a sandbox
+      cannot do, and what `hardware::udev_hint()` already promises.
+- [ ] A PKGBUILD for Arch and Omarchy, built here with `makepkg -si`.
+- [ ] Install the icon and desktop entry properly: the gresource is for the app's own use and
       does nothing for the desktop's icon theme.
-- [ ] Build the Flatpak manifest for the first time. It has never run.
-- [ ] AppStream metainfo, and an icon that is Sieve's own rather than the Bitcoin symbol.
-- [ ] Decide what the Flatpak says about hardware wallets: USB HID needs `--device=all` and
-      host udev rules, which is a real limit rather than a detail.
-- [ ] `org.freedesktop.portal.Secret`, reproducible builds, signed tags, and external review of
-      the vault format and the signing path.
+- [ ] `cargo-deb` and `cargo-generate-rpm` metadata, built in containers of the oldest target
+      of each family.
+- [ ] Verify the libadwaita 1.5 floor against real containers. Ubuntu 22.04 and Debian 12 are
+      expected to fail it, and there is no fix short of lowering the baseline.
+- [ ] A signed tag, GitHub Releases and a `SHA256SUMS`.
+- [ ] Delete the Flatpak manifest and `scripts/fetch-tor.sh` once the AUR package is proven.
+- [ ] `org.freedesktop.portal.Secret`, reproducible builds, and external review of the vault
+      format and the signing path.
 
 **Mainnet is *not* currently gated, and this line has been wrong for a while.**
 `ui/restore.rs` lets mainnet through behind an acknowledgement, and the wallet has been run

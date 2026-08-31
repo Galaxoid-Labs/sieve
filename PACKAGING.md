@@ -1,153 +1,176 @@
 # Getting Sieve onto other people's machines
 
-Written after checking the target rather than assuming it. The headline: the
-plan in `ROADMAP.md` M8 was Flatpak-first, and for the machine this is being
-built on that is the wrong first step.
+Native packages, three of them: **AUR** for Arch and Omarchy, **`.deb`** for
+Debian and Ubuntu, **`.rpm`** for Fedora. No Flatpak.
 
-## What is actually on an Omarchy machine
+Written after checking the target rather than assuming it.
+
+## Why native, and what it costs
+
+The machine this is built on says most of it:
 
 ```
 flatpak      — not installed, no remotes configured
-yay          /usr/bin/yay
-pacman       /usr/bin/pacman
-makepkg      /usr/bin/makepkg
-gtk4         4.22.4          libadwaita  1.9.3
-sqlite       3.53.4          openssl     3.6.3
-tor          0.4.9.11 in extra, not installed
+yay          /usr/bin/yay          pacman   /usr/bin/pacman
+gtk4         4.22.4                libadwaita  1.9.3
+sqlite       3.53.4                openssl     3.6.3
+tor          0.4.9.11 in extra
 ```
 
-Omarchy is Arch (`ID_LIKE=arch`) and ships an AUR helper but **no Flatpak at
-all**. So a Flatpak-only release means every Omarchy user runs
-`pacman -S flatpak`, adds Flathub, restarts their session for the exports to
-appear, and downloads a GNOME runtime of a few hundred megabytes — to run a
-native GTK4 application on a machine that already has GTK4 4.22 and
-libadwaita 1.9 installed.
+Omarchy is Arch and ships an AUR helper with **no Flatpak at all**. Shipping
+only a Flatpak would ask every user here to install Flatpak, add Flathub,
+restart their session and download a few hundred megabytes of GNOME runtime —
+in order to run a native GTK4 application on a machine that already has GTK4
+4.22 and libadwaita 1.9.
 
-That is the wrong trade for the distro this is being written on. It is the
-right trade for Fedora Silverblue.
+Three things native packaging wins outright:
 
-**So: two channels, and the native one comes first.**
+- **Nothing to install first.** One command, using the GTK the machine
+  already has.
+- **Hardware wallets actually work.** USB HID in a sandbox needs
+  `--device=all`, the escape hatch that hands the app every device on the
+  machine — and it *still* needs udev rules the sandbox cannot install. A
+  native package installs those rules itself. `hardware::udev_hint()` already
+  promises this: *"the packaged build of Sieve will ship them."*
+- **No bundled Tor anywhere.** `tor::daemon::find` looks on `PATH` as well as
+  beside the executable, and `tor` is a package on all three families. The
+  Expert Bundle machinery existed for the sandbox and now has no user.
 
-## Channel one — AUR, for Arch and Omarchy
+And three things it costs, which are real:
 
-`yay -S sieve`. One command, no runtime, uses the system's own GTK.
+- **A build matrix.** One artefact per distribution family and per release,
+  built against that release's glibc and GTK. Flatpak's whole pitch is
+  building once.
+- **A version floor with no way around it.** `gnome_46` means **libadwaita
+  1.5 or newer**. Anything older cannot run this binary, and a Flatpak would
+  have carried its own libadwaita for exactly those machines. Ubuntu 22.04
+  and Debian 12 are out; there is no fix short of lowering the baseline, and
+  `CLAUDE.md` records why it is where it is.
+- **No sandbox.** Sieve reads and writes its own data directory and talks to
+  the network, and that is now bounded by the user account rather than by a
+  manifest.
 
-Everything Sieve links is already in the repositories at a compatible
-version. The `gnome_46` feature pins libadwaita 1.5 as the *baseline*, and
-1.9.3 satisfies it.
+That is a fair trade for a wallet whose users are the sort of people who
+already have `yay`. It is worth writing down that it *is* a trade.
 
-### The PKGBUILD, in outline
+## The version floor, which decides the matrix
+
+Sieve needs **libadwaita ≥ 1.5** (GNOME 46) and **GTK ≥ 4.14**. Every target
+below is a claim to be checked by building in a container of that release,
+not from memory:
+
+| Target | Expected to clear the floor |
+|---|---|
+| Arch, Omarchy | yes, rolling |
+| Fedora 40+ | yes |
+| Ubuntu 24.04 LTS, 24.10+ | yes |
+| Debian 13 (trixie) | yes |
+| Ubuntu 22.04 LTS, Debian 12 | **no** — libadwaita too old |
+
+The build itself must happen *on* the oldest target of each family, in a
+container, because a binary linked against newer glibc will not run on older.
+
+## Channel one — AUR
+
+`yay -S sieve`.
 
 ```bash
 pkgname=sieve
 pkgdesc="A privacy-focused Bitcoin wallet"
 arch=('x86_64')
-url="https://github.com/galaxoidlabs/sieve"        # once there is a remote
 license=('MIT' 'Apache-2.0')
 depends=('gtk4' 'libadwaita' 'sqlite' 'openssl')
 makedepends=('cargo' 'git')
-optdepends=('tor: route connections through Tor')
+optdepends=('tor: route every connection through Tor')
 
 build()   { cargo build --release --frozen }
 check()   { cargo test --frozen }
 package() {
-  install -Dm755 target/release/sieve            "$pkgdir/usr/bin/sieve"
+  install -Dm755 target/release/sieve "$pkgdir/usr/bin/sieve"
   install -Dm644 data/com.galaxoidlabs.Sieve.desktop \
-                 "$pkgdir/usr/share/applications/com.galaxoidlabs.Sieve.desktop"
+    "$pkgdir/usr/share/applications/com.galaxoidlabs.Sieve.desktop"
   install -Dm644 data/icons/hicolor/scalable/apps/bitcoin-logo.svg \
-                 "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.galaxoidlabs.Sieve.svg"
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.galaxoidlabs.Sieve.svg"
+  install -Dm644 packaging/udev/51-sieve-hardware.rules \
+    "$pkgdir/usr/lib/udev/rules.d/51-sieve-hardware.rules"
 }
 ```
 
-**Tor needs no bundling here.** `tor::daemon::find` already looks beside the
-executable *and* on `PATH`, so `pacman -S tor` is all it takes; the optdepend
-says so. The Expert Bundle in `packaging/` exists for the Flatpak, where
-there is no system Tor to find.
+Three variants, in the order they are worth making: **`sieve`** from a tagged
+release tarball, **`sieve-git`** from `master` for early testers, and
+**`sieve-bin`** last — a prebuilt binary is a trust decision, so it waits for
+signed tags and checksums.
 
-**The icon has to be installed by hand.** It is compiled into the binary as a
-gresource for the app's *own* use, which does nothing for the desktop
-environment: the `.desktop` file says `Icon=com.galaxoidlabs.Sieve`, and that
-name has to exist in the hicolor theme on disk. Cargo installs no data files,
-so the package does it.
+**The icon must be installed by hand.** It is compiled into the binary as a
+gresource for the app's own use, which does nothing for the desktop's icon
+theme: the `.desktop` file says `Icon=com.galaxoidlabs.Sieve`, and that name
+has to exist in hicolor on disk. Cargo installs no data files.
 
-### Three variants, in the order they are worth making
+## Channels two and three — `.deb` and `.rpm`
 
-1. **`sieve`** — builds from a tagged release tarball. The honest default: the
-   source is what is being audited, and the build is reproducible by whoever
-   installs it.
-2. **`sieve-git`** — builds from `master`. Cheap to add, and it is what early
-   testers want.
-3. **`sieve-bin`** — a prebuilt binary, once there are signed releases to
-   point at. Saves a five-minute Rust build; costs a trust decision, so it
-   comes last and only with checksums and a signed tag behind it.
+Both generated from `Cargo.toml` metadata rather than hand-written packaging
+trees:
 
-## Channel two — Flathub, for everyone else
+- **`cargo-deb`** — `[package.metadata.deb]` for depends, the desktop entry,
+  the icon and the udev rules.
+- **`cargo-generate-rpm`** — `[package.metadata.generate-rpm]`, same list.
 
-This is where a sandbox actually means something, and where Fedora, Ubuntu,
-Mint and the immutable distributions get it. `packaging/com.galaxoidlabs.Sieve.yml`
-already builds Tor and libevent from source into the app.
+Runtime dependencies by family:
 
-**It has never been built.** There is no `flatpak-builder` on this machine —
-that is the first task, not the last, because a manifest that has never run
-is a guess.
+| | Debian / Ubuntu | Fedora |
+|---|---|---|
+| GTK | `libgtk-4-1` | `gtk4` |
+| Adwaita | `libadwaita-1-0` | `libadwaita` |
+| SQLite | `libsqlite3-0` | `sqlite-libs` |
+| TLS | `libssl3` | `openssl-libs` |
+| Tor | `Suggests: tor` | `Recommends: tor` |
 
-Still missing before it can be submitted:
+Built in containers — `debian:trixie`, `ubuntu:24.04`, `fedora:41` — from a
+release tag, in CI, so the artefacts are reproducible by someone else and not
+by this laptop.
 
-- **AppStream metainfo** (`com.galaxoidlabs.Sieve.metainfo.xml`) — Flathub
-  requires it, and it is what puts a description and screenshots in every
-  software centre.
-- **An icon that is Sieve's own.** The Bitcoin symbol is a placeholder; it
-  says "a bitcoin thing", not "Sieve", and Flathub's review will say so.
-- **A built, tested manifest**, including the bundled Tor actually starting
-  inside the sandbox — the one thing about that manifest nobody has observed.
+## Hosting
 
-### The permission list, and the one hard problem
+**GitHub Releases first**: three files and a `SHA256SUMS`, signed. Enough for
+`sieve-bin`, enough for anyone who wants to install by hand, and it costs
+nothing to maintain.
 
-| Permission | Why |
-|---|---|
-| `--share=network` | Bitcoin peer-to-peer, and Tor |
-| `--socket=wayland`, `--socket=fallback-x11` | the display |
-| `--device=dri` | rendering |
-| *(no `--filesystem`)* | `gtk::FileDialog` goes through the portal, which is how label import and PSBT files should work anyway |
+**A real repository later**, if there is demand. apt and dnf repositories
+mean signing keys, key rotation and hosting; the openSUSE Build Service will
+build and host both for free from one spec, which is the least-effort route
+if it comes to that. Not before there are users asking.
 
-**Hardware wallets are the hard problem.** Talking to a Ledger means raw USB
-HID, which inside a sandbox needs `--device=all` — the escape hatch that
-gives the app every device on the machine, and which Flathub reviewers push
-back on for good reason. It also still needs udev rules on the host, which a
-Flatpak cannot install.
+## The udev rules, which are new work
 
-That is a real argument for the native package being the *better* experience
-for anyone with a hardware wallet, not merely the more convenient one. The
-Flatpak can ship without USB signing and say so.
+Hardware wallets are invisible to a non-root process until udev says
+otherwise, and this is the thing a Flatpak cannot fix and a native package
+can. `packaging/udev/51-sieve-hardware.rules` needs writing, taking the
+vendor and product ids the vendors publish for Ledger, Coldcard, Trezor,
+BitBox and Jade, and tagging them `uaccess` so the logged-in user can open
+them.
 
-## What is not worth doing
-
-- **Snap.** Not on Arch, and the sandbox story is no better than Flatpak's.
-- **AppImage.** Bundles GTK4 and libadwaita to run on a machine that has them,
-  and gets no sandbox for it. The one case it wins — a distro too old for the
-  libadwaita baseline — is a case this app does not need to serve.
-- **A distro repository of our own.** Signing, hosting and key rotation for an
-  audience that has the AUR already.
+Then `hardware::udev_hint()` can stop promising and start pointing: the rules
+are installed, so if a device is still invisible the answer is to replug it
+or check the device is unlocked.
 
 ## Order of work
 
-1. **Write the PKGBUILD and build it locally** with `makepkg -si`. Prove the
-   desktop entry, the icon and `yay -S tor` interoperation on this machine.
-2. **Tag a release.** `sieve` needs something to point at, and a signed tag is
-   the thing a reviewer checks.
-3. **Install `flatpak-builder` and build the manifest.** Find out what is
-   broken in a file that has never run, especially bundled Tor inside the
-   sandbox.
-4. **AppStream metainfo and a real icon**, which are Flathub's gate and also
-   simply overdue.
-5. **Submit to AUR**, then Flathub.
+1. **Write the udev rules**, and confirm a Ledger appears without root once
+   they are installed.
+2. **Write the PKGBUILD and `makepkg -si` it here.** Prove the binary, the
+   desktop entry, the icon and the rules all land where they should.
+3. **Tag a release**, signed, so there is something for a package to point at.
+4. **Add `cargo-deb` and `cargo-generate-rpm` metadata**, and build both in
+   containers.
+5. **Verify the floor claims** by installing the artefacts in
+   `ubuntu:24.04`, `debian:trixie` and `fedora:41` containers and running the
+   binary under a nested Wayland session.
+6. **Publish to GitHub Releases, then submit to AUR.**
 
-## What "works well on Omarchy" means beyond installing
+## What is now dead
 
-- Wayland under Hyprland, which is how it already runs here.
-- libadwaita follows the system colour scheme, and Sieve reads it directly
-  rather than only through libadwaita's backend — that fix is already in.
-- No tray icon, no background service, no autostart. Sieve is a window
-  somebody opens.
-- The idle lock and lock-on-sleep matter more on a laptop that suspends often
-  than they do on a desktop, and both are in.
+`packaging/com.galaxoidlabs.Sieve.yml` and `scripts/fetch-tor.sh` exist to
+build Tor into a Flatpak. With no Flatpak, nothing uses them. Keep them until
+the AUR package is proven — they are the only record of how to bundle Tor —
+then delete them and say so in `ROADMAP.md`, because a manifest nobody builds
+is a manifest that rots.
