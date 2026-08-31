@@ -14,7 +14,7 @@ a migration and a re-scan.
 |---|---|---|
 | Script type | **BIP86 taproot** | Single-sig key-path spends are indistinguishable on-chain. Costs acceptance at a few older services that reject `bc1p`. |
 | Dev network | **Signet** (regtest for tests) | Real block times and enough `NODE_COMPACT_FILTERS` peers to exercise sync honestly. |
-| Phrase length | **12 words**, not user-selectable | 128 bits is beyond brute force; transcription error is the realistic loss vector. |
+| Phrase length | **12 words** by default, 24 offered | 128 bits is beyond brute force either way, so this stopped being a security decision and became a preference some people arrive with. The cost of 24 is real and falls on the person copying them down, which is why 12 is still the default. |
 | Password vs passphrase | **Both, named distinctly** | The *password* always encrypts the file. The *passphrase* is the optional BIP-39 25th word. A wrong password errors; a wrong passphrase silently derives an empty wallet, so the UI must never blur them. |
 | Wallet count | **One per vault** | Keeps unlock, sync, and the signer singular. The header carries a version, so multi-account stays open. |
 
@@ -196,12 +196,16 @@ as AAD), atomic writes, process hardening, six vault tests.
 - [x] Optional BIP-39 passphrase on restore, kept distinct from the wallet password
 - [x] All four standard derivation paths searched on import, with a per-path breakdown
 - [x] Mainnet selectable on import behind an explicit unreviewed-software acknowledgement
-- [ ] Offer a BIP-39 passphrase when *creating* a wallet, not only when importing one.
-      Creation passes `None`, so a wallet made here can never have one. Two things must be
-      right first: the phrase step has to say the words alone will no longer restore the
-      wallet, and verification has to ask for the passphrase back as well — one written down
-      wrong is indistinguishable from a correct one until the money is gone, since it derives
-      a valid empty wallet rather than an error.
+- [x] A BIP-39 passphrase when *creating* a wallet, and a choice of 12 or 24 words. Both on
+      the first step, in a group of their own away from the password — the two things this
+      wallet must never let anybody confuse. Both conditions this was waiting on are met: the
+      phrase screen changes what it says when a passphrase is in play, because the words alone
+      then restore an empty wallet, and verification asks for the passphrase back, compared
+      exactly — spaces and capitals are part of the key. An empty passphrase with the switch
+      on is refused rather than quietly meaning "none", since BIP-39 derives a different seed
+      for `""` than for absent.
+- [x] The wallet name reaches `create`. It was collected on the first step and passed as
+      `None`, so naming a wallet while making it did nothing at all.
 - [x] Show the recovery phrase again, for backing it up later — `ui/reveal.rs`, reached from
       the Recovery phrase row in preferences. Asks for the password, because the vault is the
       only place the phrase exists. The row is insensitive until the wallet is unlocked, and
@@ -249,8 +253,13 @@ crosses a component boundary as a message.
 - [x] Fee suggestion from `average_fee_rate`, fetched once per tip when the send form comes
       into view, with the block it came from named under the field.
 - [x] Optional fee rates from mempool.space, off by default, disclosed where it is switched on.
-- [ ] A BIP-39 passphrase at signing time, for wallets imported with one. Refused clearly for
-      now rather than silently failing to finalize.
+- [x] A BIP-39 passphrase at signing time. `Meta` records *that* one exists — never its
+      value — and both signing dialogs ask for it beside the password: the send confirmation
+      and the fee bump, which is a second signing path that does not go through the send form.
+      A wallet imported with a passphrase can now spend, which it could not before. `unlock`
+      also refuses to rebuild missing databases for such a wallet rather than deriving an
+      empty one from the vault alone: that rebuild *succeeding* is the failure worth
+      preventing, since it hands back a working wallet with a zero balance.
 - [x] Unconfirmed coins excluded from selection.
 - [x] BIP-21 payment requests read on paste, including the amount and who is being paid.
 - [x] Fee bump, with the race against the original explained rather than hidden.
