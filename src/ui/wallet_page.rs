@@ -17,6 +17,8 @@ pub enum WalletPageOutput {
     /// Throw away this wallet's chain data and scan again from its birthday.
     /// The app owns the node, so it owns the confirmation too.
     AskRescan,
+    /// Look on the derivation paths this wallet is not watching.
+    AskSearchPaths,
     /// Name a transaction or an address, or clear its name. The app owns the
     /// label file, so it does the writing.
     SetLabel {
@@ -621,6 +623,8 @@ pub enum WalletPageMsg {
     SetChain(Option<crate::wallet::node::ChainInfo>),
     /// Start over from the birthday, after the app has asked.
     AskRescan,
+    /// Look on the derivation paths this wallet is not watching.
+    AskSearchPaths,
     /// How connections are being made: `Some` when they go through Tor.
     SetTor(Option<String>),
     /// The connected peers, arriving faster than the chain view can.
@@ -728,6 +732,7 @@ impl WalletPage {
             return "—".into();
         };
         self.receive_path
+            .or_else(|| self.default_receive_path())
             .and_then(|path| summary.accounts.iter().find(|a| a.script_type == path))
             .map(|a| a.next_address.clone())
             .unwrap_or_else(|| summary.next_address.clone())
@@ -749,14 +754,98 @@ impl WalletPage {
             .is_some_and(|s| s.accounts.iter().any(|a| a.script_type == path))
     }
 
+    /// Standard paths this wallet is not watching.
+    ///
+    /// The four BIP-44/49/84/86 accounts are the whole universe here: a seed
+    /// used in another wallet was used on one of them.
+    fn unwatched_paths(&self) -> Vec<crate::wallet::accounts::ScriptType> {
+        crate::wallet::accounts::ScriptType::ALL
+            .into_iter()
+            .filter(|path| !self.has_path(*path))
+            .collect()
+    }
+
+    /// Whether it is worth offering to look on the other paths.
+    ///
+    /// Not for a watch-only wallet: its descriptors came from a device, and
+    /// only that device can produce another. Offering a button that can only
+    /// fail is worse than not offering it.
+    fn can_search_paths(&self) -> bool {
+        !self.locked && !self.watch_only && !self.unwatched_paths().is_empty()
+    }
+
+    /// What the search row says it would do.
+    fn unwatched_note(&self) -> String {
+        let names: Vec<&str> = self.unwatched_paths().iter().map(|p| p.label()).collect();
+        format!(
+            "This wallet watches only the paths it hands addresses out on. If its recovery \
+             phrase has been used in another wallet, money may be sitting on {}.",
+            match names.len() {
+                0 => "another path".to_string(),
+                1 => names[0].to_string(),
+                _ => format!(
+                    "{} or {}",
+                    names[..names.len() - 1].join(", "),
+                    names[names.len() - 1]
+                ),
+            }
+        )
+    }
+
+    /// Whether the receive screen will offer this path.
+    ///
+    /// Watched is not the same as offered: a wallet imported from a seed
+    /// watches BIP44 so money already there is found, and still never hands out
+    /// a new `1…`. Every row on the receive picker asks this rather than
+    /// `has_path`, so the two cannot come apart.
+    fn offers_path(&self, path: crate::wallet::accounts::ScriptType) -> bool {
+        path.can_receive() && self.has_path(path)
+    }
+
+    /// The path a fresh address should come from when nothing is chosen.
+    ///
+    /// **Native segwit, on every wallet that watches it.** Not the wallet's
+    /// primary, and not taproot: `bc1q` is the address form nothing refuses,
+    /// where `bc1p` is still turned away by a handful of exchanges and older
+    /// services. The person who pays for that is the one being paid — they find
+    /// out when a sender tells them the address was rejected, and have no way
+    /// to know that the row one below would have worked.
+    ///
+    /// The cost is real and worth naming: a taproot key-path spend hides in the
+    /// company of every other taproot spend, multisig and lightning included,
+    /// where a `bc1q` spend says plainly that it was single-signature. Taproot
+    /// stays one tap away and stays what the wallet is built on.
+    ///
+    /// Falls back to the primary, then to anything that can be handed out at
+    /// all, so a wallet not watching native segwit still has an address.
+    fn default_receive_path(&self) -> Option<crate::wallet::accounts::ScriptType> {
+        let summary = self.summary.as_ref()?;
+        summary
+            .accounts
+            .iter()
+            .find(|a| {
+                a.script_type == crate::wallet::accounts::ScriptType::NativeSegwit
+                    && a.script_type.can_receive()
+            })
+            .or_else(|| {
+                summary
+                    .accounts
+                    .iter()
+                    .find(|a| a.next_address == summary.next_address && a.script_type.can_receive())
+            })
+            .or_else(|| {
+                summary
+                    .accounts
+                    .iter()
+                    .find(|a| a.script_type.can_receive())
+            })
+            .map(|a| a.script_type)
+    }
+
     fn path_selected(&self, path: crate::wallet::accounts::ScriptType) -> bool {
         match self.receive_path {
             Some(selected) => selected == path,
-            None => self
-                .summary
-                .as_ref()
-                .and_then(|s| s.accounts.iter().find(|a| a.next_address == s.next_address))
-                .is_some_and(|a| a.script_type == path),
+            None => self.default_receive_path() == Some(path),
         }
     }
 
@@ -1125,8 +1214,20 @@ impl WalletPage {
             .is_some_and(|s| !s.transactions.is_empty())
     }
 
+    /// Whether there is more than one path a fresh address could come from.
+    ///
+    /// Counted over what the picker will *offer*, not over what is watched: a
+    /// wallet watching legacy and taproot has one address to hand out, and a
+    /// picker with a single row on it is a control that asks a question with
+    /// one answer.
     fn has_path_choice(&self) -> bool {
-        self.summary.as_ref().is_some_and(|s| s.accounts.len() > 1)
+        self.summary.as_ref().is_some_and(|s| {
+            s.accounts
+                .iter()
+                .filter(|a| a.script_type.can_receive())
+                .count()
+                > 1
+        })
     }
 
     /// What the selected path's addresses look like, so the choice is
@@ -1659,7 +1760,7 @@ impl Component for WalletPage {
                                 gtk::ToggleButton {
                                     set_label: "Legacy",
                                     #[watch]
-                                    set_visible: model.has_path(ScriptType::Legacy),
+                                    set_visible: model.offers_path(ScriptType::Legacy),
                                     #[watch]
                                     #[block_signal(legacy_toggled)]
                                     set_active: model.path_selected(ScriptType::Legacy),
@@ -1677,7 +1778,7 @@ impl Component for WalletPage {
                                     set_label: "Nested",
                                     set_group: Some(&path_legacy),
                                     #[watch]
-                                    set_visible: model.has_path(ScriptType::NestedSegwit),
+                                    set_visible: model.offers_path(ScriptType::NestedSegwit),
                                     #[watch]
                                     #[block_signal(nested_toggled)]
                                     set_active: model.path_selected(ScriptType::NestedSegwit),
@@ -1695,7 +1796,7 @@ impl Component for WalletPage {
                                     set_label: "SegWit",
                                     set_group: Some(&path_legacy),
                                     #[watch]
-                                    set_visible: model.has_path(ScriptType::NativeSegwit),
+                                    set_visible: model.offers_path(ScriptType::NativeSegwit),
                                     #[watch]
                                     #[block_signal(native_toggled)]
                                     set_active: model.path_selected(ScriptType::NativeSegwit),
@@ -1713,7 +1814,7 @@ impl Component for WalletPage {
                                     set_label: "Taproot",
                                     set_group: Some(&path_legacy),
                                     #[watch]
-                                    set_visible: model.has_path(ScriptType::Taproot),
+                                    set_visible: model.offers_path(ScriptType::Taproot),
                                     #[watch]
                                     #[block_signal(taproot_toggled)]
                                     set_active: model.path_selected(ScriptType::Taproot),
@@ -1903,6 +2004,26 @@ impl Component for WalletPage {
                             #[watch]
                             set_sensitive: !model.locked,
                             connect_clicked => WalletPageMsg::AskRescan,
+                        },
+
+                        // Recovery, not configuration. Framed as a question
+                        // about where money might be rather than a set of
+                        // tickboxes, which is what stops somebody switching on
+                        // legacy "just in case" and then living with a row that
+                        // finds nothing for ever.
+                        adw::ActionRow {
+                            set_title: "Search other derivation paths",
+                            set_subtitle_lines: 4,
+                            #[watch]
+                            set_subtitle: &model.unwatched_note(),
+                            #[watch]
+                            set_visible: model.can_search_paths(),
+                            set_activatable: true,
+                            add_suffix = &gtk::Image {
+                                set_icon_name: Some("go-next-symbolic"),
+                                add_css_class: "dim-label",
+                            },
+                            connect_activated => WalletPageMsg::AskSearchPaths,
                         },
 
                         adw::ActionRow {
@@ -2502,6 +2623,11 @@ impl Component for WalletPage {
                     self.rebuild_transactions(&summary);
                 }
             }
+            WalletPageMsg::AskSearchPaths => {
+                self.close_menu();
+                let _ = sender.output(WalletPageOutput::AskSearchPaths);
+            }
+
             WalletPageMsg::AskRescan => {
                 let _ = sender.output(WalletPageOutput::AskRescan);
             }

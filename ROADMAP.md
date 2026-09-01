@@ -15,7 +15,7 @@ a migration and a re-scan.
 
 | Decision | Recommendation | Why |
 |---|---|---|
-| Script type | **BIP86 taproot** | Single-sig key-path spends are indistinguishable on-chain. Costs acceptance at a few older services that reject `bc1p`. |
+| Script type | **BIP86 taproot**, with native segwit offered first | Taproot is what the wallet is built on and what it spends best. But the *receive* screen defaults to `bc1q`, which nothing refuses, because the cost of `bc1p` falls on the person being paid — they learn of it when a sender says the address bounced, and cannot know the row below would have worked. The privacy that trade gives up is real and is stated at `default_receive_path`. **Legacy is never offered at all**, on any wallet. |
 | Dev network | **Signet** (regtest for tests) | Real block times and enough `NODE_COMPACT_FILTERS` peers to exercise sync honestly. |
 | Phrase length | **12 words** by default, 24 offered | 128 bits is beyond brute force either way, so this stopped being a security decision and became a preference some people arrive with. The cost of 24 is real and falls on the person copying them down, which is why 12 is still the default. |
 | Password vs passphrase | **Both, named distinctly** | The *password* always encrypts the file. The *passphrase* is the optional BIP-39 25th word. A wrong password errors; a wrong passphrase silently derives an empty wallet, so the UI must never blur them. |
@@ -184,6 +184,26 @@ Then, in rough order:
   and `OnboardingMsg::PreviewWelcome` — so there is no half-removed path left to send an
   onboarding component that already has a wallet back to its first step.
 
+- **Watching a path and handing out an address on it are separate questions.** An imported
+  seed still watches all four, because money already on BIP44 has to be found and spent and
+  refusing to look would be losing it. But **no wallet ever hands out a fresh legacy
+  address**: a `1…` input carries its whole signature into the weight with no segwit
+  discount, so every coin received there costs more to move for as long as it exists.
+  `ScriptType::can_receive` is the rule, the receive picker asks it rather than "is this
+  watched", and `AppMsg::RevealAddress` refuses it again — a rule kept only by the
+  visibility of a row is a rule the view is keeping.
+- **Search other derivation paths**, for the case that reads as lost money. A wallet made
+  here watches taproot and native segwit, because those are the only paths it hands
+  addresses out on. But its recovery phrase can be restored into another wallet, used on
+  some other path and brought back, and then Sieve shows a balance that is missing money
+  and says nothing. One row in Sync — framed as recovery, not as configuration, so nobody
+  switches on legacy "just in case" — derives the missing accounts from the vault and
+  scans again from the birthday. The rescan comes for free: `build_with_wallets` starts the
+  node at the lowest checkpoint of any wallet it is handed, so an account sitting at the
+  birthday drags the whole scan back on its own. Refused for a watch-only wallet, whose
+  descriptors only its device can produce, and the row is hidden there rather than offering
+  a button that can only fail.
+
 ## Milestones
 
 ### M0 — Scaffold — SHIPPED
@@ -235,12 +255,14 @@ tests.
       and one source is easier to argue about than two. The phrase screen now says where the
       words came from and how many bits they carry, checked against BIP-39's `words * 32 / 3`
       by a test so the sentence cannot go stale.
-- [ ] Dice as **additional** entropy, XOR-mixed into those bytes and never replacing them.
-      Motivated by the Coldcard seed-generation failure of July 2026, where a build flag sent
-      five years of devices to a deterministic PRNG and the seeds that survived were the ones
-      with dice rolls in them. See `DICE.md` — for why mixing rather than replacing, why
-      Electrum shipped replace-mode and withdrew it, and for why the entry screen is most of
-      the work.
+- [x] Dice as **additional** entropy, XOR-mixed into those bytes and never replacing them —
+      `os_bytes XOR SHA256(rolls)`. Motivated by the Coldcard seed-generation failure of July
+      2026, where a build flag sent five years of devices to a deterministic PRNG and the
+      seeds that survived were the ones with dice rolls in them. d6 through d20, clicked
+      rather than typed (a keyboard cannot express a face above 9), the target derived from
+      `bits / log2(sides)` and enforced rather than suggested. A test asserts the same rolls
+      twice give *different* phrases, which is the whole design in one assertion: if it ever
+      passes as equal, Sieve has become the replace-mode `DICE.md` refuses.
 
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never
 crosses a component boundary as a message.

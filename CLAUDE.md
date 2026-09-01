@@ -126,10 +126,52 @@ Two axes, kept separate:
   `carries_keys()` distinguishes the imports that could lose money from the one that cannot.
 - **`ScriptType`** — where it is searched: BIP44/49/84/86. An import searches all of them,
   because one seed derives a different wallet on each path and guessing wrong finds nothing.
-  Syncing all four costs no extra bandwidth: a filter covers a whole block regardless.
+  Syncing all four costs no extra bandwidth: a filter covers a whole block regardless. A
+  wallet *created* here watches only taproot and native segwit, because those are the only
+  paths it will ever hand an address out on and a new wallet has no history anywhere else.
+
+**Watching and handing out are separate questions, and `can_receive` is the difference.**
+Legacy is watched on an import — money already on BIP44 has to be found and spent — and no
+wallet ever hands out a fresh `1…`. The receive picker asks `offers_path`, not `has_path`,
+and `AppMsg::RevealAddress` refuses it again: a rule kept only by the visibility of a row is
+a rule the view is keeping, and this one decides which script somebody is about to give a
+payer. Native segwit is the *default* selection everywhere, taproot one row down — `bc1q` is
+refused by nothing, and the cost of `bc1p` lands on the person being paid.
+
+`wallet::add_script_types` starts watching a path that was not being watched, for the case
+that reads as lost money: a phrase restored into another wallet, used on some other path,
+brought back. It needs the password, because those descriptors exist nowhere and only the
+seed makes them, and it refuses a watch-only wallet outright. Adding an account at the
+birthday is all it takes to force a full rescan — `build_with_wallets` starts the node at the
+lowest checkpoint of any wallet it is given.
 
 Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
 one `bdk_kyoto` node drives them all via `build_with_wallets`.
+
+## Where a phrase's randomness comes from
+
+`getrandom::fill` — the `getrandom(2)` syscall — the same call the vault uses for its salt,
+its nonces and its data key. **One entropy source in the program, and this is it.**
+`Mnemonic::generate` would have supplied its own from `rand`'s `ThreadRng`, which is a real
+CSPRNG seeded from the OS and was never unsafe; but it meant the one irreplaceable secret
+came from userspace while everything else came from the kernel, and one source is easier to
+argue about than two. `generate_mnemonic` asks for the 32 bytes itself and hands them to
+`generate_with_entropy`.
+
+A failure to read entropy stops wallet creation. It cannot be worked around: a phrase from a
+fallback nobody chose is exactly the silent weakness that looks identical to a good wallet.
+
+**Dice are mixed in, never substituted.** `generate_mnemonic_with_rolls` computes
+`os_bytes XOR SHA256(rolls)`, so no roll count and no loaded die can produce a phrase weaker
+than the OS alone would have given. Replacing the OS bytes with `SHA256(rolls)` is the one
+thing that must never be built here — it is verifiable, and it hands somebody a way to seal a
+wallet nobody can afford. `DICE.md` records why, including that Electrum shipped exactly that
+and withdrew it. The test that guards the whole design asserts the *same rolls twice give
+different phrases*.
+
+The rolls are key material until the phrase exists. `Face` carries a redacted `Debug` for the
+same reason `Passphrase` does: relm4 traces every message, and a derived `Debug` would write
+the sequence to the log one roll at a time.
 
 ## Tor
 
@@ -312,6 +354,9 @@ watched. Show a fresh address per payer; never present one address as "the" wall
 
 The derivation-path list is a balance breakdown and must not show addresses: it duplicated
 the receive row and read as address reuse.
+
+The picker defaults to **native segwit** on every wallet that watches it, and never offers
+legacy at all. See the import model above for why those are two different rules.
 
 ## The name
 

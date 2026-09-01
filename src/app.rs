@@ -393,6 +393,14 @@ pub enum AppMsg {
     /// Confirm, then throw away this wallet's chain data and scan again.
     AskRescan,
     Rescan,
+    /// Offer to start watching the standard paths this wallet is not watching.
+    AskSearchPaths,
+    /// Derive them and scan again from the birthday. Carries the password
+    /// because the descriptors do not exist yet and only the seed makes them.
+    SearchPaths {
+        password: crate::ui::send::Password,
+        passphrase: Option<crate::ui::send::Password>,
+    },
     /// Asked and answered.
     RemoveWallet(Paths),
     /// Re-present the password dialog for the wallet already on screen.
@@ -462,6 +470,8 @@ pub enum AppCmd {
     Priced(Result<crate::price::Price, String>),
     /// The chain data has been cleared, or could not be.
     Rescanned(Result<(), String>),
+    /// Which paths were added, or why none were.
+    PathsAdded(Result<Vec<wallet::accounts::ScriptType>, String>),
     /// A replacement was built, or could not be.
     PlannedBump(Result<Box<crate::wallet::send::Plan>, String>),
     /// Time to ask whether the wallet has been left alone long enough.
@@ -565,6 +575,9 @@ impl Component for App {
                     }
                     crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
                     crate::ui::wallet_page::WalletPageOutput::AskRescan => AppMsg::AskRescan,
+                    crate::ui::wallet_page::WalletPageOutput::AskSearchPaths => {
+                        AppMsg::AskSearchPaths
+                    }
                     crate::ui::wallet_page::WalletPageOutput::Rebroadcast { txid, from } => {
                         AppMsg::Rebroadcast { txid, from }
                     }
@@ -1603,6 +1616,147 @@ impl Component for App {
                 }
             }
 
+            AppMsg::AskSearchPaths => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                let Some(meta) = wallet::Meta::load(&paths) else {
+                    return;
+                };
+                let missing: Vec<_> = wallet::accounts::ScriptType::ALL
+                    .into_iter()
+                    .filter(|s| !meta.script_types.contains(s))
+                    .collect();
+                if missing.is_empty() {
+                    return;
+                }
+                let names: Vec<&str> = missing.iter().map(|s| s.label()).collect();
+
+                // Said as what it is for rather than as what it configures.
+                // Somebody reaching for this is looking for money they cannot
+                // see, and the answer to that is not a list of BIP numbers.
+                let body = format!(
+                    "Sieve will start watching {} as well, and check the chain again from \
+                     this wallet's birthday to find anything already there.\n\nThis is \
+                     worth doing if this wallet's recovery phrase has been used in another \
+                     wallet, which may have received at addresses Sieve does not \
+                     watch.\n\nIt costs a full rescan — hours, on a wallet that goes back \
+                     years — and nothing is at risk while it runs. Sieve will still never \
+                     hand out a legacy address; watching one is only about finding what is \
+                     already on it.",
+                    names.join(" and ")
+                );
+
+                let dialog =
+                    adw::AlertDialog::new(Some("Search the other derivation paths?"), Some(&body));
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("search", "Search");
+                dialog.set_response_appearance("search", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                // The descriptors for a path nobody has watched do not exist
+                // anywhere yet, and the only thing that can make them is the
+                // seed. So this asks, exactly as signing does.
+                let fields = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                fields.set_margin_top(6);
+                let entry = gtk::PasswordEntry::new();
+                entry.set_show_peek_icon(true);
+                entry.set_placeholder_text(Some("Wallet password"));
+                fields.append(&entry);
+
+                let wants_passphrase = meta.bip39_passphrase;
+                let phrase_entry = gtk::PasswordEntry::new();
+                if wants_passphrase {
+                    phrase_entry.set_show_peek_icon(true);
+                    phrase_entry.set_placeholder_text(Some("BIP-39 passphrase"));
+                    fields.append(&phrase_entry);
+
+                    let note = gtk::Label::new(Some(
+                        "Part of the key, not the file password. A different one derives a \
+                         different, empty wallet.",
+                    ));
+                    note.add_css_class("dim-label");
+                    note.add_css_class("caption");
+                    note.set_wrap(true);
+                    note.set_xalign(0.0);
+                    fields.append(&note);
+                }
+
+                dialog.set_extra_child(Some(&fields));
+                dialog.set_response_enabled("search", false);
+                {
+                    let dialog = dialog.clone();
+                    entry.connect_changed(move |entry| {
+                        dialog.set_response_enabled("search", !entry.text().is_empty());
+                    });
+                }
+
+                {
+                    let sender = sender.clone();
+                    let entry = entry.clone();
+                    let phrase_entry = phrase_entry.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response == "search" {
+                            sender.input(AppMsg::SearchPaths {
+                                password: crate::ui::send::Password(zeroize::Zeroizing::new(
+                                    entry.text().to_string(),
+                                )),
+                                passphrase: wants_passphrase.then(|| {
+                                    crate::ui::send::Password(zeroize::Zeroizing::new(
+                                        phrase_entry.text().to_string(),
+                                    ))
+                                }),
+                            });
+                        }
+                        entry.set_text("");
+                        phrase_entry.set_text("");
+                    });
+                }
+
+                if let Some(window) = self.nav.root() {
+                    dialog.present(Some(&window));
+                }
+            }
+
+            AppMsg::SearchPaths {
+                password,
+                passphrase,
+            } => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                let missing: Vec<_> = wallet::Meta::load(&paths)
+                    .map(|meta| {
+                        wallet::accounts::ScriptType::ALL
+                            .into_iter()
+                            .filter(|s| !meta.script_types.contains(s))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                // The node holds the database files open, and it is about to be
+                // handed a wallet it has never seen. It goes first.
+                if let Some(session) = self.session.take() {
+                    session.shutdown();
+                }
+                self.generation += 1;
+                self.wallet.emit(WalletPageMsg::Reset);
+                self.restate_wallet(&sender);
+
+                sender.spawn_oneshot_command(move || {
+                    AppCmd::PathsAdded(
+                        wallet::add_script_types(
+                            &paths,
+                            password.0.as_bytes(),
+                            passphrase.as_ref().map(|p| p.0.as_str()),
+                            &missing,
+                        )
+                        .map_err(|e| e.to_string()),
+                    )
+                });
+            }
+
             AppMsg::Rescan => {
                 let Some(paths) = self.active.clone() else {
                     return;
@@ -1890,6 +2044,14 @@ impl Component for App {
             }
 
             AppMsg::RevealAddress(script_type) => {
+                // The receive picker never offers legacy, and this refuses it
+                // again. A rule that lives only in the visibility of a row is a
+                // rule the view is keeping, and this one decides which script a
+                // person is about to hand somebody for money.
+                if !script_type.can_receive() {
+                    tracing::warn!(%script_type, "refused to hand out an address on this path");
+                    return;
+                }
                 let Some(session) = self.session.clone() else {
                     // Nothing to reveal from until the client is up.
                     return;
@@ -2026,6 +2188,23 @@ impl Component for App {
             }
             AppCmd::Rescanned(Ok(())) => {
                 tracing::info!("chain data cleared; scanning again from the birthday");
+                self.start_session(&sender);
+            }
+            AppCmd::PathsAdded(Ok(added)) => {
+                let names: Vec<&str> = added.iter().map(|s| s.label()).collect();
+                tracing::info!(paths = ?names, "started watching new derivation paths");
+                self.wallet.emit(WalletPageMsg::Toast(match names.len() {
+                    0 => "Those paths were already being watched".to_string(),
+                    _ => format!("Now watching {} — scanning again", names.join(" and ")),
+                }));
+                self.start_session(&sender);
+            }
+            AppCmd::PathsAdded(Err(message)) => {
+                tracing::error!(%message, "could not add a derivation path");
+                self.wallet
+                    .emit(WalletPageMsg::Toast(crate::ui::send::capitalise(&message)));
+                // Nothing was changed on a failure, so the wallet is exactly as
+                // it was and is worth putting back on the network.
                 self.start_session(&sender);
             }
             AppCmd::Rescanned(Err(message)) => {

@@ -65,6 +65,17 @@ behaves like the rest of the desktop rather than like a browser in a window.
   can have coins on any of them, and watching four costs no more bandwidth than
   watching one. A wallet created here derives taproot and native segwit, since
   it has no history on the others and nothing sends to them by preference.
+- **Watching a path and receiving on one are different questions.** A legacy
+  address is watched so that money already there is found and can be spent, and
+  is never handed out: a `1…` input carries its whole signature into the
+  transaction's weight, so every coin received there costs more to move for as
+  long as it exists. Native segwit is what the receive screen offers first,
+  because `bc1q` is refused by nothing; taproot is one row down.
+- **Search other derivation paths**, for when a wallet's recovery phrase has
+  been used somewhere else and money is sitting where Sieve is not looking.
+  Derives the missing accounts and scans again from the birthday — which is the
+  honest answer to "my coins are missing", rather than a balance that quietly
+  omits them.
 - Activity filterable by derivation path, with the full path shown on every
   address and output: `m/86'/0'/0'/1/7`.
 - **Labels** on payments and addresses, stored in BIP-329's format so they can
@@ -86,6 +97,16 @@ behaves like the rest of the desktop rather than like a browser in a window.
 - Signing on the device is **not built yet**; see below.
 
 **Keys**
+- The recovery phrase's randomness comes from the operating system —
+  `getrandom(2)`, the same call that seals the vault — and the screen that shows
+  you the words says so, with the number of bits they carry.
+- **Roll your own randomness**, optionally: 50 to 100 throws of a die from a d6
+  to a d20, *mixed into* the system's entropy rather than replacing it. It can
+  only add — no roll count and no loaded die can make a phrase weaker than the
+  one Sieve would have made alone. That matters because the way seed generation
+  actually fails is a wiring mistake nobody can see: a build flag sent five
+  years of Coldcards to a deterministic PRNG, and the seeds that survived the
+  resulting theft were the ones with dice in them. See `DICE.md`.
 - The seed is sealed with XChaCha20-Poly1305 under a key derived from your
   password with Argon2id (256 MiB, 3 passes, 4 lanes) and is decrypted only at
   the moment of signing — never held open while the wallet is on screen.
@@ -177,10 +198,12 @@ Then unplug the device and plug it in again.
 | `PACKAGING.md` | how this reaches other people's machines |
 | `PSBT.md` | air-gapped signing, designed and not built |
 | `SILENT_PAYMENTS.md` | why sending is buildable and receiving is not |
+| `DICE.md` | entropy of your own: why it is mixed in and never substituted |
+| `NOTIFICATIONS.md` | why there are none, and what it would take |
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh
-cargo test          # 131 tests, needing no network and no display
+cargo test          # 186 tests, needing no network and no display
 cargo fmt --check
 cargo clippy -- -D warnings
 ```

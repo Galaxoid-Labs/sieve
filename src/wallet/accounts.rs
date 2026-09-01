@@ -56,6 +56,23 @@ pub enum ScriptType {
 impl ScriptType {
     /// Every path a restore should open, oldest first so the list reads the way
     /// the ecosystem grew.
+    /// Whether Sieve will hand out a *new* address on this path.
+    ///
+    /// Legacy never. A `1…` input carries its whole signature into the
+    /// transaction's weight with no segwit discount, so every coin received
+    /// there costs more to move for as long as it exists; and a legacy output
+    /// is now unusual enough on chain to be worth a second look, which is the
+    /// opposite of what this wallet is for.
+    ///
+    /// **Watching and handing out are separate questions.** An imported seed
+    /// still watches BIP44, because money already sitting there has to be found
+    /// and spent — refusing to look would be losing it. This is only the other
+    /// question, and on that one there is no reason to say yes: nobody needs a
+    /// fresh legacy address in 2026.
+    pub fn can_receive(self) -> bool {
+        !matches!(self, ScriptType::Legacy)
+    }
+
     pub const ALL: [ScriptType; 4] = [
         ScriptType::Legacy,
         ScriptType::NestedSegwit,
