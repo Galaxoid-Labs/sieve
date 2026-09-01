@@ -185,12 +185,17 @@ with its own data directory, a port Tor picks, and `__OwningControllerProcess` s
 Sieve dies without stopping it. The binary is looked for at `$SIEVE_TOR`, then beside the
 executable — which is where `packaging/com.galaxoidlabs.Sieve.yml` puts it — then on `PATH`.
 
-That last part is why the Flatpak manifest exists: it builds Tor from source into
-`/app/bin/tor`, so someone who has never installed Tor gets it. A development build has no such
-neighbour until `scripts/fetch-tor.sh` puts the official Expert Bundle in `target/<profile>/tor/`
-— run it once, or the switch in preferences correctly refuses because there is nothing to
-start. A Tor that ships its own libevent and OpenSSL needs `LD_LIBRARY_PATH` pointed at them,
-which `daemon::ensure` does when it sees them beside the binary. Sparrow ships Tor binaries,
+**Nothing puts a binary beside the executable any more.** That step in the lookup order still
+works and stays; what has gone is anything that used it. It was there for a Flatpak that builds
+Tor into `/app/bin/tor`, and the plan is native packages and no Flatpak — so
+`packaging/com.galaxoidlabs.Sieve.yml` and `scripts/fetch-tor.sh` are dead, kept only until the
+AUR package is proven because they are the sole record of how to bundle Tor.
+`scripts/fetch-tor.sh` is still how a development machine without a distribution `tor` gets
+one, which is why `daemon.rs` names it. What is left is the ordinary case and it is enough:
+`find` looks on `PATH`, so a distribution's own `tor` package is all anybody needs, and a
+development machine with `tor` installed behaves exactly like a packaged one. A Tor that ships
+its own libevent and OpenSSL still needs `LD_LIBRARY_PATH` pointed at them, which
+`daemon::ensure` does when it sees them beside the binary. Sparrow ships Tor binaries,
 Wasabi falls back to a bundled copy, Feather bundles it too; expecting the user to install a
 daemon is what Bitcoin Core and Electrum do, and a node is not a wallet. Embedding
 [arti](https://tpo.pages.torproject.net/core/doc/rust/arti_client/) instead is possible but
@@ -292,9 +297,13 @@ filters at 3–4 GB and hours. The expensive phase is the one resume already pro
 
 bip157 0.6.3 accepts a `data_dir` and ignores it — `Node::new` destructures the config as
 `data_path: _` and the field is read nowhere else. So block headers live in memory only, and
-without help they are re-fetched on every launch and by every wallet. `wallet::headers` above
-is that help: `ChainState::Snapshot` is the supported way to hand a node a chain, so the
-persistence is ours while the gap lasts.
+without help they are re-fetched on every launch and by every wallet.
+
+**There is no help, and the attempt to write some was removed.** A store that wrote, merged,
+validated and loaded 900,000 headers did nothing at all, because `build_with_wallets` sets its
+own chain state one line before it builds and discards any snapshot handed to the builder. See
+"Where a restart begins" above; the note lives in `node.rs` where somebody would otherwise try
+it again.
 
 The impact is smaller than it sounds. `ScanType::Sync` starts the node's chain at the
 *wallet's* checkpoint, which BDK does persist, walked back 7 blocks for reorg safety — so a
@@ -437,17 +446,44 @@ and tinting a logo that is already orange would say nothing.
 
 ```
 src/
-  main.rs            app ID, process hardening, RelmApp bootstrap
-  app.rs             root component: adw::ApplicationWindow + ToolbarView + screen stack
+  main.rs            app ID, process hardening, the stylesheet, RelmApp bootstrap
+  app.rs             root component: the window, the session, preferences, locking, Tor
+  about.rs           the About window, with per-component licences
+  fees.rs            fee rates from mempool.space, when that is switched on
+  hardware.rs        USB signers over async-hwi. Reads only; no signing yet
+  palette.rs         the desktop's accent, and Omarchy's whole palette
+  peers.rs           peers that served filters last time
+  price.rs           a price from Bitfinex, when that is switched on
+  settings.rs        preferences on disk
   ui/
-    unlock.rs        passphrase entry; Argon2 off-thread via spawn_oneshot_command
-    wallet_page.rs   placeholder for the unlocked view
+    onboarding.rs    make a wallet: password, phrase, dice, verification
+    restore.rs       import one: phrase, key, descriptor, device
+    unlock.rs        the wallet *password*; Argon2 off-thread via spawn_oneshot_command
+    wallet_page.rs   the unlocked wallet: activity, receive, send, preferences
+    send.rs          the send form, coin control, the confirmation
+    reveal.rs        showing the phrase again, behind the password
+    chooser.rs       the wallet list
+    browser.rs       opening a link in the system browser
+    qr.rs            drawing a receive code
+  tor/
+    mod.rs           the SOCKS5 client, and proving the proxy is Tor
+    daemon.rs        finding, starting and adopting a tor process
+    onion.rs         encoding and decoding onion addresses
   vault/
     mod.rs           sealed seed file: Argon2id KEK wraps a random DEK, XChaCha20-Poly1305
     atomic.rs        crash-safe write: tmp -> fsync -> rename -> fsync dir
   wallet/
-    mod.rs           BDK + bdk_kyoto. No GTK types here, ever.
+    mod.rs           create, unlock, rescan, derivation paths. No GTK types here, ever
+    accounts.rs      ScriptType, one BDK wallet per path, the portfolio
+    node.rs          bdk_kyoto: filters, progress, peers, broadcast
+    send.rs          building, signing and bumping transactions
+    watch.rs         reading a pasted descriptor or xpub
+    labels.rs        BIP-329 labels beside the wallet
+    uri.rs           BIP-21 payment requests
 ```
+
+`wallet_page.rs`, `app.rs` and `wallet/mod.rs` are the three largest files by a
+distance. Nothing here is a placeholder any more.
 
 ## Vault format
 
@@ -479,11 +515,22 @@ even in dev builds. Do not remove those profile overrides.
 ## Commands
 
 ```sh
-cargo run                       # launch
-cargo test                      # vault round-trip and tamper tests
+cargo run                        # launch
+cargo test                       # 186 tests; no network, no display
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging
 GTK_DEBUG=interactive cargo run  # widget inspector
+
+# Slow ones, opted into by name:
+cargo test --release -- --ignored --nocapture kdf_cost
+cargo test --release -- --ignored --nocapture repeated_words
 ```
+
+The last measures how often a generated phrase repeats a word, against what the birthday
+arithmetic predicts. A repeat is normal — about one 12-word phrase in 31 — and it is also what
+a broken entropy path would look like, which is why the rate is measured rather than assumed.
+Run it after anything touches how entropy reaches BDK.
 
 ## Relm4 usage
 
@@ -492,9 +539,16 @@ factories, Adwaita patterns). Consult it rather than guessing at macro syntax.
 
 ## Not yet built
 
-The primary menu, and a BIP-39 passphrase option when creating a wallet (import has one;
-creation passes `None`) or when signing with a wallet that was imported with one.
+**Signing on a hardware device**, which is the whole of M4a and the largest hole: a
+device-imported wallet can receive and build a payment and cannot spend one. PSBT export and
+import as files does not exist either, so there is no air-gapped path at all — `PSBT.md` has
+the design.
 
+**Packages.** No `.deb`, `.rpm` or AUR package has been published, and the signing key is not
+made. `PACKAGING.md` has the plan and `ROADMAP.md` M8 the order.
 
-The full milestone plan (M0–M8, with the decisions that gate M1 and the mainnet gate at M8) is in
-`ROADMAP.md`.
+Smaller, and each with a note of its own: silent payments (`SILENT_PAYMENTS.md`, sending is
+buildable and receiving is not), desktop notifications (`NOTIFICATIONS.md`, deliberately
+deferred), coin freezing, and reading a BIP-21 request from a camera.
+
+The full milestone plan (M0–M8) is in `ROADMAP.md`.
