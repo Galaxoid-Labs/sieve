@@ -170,6 +170,14 @@ Then, in rough order:
   (`m/84'/0'/0'/1/7`), read from the descriptor's origin rather than assumed.
 - **Review payment is disabled until the form describes a payment**, with a tooltip saying
   what is still missing, rather than being pressable and answering with an error.
+- **Continue on the wallet-creation form gets the same treatment**, and finding the rule
+  worth writing down once turned up a bug behind it. `what_is_missing` takes seven booleans
+  rather than the text — so no password leaves the widget holding it to be judged — and both
+  the button and the handler behind it read that one function, which is what stops them
+  drifting. The bug: an empty passphrase with the switch on was *not* refused, whatever the
+  line above about it says. Two empty fields match, so comparing them never caught it, and
+  the wallet quietly derived from a passphrase that was absent rather than the `""` somebody
+  had just asked for. The switch decides now, not the field.
 - **The welcome-screen preview is gone**, and with it the last thing in the UI that was there
   for the person building Sieve rather than the person using it. The whole chain went —
   the menu button, `WalletPageMsg`/`WalletPageOutput::ShowWelcome`, `AppMsg::PreviewWelcome`

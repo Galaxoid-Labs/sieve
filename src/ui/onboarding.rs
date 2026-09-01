@@ -132,6 +132,10 @@ pub struct Setup {
     /// The BIP-39 passphrase, empty when none was asked for.
     pub passphrase: Secret,
     pub passphrase_confirm: Secret,
+    /// Whether the switch asking for a passphrase is on. The switch decides and
+    /// the field does not: an expander left on with nothing typed is refused,
+    /// rather than silently deriving the wallet that has no passphrase.
+    pub passphrase_wanted: bool,
     pub length: wallet::PhraseLength,
     pub network: bdk_wallet::bitcoin::Network,
     /// Whether the warning against putting real money in unreviewed software
@@ -244,6 +248,60 @@ fn phrase_warning(words: usize, passphrase: bool) -> String {
              Write them on paper. Anyone who has both can spend your coins."
         ),
     }
+}
+
+/// The shortest wallet password Sieve will seal a vault with.
+///
+/// One constant, read by both the Continue button and the handler behind it. Two
+/// copies of this number would eventually disagree, and the failure would be a
+/// button that refuses to light for a password the handler would have taken.
+const MIN_PASSWORD: usize = 8;
+
+/// The setup form reduced to what decides whether it is finished.
+///
+/// Booleans rather than the text itself, for two reasons: the rule can be checked
+/// without a display, and no password has to leave the widget holding it to be
+/// judged. `Debug` is derived here precisely because nothing in it is a secret —
+/// which is only true because it holds answers rather than inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FormState {
+    password_long_enough: bool,
+    passwords_match: bool,
+    mainnet: bool,
+    acknowledged: bool,
+    passphrase_wanted: bool,
+    passphrase_typed: bool,
+    passphrases_match: bool,
+}
+
+/// What still has to be done before a wallet can be made, or `None` when nothing
+/// does.
+///
+/// Named in form order rather than in order of severity, because it is read as a
+/// tooltip on a button somebody is looking at: the useful answer is the next thing
+/// to do, and the next thing is the one nearest the top of the screen. A disabled
+/// button that does not say why is worse than one that answers with an error.
+fn what_is_missing(form: FormState) -> Option<&'static str> {
+    if !form.password_long_enough {
+        return Some("Use a password of at least 8 characters.");
+    }
+    if !form.passwords_match {
+        return Some("The two passwords do not match.");
+    }
+    if form.mainnet && !form.acknowledged {
+        return Some("Switch on the acknowledgement to make a wallet on bitcoin.");
+    }
+    // The switch is what asks for a passphrase, so the switch is what has to be
+    // answered. Left on and empty this would seal the no-passphrase wallet, and
+    // nothing afterwards would ever say that is what happened — BIP-39 derives a
+    // different seed for "" than for absent, and both look like a working wallet.
+    if form.passphrase_wanted && !form.passphrase_typed {
+        return Some("Type the passphrase, or switch it off.");
+    }
+    if form.passphrase_wanted && !form.passphrases_match {
+        return Some("The two passphrases do not match.");
+    }
+    None
 }
 
 /// Where the words came from, said under them.
@@ -525,11 +583,17 @@ impl Component for Onboarding {
                                 },
                             },
 
+                            #[name(continue_button)]
                             gtk::Button {
                                 add_css_class: "suggested-action",
                                 add_css_class: "pill",
                                 set_halign: gtk::Align::Center,
                                 set_label: "Continue",
+                                // Sensitivity is wired in `init`: seven controls
+                                // share one rule, and reading them there keeps
+                                // every password out of the model and out of
+                                // every message.
+                                set_sensitive: false,
                                 connect_clicked[
                                     sender, pass_row, confirm_row, name_row, length_row,
                                     passphrase_expander, passphrase_row, passphrase_confirm_row,
@@ -556,6 +620,7 @@ impl Component for Onboarding {
                                         name: name_row.text().to_string(),
                                         passphrase: text(&passphrase_row),
                                         passphrase_confirm: text(&passphrase_confirm_row),
+                                        passphrase_wanted: wanted,
                                         length: if length_row.selected() == 1 {
                                             wallet::PhraseLength::TwentyFour
                                         } else {
@@ -747,6 +812,71 @@ impl Component for Onboarding {
         };
         let word_grid = model.words.widget();
         let widgets = view_output!();
+
+        // Continue answers for the whole form, so every control on the form has
+        // to re-ask it. Wired here rather than in the view because one rule is
+        // shared by seven signals, and because reading the rows straight keeps
+        // the passwords where they were typed: what reaches `what_is_missing` is
+        // a handful of booleans, and nothing crosses a message boundary at all.
+        let refresh = {
+            let button = widgets.continue_button.clone();
+            let pass = widgets.pass_row.clone();
+            let confirm = widgets.confirm_row.clone();
+            let network = widgets.network_row.clone();
+            let acknowledge = widgets.acknowledge_row.clone();
+            let expander = widgets.passphrase_expander.clone();
+            let phrase = widgets.passphrase_row.clone();
+            let phrase_confirm = widgets.passphrase_confirm_row.clone();
+            std::rc::Rc::new(move || {
+                // An unexpanded row keeps whatever was typed before it was
+                // switched off, so the switch decides whether there is a
+                // passphrase at all — exactly as the Continue handler reads it.
+                let wanted = expander.enables_expansion();
+                let missing = what_is_missing(FormState {
+                    password_long_enough: pass.text().len() >= MIN_PASSWORD,
+                    passwords_match: pass.text() == confirm.text(),
+                    mainnet: NETWORKS[(network.selected() as usize).min(1)]
+                        == bdk_wallet::bitcoin::Network::Bitcoin,
+                    acknowledged: acknowledge.is_active(),
+                    passphrase_wanted: wanted,
+                    passphrase_typed: !phrase.text().is_empty(),
+                    passphrases_match: phrase.text() == phrase_confirm.text(),
+                });
+                button.set_sensitive(missing.is_none());
+                button.set_tooltip_text(missing);
+            })
+        };
+
+        for row in [
+            &widgets.pass_row,
+            &widgets.confirm_row,
+            &widgets.passphrase_row,
+            &widgets.passphrase_confirm_row,
+        ] {
+            let refresh = refresh.clone();
+            row.connect_changed(move |_| refresh());
+        }
+        {
+            let refresh = refresh.clone();
+            widgets
+                .acknowledge_row
+                .connect_active_notify(move |_| refresh());
+        }
+        {
+            let refresh = refresh.clone();
+            widgets
+                .passphrase_expander
+                .connect_enable_expansion_notify(move |_| refresh());
+        }
+        {
+            let refresh = refresh.clone();
+            widgets
+                .network_row
+                .connect_selected_notify(move |_| refresh());
+        }
+        // The starting state, which is "nothing typed yet" and so not ready.
+        refresh();
+
         ComponentParts { model, widgets }
     }
 
@@ -778,36 +908,34 @@ impl Component for Onboarding {
             }
 
             OnboardingMsg::Configured(setup) => {
-                // Real money in software nobody has reviewed is a decision,
-                // and it is made here rather than discovered later.
-                if setup.network == bdk_wallet::bitcoin::Network::Bitcoin && !setup.acknowledged {
-                    self.error =
-                        Some("Switch on the acknowledgement to make a wallet on bitcoin.".into());
+                // The same rule the Continue button is disabled by, asked
+                // again. The button should already have made this unreachable;
+                // it stays because a form guarded only by the sensitivity of
+                // the widget that submits it is guarded by the view, and this
+                // decides whether a vault gets sealed.
+                //
+                // No minimum and no rules for the passphrase itself: every byte
+                // of a BIP-39 passphrase is part of the key, so any string is a
+                // valid one. All that can be checked is that it was typed the
+                // same way twice, and that one was typed at all.
+                let wanted = setup.passphrase_wanted;
+                if let Some(missing) = what_is_missing(FormState {
+                    password_long_enough: setup.password.0.len() >= MIN_PASSWORD,
+                    passwords_match: *setup.password.0 == *setup.confirm.0,
+                    mainnet: setup.network == bdk_wallet::bitcoin::Network::Bitcoin,
+                    acknowledged: setup.acknowledged,
+                    passphrase_wanted: wanted,
+                    passphrase_typed: !setup.passphrase.0.is_empty(),
+                    passphrases_match: *setup.passphrase.0 == *setup.passphrase_confirm.0,
+                }) {
+                    self.error = Some(missing.into());
                     return;
                 }
-                if setup.password.0.len() < 8 {
-                    self.error = Some("Use at least 8 characters.".into());
-                    return;
-                }
-                if *setup.password.0 != *setup.confirm.0 {
-                    self.error = Some("The two passwords do not match.".into());
-                    return;
-                }
-                // No minimum and no rules: every byte of a BIP-39 passphrase
-                // is part of the key, so any string is a valid one. Only that
-                // it was typed the same way twice can be checked — and an
-                // empty one asked for is a mistake worth catching, since it
-                // would derive the no-passphrase wallet and nothing would say
-                // so.
-                if !setup.passphrase.0.is_empty() || !setup.passphrase_confirm.0.is_empty() {
-                    if *setup.passphrase.0 != *setup.passphrase_confirm.0 {
-                        self.error = Some("The two passphrases do not match.".into());
-                        return;
-                    }
-                    self.passphrase = Some(setup.passphrase.0.clone());
-                } else {
-                    self.passphrase = None;
-                }
+                // The switch decides, not the field: an empty passphrase asked
+                // for is refused above rather than quietly meaning "none",
+                // since BIP-39 derives a different seed for "" than for absent
+                // and both look like a perfectly good wallet afterwards.
+                self.passphrase = wanted.then(|| setup.passphrase.0.clone());
                 self.length = setup.length;
                 self.network = setup.network;
                 match wallet::generate_mnemonic(setup.length) {
@@ -1049,6 +1177,115 @@ mod tests {
             let note = entropy_note(words);
             assert!(note.contains("operating system"), "{note}");
         }
+    }
+
+    /// A form with nothing wrong with it.
+    fn ready() -> FormState {
+        FormState {
+            password_long_enough: true,
+            passwords_match: true,
+            mainnet: true,
+            acknowledged: true,
+            passphrase_wanted: false,
+            passphrase_typed: false,
+            passphrases_match: true,
+        }
+    }
+
+    #[test]
+    fn a_finished_form_is_finished() {
+        assert_eq!(what_is_missing(ready()), None);
+        // And on a test network, where there is nothing to acknowledge.
+        let signet = FormState {
+            mainnet: false,
+            acknowledged: false,
+            ..ready()
+        };
+        assert_eq!(what_is_missing(signet), None);
+    }
+
+    #[test]
+    fn every_unfinished_form_says_what_is_left() {
+        for (name, form) in [
+            (
+                "short password",
+                FormState {
+                    password_long_enough: false,
+                    ..ready()
+                },
+            ),
+            (
+                "mismatched passwords",
+                FormState {
+                    passwords_match: false,
+                    ..ready()
+                },
+            ),
+            (
+                "unacknowledged mainnet",
+                FormState {
+                    acknowledged: false,
+                    ..ready()
+                },
+            ),
+            (
+                "mismatched passphrases",
+                FormState {
+                    passphrase_wanted: true,
+                    passphrase_typed: true,
+                    passphrases_match: false,
+                    ..ready()
+                },
+            ),
+        ] {
+            assert!(
+                what_is_missing(form).is_some(),
+                "{name} was allowed through"
+            );
+        }
+    }
+
+    /// The switch is what asks for a passphrase, so the switch is what has to be
+    /// answered. Left on with nothing typed, this used to fall through to "no
+    /// passphrase" — a wallet derived from `""`-as-absent rather than the one the
+    /// person switching it on was asking for, with nothing afterwards to say so.
+    /// `ROADMAP.md` claimed it was refused; it was not.
+    #[test]
+    fn a_passphrase_asked_for_and_not_typed_is_refused() {
+        let empty = FormState {
+            passphrase_wanted: true,
+            passphrase_typed: false,
+            // Two empty fields do match, which is exactly why matching alone
+            // never caught this.
+            passphrases_match: true,
+            ..ready()
+        };
+        assert!(what_is_missing(empty).is_some());
+
+        // And with the switch off, the same two empty fields are fine: not
+        // wanting a passphrase is an answer.
+        let unwanted = FormState {
+            passphrase_wanted: false,
+            ..empty
+        };
+        assert_eq!(what_is_missing(unwanted), None);
+    }
+
+    /// The tooltip is read off a button somebody is looking at, so the first
+    /// thing it names should be the first thing on the screen.
+    #[test]
+    fn what_is_missing_is_reported_in_form_order() {
+        let nothing_done = FormState {
+            password_long_enough: false,
+            passwords_match: false,
+            acknowledged: false,
+            ..ready()
+        };
+        assert_eq!(
+            what_is_missing(nothing_done),
+            Some("Use a password of at least 8 characters."),
+            "the password is above the acknowledgement on the screen"
+        );
     }
 
     #[test]
