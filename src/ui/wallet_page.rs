@@ -37,6 +37,14 @@ pub enum WalletPageOutput {
     SaveUnsigned(Box<crate::wallet::send::Plan>),
     /// Sign it on the device this wallet came from, then broadcast.
     SignOnDevice(Box<crate::wallet::send::Plan>),
+    /// Show a receive address on the device's own screen, so the two can be
+    /// compared. Sieve never reports the result: it cannot see the device's
+    /// screen, and a tick it drew itself would be exactly the reassurance
+    /// the attack this defends against needs.
+    VerifyAddress {
+        path: crate::wallet::accounts::ScriptType,
+        index: u32,
+    },
     /// Announce an unconfirmed transaction to another peer.
     Rebroadcast {
         txid: String,
@@ -621,10 +629,17 @@ pub struct WalletPage {
     /// connection to some peers, so the two numbers differ and saying only the
     /// first invites the reader to count the list and find it wrong.
     distinct_peers: usize,
+    /// The device this wallet was imported from, which decides whether an
+    /// address can be checked against one.
+    device: Option<crate::hardware::Kind>,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
-    fresh_address: Option<String>,
+    ///
+    /// Carries its index, because verifying an address on a device asks for it
+    /// by index — and the freshly revealed one is not always the summary's
+    /// next unused one.
+    fresh_address: Option<(String, u32)>,
 }
 
 #[derive(Debug)]
@@ -687,6 +702,8 @@ pub enum WalletPageMsg {
     SignOnDevice(Box<crate::wallet::send::Plan>),
     /// Which device this wallet was imported from, if any.
     SetDevice(Option<crate::hardware::Kind>),
+    /// Ask the device to show the receive address on its own screen.
+    VerifyAddress,
     /// Name a payment just made, from what its request called itself.
     NameTransaction {
         txid: String,
@@ -743,7 +760,7 @@ pub enum WalletPageMsg {
     /// Open the detail sheet for one transaction.
     ShowTransaction(String),
     /// The freshly revealed address came back.
-    ShowFreshAddress(String),
+    ShowFreshAddress(String, u32),
     /// Clear everything that belonged to a different wallet.
     Reset,
     SetLocked(bool),
@@ -766,7 +783,7 @@ impl WalletPage {
     /// The address for the selected path, falling back to the wallet's primary
     /// one when there is no breakdown to choose from.
     fn address(&self) -> String {
-        if let Some(fresh) = &self.fresh_address {
+        if let Some((fresh, _)) = &self.fresh_address {
             return fresh.clone();
         }
         let Some(summary) = &self.summary else {
@@ -1920,6 +1937,23 @@ impl Component for WalletPage {
                                     ),
                                     connect_clicked => WalletPageMsg::NewAddress,
                                 },
+
+                                // The one check this screen cannot make for
+                                // itself. Sieve computes this address and
+                                // draws it; software that has got onto the
+                                // machine can do both differently. A device
+                                // derives its own copy and shows it on a
+                                // screen this computer cannot paint.
+                                gtk::Button {
+                                    add_css_class: "pill",
+                                    set_label: "Verify on device",
+                                    set_tooltip_text: Some(
+                                        "Show this address on the device and compare the two"
+                                    ),
+                                    #[watch]
+                                    set_visible: model.device.is_some(),
+                                    connect_clicked => WalletPageMsg::VerifyAddress,
+                                },
                             },
 
                             // Naming the address before handing it out is what
@@ -2349,6 +2383,7 @@ impl Component for WalletPage {
             receive_index: 0,
             receive_path: None,
             fresh_address: None,
+            device: None,
             summary: None,
             progress: Progress::Connecting,
             peers: None,
@@ -2477,8 +2512,8 @@ impl Component for WalletPage {
                     let _ = sender.output(WalletPageOutput::NewAddress(account.script_type));
                 }
             }
-            WalletPageMsg::ShowFreshAddress(address) => {
-                self.fresh_address = Some(address);
+            WalletPageMsg::ShowFreshAddress(address, index) => {
+                self.fresh_address = Some((address, index));
                 // A brand new address has no name yet, and the field must not
                 // keep showing the last one's.
                 self.refresh_address_label();
@@ -2647,7 +2682,30 @@ impl Component for WalletPage {
                 }
             }
 
-            WalletPageMsg::SetDevice(kind) => self.send.emit(SendMsg::SetDevice(kind)),
+            WalletPageMsg::SetDevice(kind) => {
+                self.device = kind;
+                self.send.emit(SendMsg::SetDevice(kind));
+            }
+
+            WalletPageMsg::VerifyAddress => {
+                // The index of the address actually on screen, which is the
+                // freshly revealed one when there is one and the next unused
+                // otherwise. Asking the device for a different index would
+                // show a mismatch on a perfectly good address.
+                let Some(path) = self.receive_path.or_else(|| self.default_receive_path()) else {
+                    return;
+                };
+                let index = match &self.fresh_address {
+                    Some((_, index)) => Some(*index),
+                    None => self
+                        .summary
+                        .as_ref()
+                        .and_then(|s| s.accounts.iter().find(|a| a.script_type == path))
+                        .map(|a| a.next_index),
+                };
+                let Some(index) = index else { return };
+                let _ = sender.output(WalletPageOutput::VerifyAddress { path, index });
+            }
 
             WalletPageMsg::SetWatchOnly(watch_only) => {
                 // Kept here too: the transaction page offers to replace a

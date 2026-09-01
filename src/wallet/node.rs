@@ -518,10 +518,18 @@ impl Session {
     /// which is correct for a single payer but links two payers who are each
     /// given it. This advances the keychain so a second payer gets a different
     /// address, and persists the reveal so the new script is watched.
+    /// Hand out the next address on a path, and say where it sits.
+    ///
+    /// The index travels with it because it is not always the same as the
+    /// summary's: revealing several addresses without using them leaves
+    /// `next_unused_address` pointing at the *first* unused one while this
+    /// returns the *last* revealed. A device asked to show "the same address"
+    /// is asked by index, so carrying the wrong one would report a mismatch on
+    /// an address that is perfectly correct.
     pub async fn reveal_next(
         &self,
         script_type: super::accounts::ScriptType,
-    ) -> Result<(String, Summary)> {
+    ) -> Result<(String, u32, Summary)> {
         let mut portfolio = self.portfolio.lock().await;
         let address = {
             let account = portfolio
@@ -533,11 +541,11 @@ impl Session {
                 .wallet
                 .reveal_next_address(bdk_wallet::KeychainKind::External);
             account.persist()?;
-            revealed.address.to_string()
+            (revealed.address.to_string(), revealed.index)
         };
 
         let summary = Summary::from_portfolio(&mut portfolio)?;
-        Ok((address, summary))
+        Ok((address.0, address.1, summary))
     }
 
     /// Rebuild an unconfirmed payment at a higher fee.

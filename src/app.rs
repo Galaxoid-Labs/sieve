@@ -404,6 +404,11 @@ pub enum AppMsg {
     SaveUnsigned(Box<wallet::send::Plan>),
     /// Hand the payment to the device this wallet came from, then broadcast.
     SignOnDevice(Box<wallet::send::Plan>),
+    /// Ask the device to show a receive address on its own screen.
+    VerifyAddress {
+        path: wallet::accounts::ScriptType,
+        index: u32,
+    },
     /// Write it there.
     WriteUnsigned {
         plan: Box<wallet::send::Plan>,
@@ -548,7 +553,7 @@ pub enum AppCmd {
     },
     Revealed {
         generation: u64,
-        result: Result<(String, Summary), String>,
+        result: Result<(String, u32, Summary), String>,
     },
     Chain {
         generation: u64,
@@ -562,6 +567,9 @@ pub enum AppCmd {
     Rescanned(Result<(), String>),
     /// Which paths were added, or why none were.
     PathsAdded(Result<Vec<wallet::accounts::ScriptType>, String>),
+    /// The device was asked to show an address. Success says only that it was
+    /// asked — what it displayed is between the device and the person.
+    AddressShown(Result<(), String>),
     /// A replacement was built, or could not be.
     PlannedBump(Result<Box<crate::wallet::send::Plan>, String>),
     /// Time to ask whether the wallet has been left alone long enough.
@@ -699,6 +707,9 @@ impl Component for App {
                     }
                     crate::ui::wallet_page::WalletPageOutput::SignOnDevice(plan) => {
                         AppMsg::SignOnDevice(plan)
+                    }
+                    crate::ui::wallet_page::WalletPageOutput::VerifyAddress { path, index } => {
+                        AppMsg::VerifyAddress { path, index }
                     }
                     crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
                     crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
@@ -1424,6 +1435,48 @@ impl Component for App {
                         chosen(file)
                     });
                 }
+            }
+
+            AppMsg::VerifyAddress { path, index } => {
+                let (Some(session), Some(paths)) = (self.session.clone(), self.active.clone())
+                else {
+                    return;
+                };
+                let Some(meta) = wallet::Meta::load(&paths) else {
+                    return;
+                };
+                let Some(kind) = meta
+                    .device_kind
+                    .as_deref()
+                    .and_then(crate::hardware::Kind::from_label)
+                else {
+                    return;
+                };
+                let network = meta.network();
+
+                // Said before, not after. Sieve cannot see the device's screen,
+                // so it has nothing to report when this returns — and a tick it
+                // drew itself would be exactly the reassurance the attack this
+                // defends against needs. The instruction is the whole message.
+                self.wallet.emit(WalletPageMsg::Toast(
+                    "Compare the address on your device with the one here".into(),
+                ));
+
+                sender.oneshot_command(async move {
+                    let policy = match session.device_policy(path).await {
+                        Ok(policy) => policy,
+                        Err(e) => return AppCmd::AddressShown(Err(e.to_string())),
+                    };
+                    let account = match crate::hardware::account_path(path, network) {
+                        Ok(account) => account,
+                        Err(e) => return AppCmd::AddressShown(Err(e.to_string())),
+                    };
+                    AppCmd::AddressShown(
+                        crate::hardware::show_address(kind, &policy, path, &account, index, false)
+                            .await
+                            .map_err(|e| e.to_string()),
+                    )
+                });
             }
 
             AppMsg::SignOnDevice(plan) => {
@@ -2438,6 +2491,15 @@ impl Component for App {
                 tracing::info!("chain data cleared; scanning again from the birthday");
                 self.start_session(&sender);
             }
+            AppCmd::AddressShown(Ok(())) => {
+                tracing::info!("asked the device to show an address");
+            }
+            AppCmd::AddressShown(Err(message)) => {
+                tracing::error!(%message, "could not show the address on the device");
+                self.wallet
+                    .emit(WalletPageMsg::Toast(crate::ui::send::capitalise(&message)));
+            }
+
             AppCmd::PathsAdded(Ok(added)) => {
                 let names: Vec<&str> = added.iter().map(|s| s.label()).collect();
                 tracing::info!(paths = ?names, "started watching new derivation paths");
@@ -2715,10 +2777,11 @@ impl Component for App {
             }
             AppCmd::Revealed {
                 generation,
-                result: Ok((address, summary)),
+                result: Ok((address, index, summary)),
             } if self.current(generation) => {
                 self.wallet.emit(WalletPageMsg::Show(summary));
-                self.wallet.emit(WalletPageMsg::ShowFreshAddress(address));
+                self.wallet
+                    .emit(WalletPageMsg::ShowFreshAddress(address, index));
             }
             AppCmd::Priced(Ok(price)) => {
                 tracing::debug!(usd = price.usd, "price fetched");

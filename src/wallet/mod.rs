@@ -632,6 +632,13 @@ pub struct AccountSummary {
     pub balance_sats: u64,
     pub pending_sats: u64,
     pub next_address: String,
+    /// Where `next_address` sits on the receive chain.
+    ///
+    /// Carried because a device asked to show "the same address" is asked by
+    /// index, not by the address itself — it derives its own copy, which is the
+    /// entire point. An index that did not match what is on screen would
+    /// produce a mismatch on a perfectly good address.
+    pub next_index: u32,
 }
 
 /// One spendable coin, as the coin picker needs it.
@@ -815,6 +822,7 @@ impl Summary {
                 balance_sats: balance.confirmed.to_sat(),
                 pending_sats: (balance.trusted_pending + balance.untrusted_pending).to_sat(),
                 next_address: address.address.to_string(),
+                next_index: address.index,
             };
             account.persist()?;
 

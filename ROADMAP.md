@@ -448,13 +448,24 @@ Left to build:
         than believed.
 - [ ] **Exercise signing against a real device.** Everything above is written and none of it
       has met hardware.
-- [ ] **Verify address on device** — `display_address`. `AddressScript::P2TR(path)` works on a
-      Ledger with no setup, so taproot wallets could have it immediately. The other three paths
-      go through `AddressScript::Miniscript { index, change }`, which the device only answers
-      for a **registered** wallet policy.
-- [ ] **Wallet policy registration**, which the previous item needs: a one-time on-device
-      confirmation that returns an HMAC, stored per wallet in `Meta`. It is also what lets a
-      Ledger recognise its own change outputs when signing a non-taproot payment.
+- [x] **Verify address on device**, on the receive screen, for all four paths — and **not**
+      only taproot. This entry used to say the other three needed a registered wallet policy,
+      which was the same mistake the signing entry made: `display_address`'s Miniscript arm
+      needs a policy to be *set*, and passes `hmac.as_ref()`, so the default policy signing
+      already uses answers here too. Taproot keeps its own simpler road, which needs no policy
+      at all.
+      - **Asked for by index, and the right index matters.** Revealing several addresses
+        without using them leaves the summary's "next unused" pointing somewhere else than the
+        last revealed one, so the index travels with the address rather than being looked up
+        again.
+      - **Sieve never reports "verified".** It cannot see the device's screen, and a tick it
+        drew itself would be exactly the reassurance the attack this defends against needs.
+        The instruction is the whole message, and it is said before rather than after.
+      - **Untested against real hardware**, like the signing beside it.
+- **Not needed after all: wallet policy registration.** It was on this list because verifying
+  an address and signing were both thought to require it. Neither does — both take the default
+  policy. Registration is for multisig and custom miniscript, so it belongs to that milestone
+  rather than this one.
 - [ ] **Record the device fingerprint in `Meta`**, so signing can refuse a device that is not
       the one this wallet was imported from instead of producing signatures that do not verify.
 - [x] **PSBT export**, on a watch-only wallet only, where it replaces Send. BIP-174 binary

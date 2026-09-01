@@ -385,6 +385,55 @@ pub async fn sign(
     Ok(())
 }
 
+/// Show an address on the device's own screen, so it can be compared.
+///
+/// **What this defends against.** A receive address is computed from descriptors
+/// held on this machine and drawn by this machine. Software that has got onto it
+/// can show one address while the wallet believes another, and the money goes
+/// somewhere else with nothing on screen looking wrong. Asking the device to
+/// derive the address from its own keys and show it on its own screen puts one
+/// copy of the answer somewhere the computer cannot paint — so the check is
+/// holding the two up against each other.
+///
+/// It follows that **the comparison is the point, and it is the person's to
+/// make**. Sieve deliberately does not report "verified": it has no way to know
+/// what the device displayed, and a green tick this program drew would be
+/// exactly the reassurance the attack needs.
+///
+/// Taproot takes its own road on a Ledger — `AddressScript::P2TR` builds a
+/// policy inline and needs nothing set up — while the other three go through
+/// the account policy, which is the default one signing already uses and needs
+/// no registration either.
+pub async fn show_address(
+    kind: Kind,
+    policy: &str,
+    script_type: ScriptType,
+    account: &DerivationPath,
+    index: u32,
+    change: bool,
+) -> Result<()> {
+    let device = connect_for_signing(kind, policy).await?;
+
+    let script = match script_type {
+        ScriptType::Taproot => {
+            // The full path to the address, which is what this arm wants —
+            // the account, then the chain, then the index.
+            let chain = u32::from(change);
+            let path: DerivationPath = format!("{account}/{chain}/{index}")
+                .parse()
+                .map_err(|e| anyhow!("that is not a derivation path: {e}"))?;
+            async_hwi::AddressScript::P2TR(path)
+        }
+        _ => async_hwi::AddressScript::Miniscript { index, change },
+    };
+
+    device
+        .display_address(&script)
+        .await
+        .map_err(|e| anyhow!("{}", explain(&e)))?;
+    Ok(())
+}
+
 /// A connection set up to sign, which for a Ledger means carrying the policy.
 ///
 /// `connect` hands back a `Box<dyn HWI>`, and `with_wallet` is Ledger's own —
