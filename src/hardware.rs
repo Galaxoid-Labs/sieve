@@ -281,6 +281,42 @@ pub fn descriptor(
     }
 }
 
+/// The same account, written the way a Ledger wants it for signing.
+///
+/// **A "default" wallet policy, which needs no registration.** The Ledger app
+/// divides policies in two: standard single-signature ones it recognises on
+/// sight, and everything else — multisig, custom miniscript — which must be
+/// registered on the device once, confirmed by hand, and thereafter presented
+/// with the HMAC that registration returns. The four BIP-44/49/84/86 accounts
+/// are all in the first group, so signing needs no setup step at all.
+///
+/// Two details carry that, and both are easy to get wrong:
+///
+/// - **The name must be empty.** It is what marks the policy default. A named
+///   policy is a registered one, and the device will ask for an HMAC Sieve does
+///   not have.
+/// - **`/**` rather than `/<0;1>/*`.** The same statement — both chains of the
+///   account — in the notation the device's policy language uses. `descriptor`
+///   above writes the other form because that is what BDK and other wallets
+///   read; this is the same account said to a different listener.
+pub fn policy(
+    script_type: ScriptType,
+    fingerprint: bdk_wallet::bitcoin::bip32::Fingerprint,
+    path: &DerivationPath,
+    xpub: &bdk_wallet::bitcoin::bip32::Xpub,
+) -> String {
+    let key = format!(
+        "[{fingerprint}/{}]{xpub}/**",
+        path.to_string().trim_start_matches("m/")
+    );
+    match script_type {
+        ScriptType::Legacy => format!("pkh({key})"),
+        ScriptType::NestedSegwit => format!("sh(wpkh({key}))"),
+        ScriptType::NativeSegwit => format!("wpkh({key})"),
+        ScriptType::Taproot => format!("tr({key})"),
+    }
+}
+
 /// Turn a device error into something a person can act on.
 fn explain(error: &async_hwi::Error) -> String {
     // The device answered and refused. Repeating "check it is unlocked" at
@@ -390,6 +426,40 @@ mod tests {
                 .to_string(),
             "44'/1'/0'"
         );
+    }
+
+    /// The signing policy and the descriptor describe the same account, and
+    /// the *only* differences allowed between them are the two the device's
+    /// policy language requires. Everything else matching is what makes it the
+    /// same wallet on both sides of the USB cable.
+    ///
+    /// Without a device on the desk this is the whole of what can be checked
+    /// about signing, so it checks it precisely.
+    #[test]
+    fn the_signing_policy_is_the_same_account_as_the_descriptor() {
+        let fingerprint = Fingerprint::from_str("ab12cd34").unwrap();
+        let xpub = Xpub::from_str(XPUB).unwrap();
+
+        for script_type in ScriptType::ALL {
+            let path = account_path(script_type, Network::Bitcoin).unwrap();
+            let policy = policy(script_type, fingerprint, &path, &xpub);
+            let descriptor = descriptor(script_type, fingerprint, &path, &xpub);
+
+            // Both chains, in the notation each listener reads. Nested
+            // segwit closes two brackets, so the tail is not a fixed string.
+            assert!(policy.contains("/**)"), "{script_type}: {policy}");
+            assert!(!policy.contains("<0;1>"), "{script_type}: {policy}");
+            assert!(descriptor.contains("<0;1>"), "{script_type}: {descriptor}");
+
+            // The same key, origin and script function on both sides.
+            assert_eq!(
+                policy.replace("/**", "/<0;1>/*"),
+                descriptor,
+                "{script_type}: the policy and the descriptor are different accounts"
+            );
+            assert!(policy.contains(&format!("[{fingerprint}/")), "{policy}");
+            assert!(policy.contains(XPUB), "{policy}");
+        }
     }
 
     /// The descriptor a device's key becomes has to be one the importer reads
