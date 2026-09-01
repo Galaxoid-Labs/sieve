@@ -40,16 +40,19 @@ pub fn parse(text: &str) -> Result<Descriptors> {
     if text.is_empty() {
         bail!("paste a descriptor or an extended public key");
     }
-    if text.contains("prv") {
+
+    // Strip a checksum: BDK computes its own, and a stale one is a hard error
+    // for something nobody typed on purpose. Before the private-key check
+    // rather than after, so eight characters of an alphabet that also holds
+    // p, r and v cannot be mistaken for a key.
+    let text = text.split('#').next().unwrap_or(text).trim();
+
+    if holds_private_key(text) {
         bail!(
             "that is a private key. A watch-only wallet takes the public half — \
              an xpub, or a descriptor built from one"
         );
     }
-
-    // Strip a checksum: BDK computes its own, and a stale one is a hard error
-    // for something nobody typed on purpose.
-    let text = text.split('#').next().unwrap_or(text).trim();
 
     let script_type = script_type_of(text)?;
 
@@ -71,6 +74,33 @@ pub fn parse(text: &str) -> Result<Descriptors> {
         internal,
         script_type,
     })
+}
+
+/// Whether what was pasted carries an extended *private* key.
+///
+/// The test has to be on the key itself, not on the whole string. Searching
+/// the text for "prv" looks equivalent and is not: base58 contains p, r and v,
+/// so roughly one public descriptor in eighteen hundred holds "prv" somewhere
+/// in the body of its xpub. Those were refused as private keys — a device's
+/// own export, turned away with the one message guaranteed to persuade
+/// somebody that they had exported the wrong thing.
+///
+/// Every version prefix says which half it is in the same place: xprv, tprv,
+/// yprv, zprv, uprv, vprv and the capitalised multisig forms all read "prv" at
+/// characters two to four, against "pub" for every public one. So that is what
+/// is read, at the positions where a key can actually begin.
+///
+/// Extended keys only, which is what people paste by mistake. A WIF key inside
+/// a descriptor is not caught here and never was; BDK refuses it downstream,
+/// with a worse message.
+fn holds_private_key(text: &str) -> bool {
+    text.split(['(', ')', ',', ' ', '\t', '\n'])
+        // A key follows its origin: [ab12cd34/84h/0h/0h]xprv…
+        .map(|token| match token.split_once(']') {
+            Some((_, after_origin)) => after_origin,
+            None => token,
+        })
+        .any(|token| token.get(1..4) == Some("prv"))
 }
 
 /// Which standard path this key or descriptor belongs to.
@@ -224,6 +254,41 @@ mod tests {
         assert!(error.contains("private key"), "{error}");
         // Even wrapped in a descriptor.
         assert!(parse(&format!("wpkh({xprv}/0/*)")).is_err());
+        // Behind an origin, which is the shape a device would export.
+        assert!(parse(&format!("wpkh([ab12cd34/84h/0h/0h]{xprv}/<0;1>/*)")).is_err());
+        // And behind a checksum, which is stripped before the key is read.
+        assert!(parse(&format!("wpkh({xprv}/0/*)#abcdefgh")).is_err());
+
+        // Every SLIP-132 private prefix, since each names the same half.
+        for prefix in [
+            "xprv", "tprv", "yprv", "zprv", "uprv", "vprv", "Yprv", "Zprv",
+        ] {
+            let key = format!("{prefix}{}", &xprv[4..]);
+            let text = format!("wpkh([ab12cd34/84h/0h/0h]{key}/<0;1>/*)");
+            assert!(parse(&text).is_err(), "{prefix}");
+        }
+    }
+
+    /// The refusal above used to be a substring search over the whole text,
+    /// which turned away public descriptors: base58 holds p, r and v, so about
+    /// one xpub in eighteen hundred contains "prv" and nothing about it is
+    /// private. A device's own export, refused as a private key.
+    #[test]
+    fn a_public_key_that_happens_to_contain_prv_is_still_public() {
+        // The real constant with three characters of its body replaced, which
+        // is exactly what the unlucky ones look like.
+        let unlucky = format!("{}prv{}", &XPUB[..40], &XPUB[43..]);
+        assert_eq!(unlucky.len(), XPUB.len());
+        assert!(unlucky.contains("prv"));
+
+        let parsed = parse(&format!("wpkh([ab12cd34/84h/0h/0h]{unlucky}/<0;1>/*)"))
+            .expect("a public descriptor is not a private key");
+        assert!(parsed.external.contains(&unlucky));
+        assert_eq!(parsed.script_type, ScriptType::NativeSegwit);
+
+        // And a checksum from an alphabet that also holds p, r and v.
+        let text = format!("wpkh([ab12cd34/84h/0h/0h]{XPUB}/<0;1>/*)#aprvcdef");
+        assert!(parse(&text).is_ok(), "a checksum is not a key");
     }
 
     #[test]
