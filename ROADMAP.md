@@ -396,6 +396,12 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       already written, so this is a flag and a filter rather than a new store.
 - [ ] Manual peer pinning with `whitelist_only`, and an audit that nothing but Bitcoin p2p
       leaves the machine.
+- [ ] Desktop notifications, opt-in and generic — designed and **deferred**. The mechanism is
+      a dozen lines of GIO; the problem is that the wallet keeps syncing while locked, so a
+      notification lands on the lock screen with the application's own name in the header,
+      which discloses more than any wording of the body can take back. See `NOTIFICATIONS.md`
+      for the two traps and for the scan-finished half, which is safe and could be built
+      alone.
 
 ### M7 — Lock and key hygiene
 
