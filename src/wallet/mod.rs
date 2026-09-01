@@ -423,7 +423,12 @@ pub struct Meta {
     pub watch_only: bool,
     /// The master fingerprint of the device this wallet was imported from.
     ///
-    /// **So signing can refuse a device that is not this one.** A different
+    /// **A record, not a route** — the same fingerprint is in every descriptor
+    /// this wallet holds, and that is the copy signing checks against, because
+    /// it cannot come to disagree with the keys it describes.
+    ///
+    /// It was recorded so that signing could refuse a device that is not this
+    /// one: A different
     /// device holds different keys: asked to sign, it either refuses — because
     /// the policy names an xpub it cannot derive — or, worse, produces
     /// signatures that do not verify against these inputs, which surfaces as a
@@ -438,9 +443,14 @@ pub struct Meta {
     /// wallet that holds its own keys.
     #[serde(default)]
     pub device_fingerprint: Option<String>,
-    /// Which kind of device — "Ledger", "Coldcard", "Specter". Recorded beside
-    /// the fingerprint because the fingerprint says *which* device and this
-    /// says *how to talk to it*, and signing needs both.
+    /// Which kind of device — "Ledger", "Coldcard", "Specter".
+    ///
+    /// **A record, not a route.** Signing and verifying find the device by
+    /// enumerating what is connected and matching the fingerprint in this
+    /// wallet's own descriptors, which works for a wallet imported before
+    /// either field existed and cannot drift from what the descriptors say.
+    /// This is kept because knowing what a wallet was made from is worth
+    /// having written down, not because anything depends on it.
     #[serde(default)]
     pub device_kind: Option<String>,
 }

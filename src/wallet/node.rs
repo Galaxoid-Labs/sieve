@@ -854,6 +854,24 @@ impl Session {
         Ok(crate::hardware::policy_from_descriptor(&descriptor))
     }
 
+    /// The master fingerprint this wallet's keys belong to, when its
+    /// descriptors name one.
+    ///
+    /// Read off the descriptor rather than out of the metadata, so a wallet
+    /// imported before Sieve recorded anything about its device still knows
+    /// which device it came from — the origin has said so all along.
+    pub async fn key_fingerprint(&self) -> Option<String> {
+        let portfolio = self.portfolio.lock().await;
+        portfolio.accounts.iter().find_map(|account| {
+            crate::hardware::fingerprint_of(
+                &account
+                    .wallet
+                    .public_descriptor(bdk_wallet::KeychainKind::External)
+                    .to_string(),
+            )
+        })
+    }
+
     /// Finish a payment somebody else signed, and broadcast it.
     ///
     /// The counterpart to `sign_and_send` for a wallet that holds no keys: the

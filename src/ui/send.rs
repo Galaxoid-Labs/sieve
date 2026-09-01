@@ -149,8 +149,8 @@ pub enum SendMsg {
     CopyUnsigned,
     /// Hand the payment to the device this wallet came from.
     SignOnDevice,
-    /// Which device this wallet was imported from, if any.
-    SetDevice(Option<crate::hardware::Kind>),
+    /// Whether this wallet's keys live on a device.
+    SetDeviceBacked(bool),
     /// Freeze a coin, or let it be spent again.
     SetFrozen {
         outpoint: String,
@@ -261,9 +261,11 @@ pub struct SendForm {
     min_fee: Option<f64>,
     /// No keys in this wallet: it can build a payment but not sign one.
     watch_only: bool,
-    /// The device this wallet was imported from, when it was imported from one
-    /// — which is what decides whether signing over the cable is offered.
-    device: Option<crate::hardware::Kind>,
+    /// Whether this wallet's keys live on a device, which decides whether
+    /// signing over the cable is offered. Not *which* device: that is asked of
+    /// the devices at the moment of signing, which is also when the wallet's
+    /// own fingerprint gets checked against what answered.
+    device_backed: bool,
     has_passphrase: bool,
     /// Where the number in the fee field came from, said under it.
     fee_source: Option<String>,
@@ -1296,9 +1298,7 @@ impl Component for SendForm {
                              appear here once they are in a block."
                         ),
                         #[watch]
-                        set_visible: !model.watch_only
-                            && !model.has_funds()
-                            && model.sent.is_none(),
+                        set_visible: !model.has_funds() && model.sent.is_none(),
                     },
 
                     // Money here, and none of it reachable. Said plainly and
@@ -1332,20 +1332,6 @@ impl Component for SendForm {
                         },
                     },
 
-                    // A watch-only wallet can work out a payment down to the
-                    // last satoshi and still not sign it. Saying so here beats
-                    // a form that fails at the last step.
-                    adw::StatusPage {
-                        set_icon_name: Some("channel-secure-symbolic"),
-                        set_title: "Signing happens elsewhere",
-                        set_description: Some(
-                            "This wallet holds no keys — only the public descriptors that \
-                             find its coins. Whatever holds the key signs for it, over a \
-                             PSBT."
-                        ),
-                        #[watch]
-                        set_visible: model.watch_only,
-                    },
 
                     // Sent.
                     adw::StatusPage {
@@ -1421,14 +1407,41 @@ impl Component for SendForm {
                         },
                     },
 
-                    // The form.
+                    // The form. Drawn for a watch-only wallet as well, which
+                    // it did not used to be: a full-page "signing happens
+                    // elsewhere" stood in its place, written when such a wallet
+                    // genuinely could not spend. It can now — on the device
+                    // over USB, or through a payment file — and every figure
+                    // this form computes was always watch-only work. Where the
+                    // signature comes from is a question for the review step,
+                    // and the review step asks it.
                     gtk::Box {
                         set_orientation: gtk::Orientation::Vertical,
                         set_spacing: 18,
                         #[watch]
-                        set_visible: !model.watch_only
-                            && model.has_funds()
-                            && model.sent.is_none(),
+                        set_visible: model.has_funds() && model.sent.is_none(),
+
+                        // Said before the form rather than instead of it, so
+                        // nobody reaches the end expecting a Send button.
+                        adw::PreferencesGroup {
+                            #[watch]
+                            set_visible: model.watch_only,
+
+                            adw::ActionRow {
+                                add_css_class: "property",
+                                set_title: "Signing happens elsewhere",
+                                #[watch]
+                                set_subtitle: if model.device_backed {
+                                    "This wallet holds no keys. Build the payment here and \
+                                     approve it on your device, or save it for a signer that \
+                                     is not plugged in."
+                                } else {
+                                    "This wallet holds no keys. Build the payment here and \
+                                     save it for whatever does hold them."
+                                },
+                                set_subtitle_lines: 3,
+                            },
+                        },
 
                         adw::PreferencesGroup {
                             #[watch]
@@ -1735,7 +1748,7 @@ impl Component for SendForm {
             max: false,
             min_fee: None,
             watch_only: false,
-            device: None,
+            device_backed: false,
             has_passphrase: false,
             fee_source: None,
             suggested: None,
@@ -1921,7 +1934,7 @@ impl Component for SendForm {
                 }
             }
 
-            SendMsg::SetDevice(kind) => self.device = kind,
+            SendMsg::SetDeviceBacked(backed) => self.device_backed = backed,
 
             SendMsg::SignOnDevice => {
                 let Some(plan) = self.plan.clone() else {
@@ -2356,7 +2369,7 @@ impl SendForm {
             // A device on the cable is the shorter road: no file, no card, no
             // carrying it anywhere. The file stays offered beside it, because
             // it is the only road for a signer that is not plugged in.
-            if self.device.is_some() {
+            if self.device_backed {
                 dialog.add_response("device", "Sign on device");
                 dialog.set_response_appearance("device", adw::ResponseAppearance::Suggested);
                 dialog.set_default_response(Some("device"));

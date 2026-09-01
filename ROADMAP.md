@@ -411,7 +411,7 @@ mainnet as well, from a cold start and from an interrupted one.
 Exercised end to end on signet: built, signed, broadcast, shown as pending, and confirmed on
 its own through ordinary filter sync — no explorer, no server told which transaction to watch.
 
-### M4a — Hardware signers — READ-ONLY; SIGNING NOT BUILT
+### M4a — Hardware signers — BUILT, UNTESTED AGAINST HARDWARE
 *Done when: a payment can be built in Sieve, confirmed on a device screen, and broadcast, with
 Sieve never holding a key.*
 
@@ -423,7 +423,12 @@ Working today:
       a person could have pasted, so a device import and a descriptor import land in the same
       place. `display_xpub(false)` keeps it to one prompt instead of four.
 - [x] Watch-only wallet from those descriptors: balance, activity, receive, and the whole send
-      form up to the moment of signing.
+      form — including the moment of signing, which is now a device or a file rather than a
+      full-page explanation of why neither was possible. That page *replaced* the send form,
+      written when such a wallet genuinely could not spend, and it outlived the reason: every
+      figure the form computes was always watch-only work, and where the signature comes from
+      is a question for the review step. It is a line inside the form now, said before it
+      rather than instead of it.
 - [x] A udev hint when the device is plugged in and invisible, and a plain message when a
       Ledger's Bitcoin app refuses a coin-type-1 path because the wallet is on signet.
 
@@ -446,8 +451,15 @@ Left to build:
       - **Finalising is ours.** A device returns partial signatures; turning those into
         witnesses is the wallet's job, so a file claiming to be finished is checked rather
         than believed.
-- [ ] **Exercise signing against a real device.** Everything above is written and none of it
-      has met hardware.
+- [ ] **Exercise all of it against a real device.** Signing, verifying an address, and
+      refusing the wrong device are written, reviewed and covered by every test that does not
+      need hardware — and **none of them has met a device**. That is the single remaining item
+      in this milestone that cannot be done from a keyboard, and until it is done the checked
+      boxes above mean "written", not "works".
+
+      The order to try them in, cheapest first: **verify an address** (no payment, no fee, and
+      it exercises connect, the policy and the fingerprint match), then **sign a payment on
+      signet**, then the same on mainnet.
 - [x] **Verify address on device**, on the receive screen, for all four paths — and **not**
       only taproot. This entry used to say the other three needed a registered wallet policy,
       which was the same mistake the signing entry made: `display_address`'s Miniscript arm
@@ -466,9 +478,24 @@ Left to build:
   an address and signing were both thought to require it. Neither does — both take the default
   policy. Registration is for multisig and custom miniscript, so it belongs to that milestone
   rather than this one.
-- [ ] **Record the device fingerprint in `Meta`**, so signing can refuse a device that is not
-      the one this wallet was imported from instead of producing signatures that do not verify.
-- [x] **PSBT export**, on a watch-only wallet only, where it replaces Send. BIP-174 binary
+- [x] **Refuse a device that is not the one holding these keys** — which turned out not to
+      need anything recorded in `Meta` at all. The fingerprint is already in every descriptor
+      a device import wrote, in the key origin, so signing and verifying **enumerate what is
+      connected and use the device whose master fingerprint matches the wallet's own
+      descriptors**.
+      - **Better than the note it replaced, in four ways.** It works for a wallet imported
+        before Sieve recorded anything about its hardware — which was the first Ledger wallet
+        made with this, and re-importing to fix that would have meant a fresh scan from the
+        birthday. It survives the same seed arriving on different hardware. Finding the device
+        and checking it is the right one become *one step*, so they cannot come to disagree —
+        a stored fingerprint can drift from the descriptors it describes; the descriptors'
+        own copy cannot. And the refusal is about the world rather than our bookkeeping: "no
+        connected device holds this wallet's keys" is actionable where "Sieve does not know
+        which device this came from" is not.
+      - `Meta.device_kind` and `device_fingerprint` stay as a *record* of what a wallet was
+        made from. Nothing routes through them.
+- [x] **PSBT export**, on a watch-only wallet only, where it sits beside signing on the
+      device and replaces Send. BIP-174 binary
       with a base64 *Copy as text*, named for the txid the payment will have once broadcast,
       and read back off disk before Sieve reports it saved. A test asserts an exported file
       carries the key origins, input values and change derivation another wallet needs, across
@@ -502,8 +529,11 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       with the bitcoin figure shown under it. Switching converts rather than reinterprets:
       leaving "0.0002" in the box and relabelling it dollars would be a very different
       payment with no character changed on screen.
-- [x] Export the public descriptors — the backup that risks nothing. BIP-380 form with its
-      checksum and nothing wrapped around it, so there is no Sieve format to learn.
+- [x] Export the public descriptors — the backup that cannot lose money, and can lose all
+      the privacy. BIP-380 form with its checksum and nothing wrapped around it, so there is
+      no Sieve format to learn. The row says both halves: a descriptor names every address
+      this wallet has ever had and will ever have, which in a wallet whose whole argument is
+      that no server is told its addresses is the more important half to state.
 - [x] Replaced state, which the RBF work turned out to have finished. A payment that lost a
       replacement race does not linger looking unconfirmed — `Wallet::transactions()` is
       `list_canonical_txs`, so the loser stops being listed at all, which is the honest

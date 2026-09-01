@@ -91,14 +91,25 @@ behaves like the rest of the desktop rather than like a browser in a window.
 - Amounts **typed in dollars** as well as read in them, with the bitcoin figure
   shown before you commit to it.
 - **Export the public descriptors** — BIP-380 with checksums, which is what
-  every other wallet reads. Enough to recreate this wallet watch-only anywhere,
-  and not enough to spend from it.
+  every other wallet reads. Enough to watch this wallet anywhere and not enough
+  to spend from it — so it is the backup that costs privacy rather than money:
+  whoever holds it can see every address and every payment, past and future.
 
 **Hardware wallets**
 - Import a watch-only wallet from a Ledger, Coldcard or Specter over USB — no
   Python, no HWI installation, no daemon.
 - All four paths read from the device in one prompt.
-- Signing on the device is **not built yet**; see below.
+- **Sign a payment on the device**, and **verify a receive address on it** — the
+  one check this program cannot make for itself, since it computes the address
+  and draws it on the same screen. Sieve never reports "verified": it cannot see
+  the device's screen, and a tick it drew would be exactly the reassurance the
+  attack needs.
+- The right device is found by asking the connected ones which keys they hold,
+  so a wallet is never tied to a note about the hardware it came from.
+- **Save a payment to a file** instead, for a signer that is not plugged in.
+- **None of the device code has been run against a device yet.** It is written,
+  reviewed and covered by every test that does not need hardware. Treat it as
+  untested until somebody has signed with it.
 
 **Keys**
 - The recovery phrase's randomness comes from the operating system —
@@ -138,9 +149,11 @@ behaves like the rest of the desktop rather than like a browser in a window.
 
 Stated plainly, because a wallet that overstates itself is dangerous:
 
-- **Signing on a hardware device.** A device-imported wallet can receive and
-  build payments but cannot spend. PSBT export and import is designed
-  (`PSBT.md`) and not written.
+- **Hardware signing has never met hardware.** The code is written — signing,
+  address verification, refusing the wrong device — and none of it has run
+  against a real one. PSBT *export* works; *import*, which would let a payment
+  signed elsewhere come back to be broadcast, is designed (`PSBT.md`) and not
+  written.
 - **Multisig.** Single-signature only.
 - **Storing anything the node downloads.** The version of kyoto Sieve uses
   discards the data directory it is given — `data_path: _` in its own

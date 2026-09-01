@@ -629,9 +629,10 @@ pub struct WalletPage {
     /// connection to some peers, so the two numbers differ and saying only the
     /// first invites the reader to count the list and find it wrong.
     distinct_peers: usize,
-    /// The device this wallet was imported from, which decides whether an
-    /// address can be checked against one.
-    device: Option<crate::hardware::Kind>,
+    /// Whether this wallet's keys live on a device, which decides whether an
+    /// address can be checked against one. Not *which* device: that is asked
+    /// of the devices when it matters.
+    device_backed: bool,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -700,8 +701,9 @@ pub enum WalletPageMsg {
     SaveUnsigned(Box<crate::wallet::send::Plan>),
     /// Sign it on the device this wallet came from, then broadcast.
     SignOnDevice(Box<crate::wallet::send::Plan>),
-    /// Which device this wallet was imported from, if any.
-    SetDevice(Option<crate::hardware::Kind>),
+    /// Whether this wallet's keys live on a device, which is what decides
+    /// whether signing and verifying on one are offered.
+    SetDeviceBacked(bool),
     /// Ask the device to show the receive address on its own screen.
     VerifyAddress,
     /// Name a payment just made, from what its request called itself.
@@ -1951,7 +1953,7 @@ impl Component for WalletPage {
                                         "Show this address on the device and compare the two"
                                     ),
                                     #[watch]
-                                    set_visible: model.device.is_some(),
+                                    set_visible: model.device_backed,
                                     connect_clicked => WalletPageMsg::VerifyAddress,
                                 },
                             },
@@ -2383,7 +2385,7 @@ impl Component for WalletPage {
             receive_index: 0,
             receive_path: None,
             fresh_address: None,
-            device: None,
+            device_backed: false,
             summary: None,
             progress: Progress::Connecting,
             peers: None,
@@ -2682,9 +2684,9 @@ impl Component for WalletPage {
                 }
             }
 
-            WalletPageMsg::SetDevice(kind) => {
-                self.device = kind;
-                self.send.emit(SendMsg::SetDevice(kind));
+            WalletPageMsg::SetDeviceBacked(backed) => {
+                self.device_backed = backed;
+                self.send.emit(SendMsg::SetDeviceBacked(backed));
             }
 
             WalletPageMsg::VerifyAddress => {

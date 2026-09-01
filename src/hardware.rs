@@ -30,17 +30,6 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Read back a kind recorded in a wallet's metadata.
-    ///
-    /// Paired with `label`, which writes it. A wallet whose device is no longer
-    /// a kind Sieve knows returns `None` rather than guessing — connecting to
-    /// the wrong sort of device is a worse answer than saying so.
-    pub fn from_label(text: &str) -> Option<Self> {
-        [Kind::Ledger, Kind::Coldcard, Kind::Specter]
-            .into_iter()
-            .find(|kind| kind.label().eq_ignore_ascii_case(text))
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Kind::Ledger => "Ledger",
@@ -385,6 +374,71 @@ pub async fn sign(
     Ok(())
 }
 
+/// The master fingerprint a descriptor names in its key origin.
+///
+/// **Which device this wallet belongs to is already written down**, in every
+/// descriptor a device import produced: `wpkh([73c5da0a/84'/0'/0']xpub…)`. So
+/// nothing needs to have been captured at import time, and a wallet imported
+/// before Sieve thought to record one is not stranded.
+pub fn fingerprint_of(descriptor: &str) -> Option<String> {
+    let (_, rest) = descriptor.split_once('[')?;
+    let (origin, _) = rest.split_once(']')?;
+    let fingerprint = origin.split('/').next()?;
+    // Eight hex characters and nothing else, or it is not a fingerprint.
+    let ok = fingerprint.len() == 8 && fingerprint.chars().all(|c| c.is_ascii_hexdigit());
+    ok.then(|| fingerprint.to_ascii_lowercase())
+}
+
+/// Find the connected device that holds these keys.
+///
+/// **Asked of the devices rather than read from a note.** Sieve used to record
+/// which kind of device a wallet came from and trust that later; enumerating
+/// and comparing fingerprints is better in every direction. It works for a
+/// wallet imported before anything was recorded, it survives the same seed
+/// arriving on different hardware, and — the part that matters — it *verifies*
+/// the fingerprint as a side effect of finding the device, rather than as a
+/// separate check that can disagree with a stored value.
+///
+/// The refusal is about the world rather than about Sieve's bookkeeping: "no
+/// connected device holds these keys" is something a person can act on, where
+/// "Sieve does not know which device this came from" is not.
+pub async fn find_holding(fingerprint: &str) -> Result<Kind> {
+    let connected = enumerate().await;
+    if connected.is_empty() {
+        bail!(
+            "no device is connected. Plug it in, unlock it and open its Bitcoin app.{}",
+            udev_hint()
+        );
+    }
+
+    let mut asked = Vec::new();
+    for device in &connected {
+        match connect(device.kind).await {
+            Ok(handle) => match handle.get_master_fingerprint().await {
+                Ok(found) if found.to_string().eq_ignore_ascii_case(fingerprint) => {
+                    return Ok(device.kind);
+                }
+                Ok(found) => asked.push(format!("{} holds {found}", device.kind)),
+                Err(e) => {
+                    tracing::debug!(kind = %device.kind, error = %explain(&e), "no fingerprint");
+                    asked.push(format!("{} would not say", device.kind));
+                }
+            },
+            Err(e) => {
+                tracing::debug!(kind = %device.kind, %e, "could not open the device");
+                asked.push(format!("{} would not open", device.kind));
+            }
+        }
+    }
+
+    bail!(
+        "no connected device holds this wallet's keys. It was made from {fingerprint}, and \
+         {}. Check the right device is plugged in, unlocked, and on the app that matches \
+         this wallet's network.",
+        asked.join("; ")
+    )
+}
+
 /// Show an address on the device's own screen, so it can be compared.
 ///
 /// **What this defends against.** A receive address is computed from descriptors
@@ -606,6 +660,44 @@ mod tests {
                 policy.starts_with(descriptor.split('(').next().unwrap()),
                 "{script_type}: the policy builds a different script: {policy}"
             );
+        }
+    }
+
+    /// Which device a wallet belongs to is already written in its descriptors,
+    /// which is what lets a wallet imported before Sieve recorded anything
+    /// about its hardware still find it.
+    #[test]
+    fn a_descriptor_says_which_device_it_came_from() {
+        let fingerprint = Fingerprint::from_str("ab12cd34").unwrap();
+        let xpub = Xpub::from_str(XPUB).unwrap();
+
+        for script_type in ScriptType::ALL {
+            let path = account_path(script_type, Network::Bitcoin).unwrap();
+            let descriptor = descriptor(script_type, fingerprint, &path, &xpub);
+            assert_eq!(
+                fingerprint_of(&descriptor).as_deref(),
+                Some("ab12cd34"),
+                "{script_type}: {descriptor}"
+            );
+        }
+
+        // A stored one, with its checksum and a single chain.
+        let stored = format!("wpkh([73C5DA0A/84h/0h/0h]{XPUB}/0/*)#abcdefgh");
+        assert_eq!(
+            fingerprint_of(&stored).as_deref(),
+            Some("73c5da0a"),
+            "case is not part of a fingerprint"
+        );
+
+        // And a descriptor naming no origin says nothing, rather than
+        // offering up the first eight characters of something else.
+        for anonymous in [
+            format!("wpkh({XPUB}/0/*)"),
+            "not a descriptor".to_string(),
+            format!("wpkh([nothex12/84h/0h/0h]{XPUB}/0/*)"),
+            format!("wpkh([abc/84h/0h/0h]{XPUB}/0/*)"),
+        ] {
+            assert_eq!(fingerprint_of(&anonymous), None, "{anonymous}");
         }
     }
 

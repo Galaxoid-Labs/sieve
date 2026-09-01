@@ -1445,13 +1445,6 @@ impl Component for App {
                 let Some(meta) = wallet::Meta::load(&paths) else {
                     return;
                 };
-                let Some(kind) = meta
-                    .device_kind
-                    .as_deref()
-                    .and_then(crate::hardware::Kind::from_label)
-                else {
-                    return;
-                };
                 let network = meta.network();
 
                 // Said before, not after. Sieve cannot see the device's screen,
@@ -1463,6 +1456,20 @@ impl Component for App {
                 ));
 
                 sender.oneshot_command(async move {
+                    // Which device, asked of the devices themselves. The
+                    // fingerprint comes from this wallet's own descriptors, so
+                    // this works for a wallet imported before Sieve recorded
+                    // anything about the hardware it came from.
+                    let Some(fingerprint) = session.key_fingerprint().await else {
+                        return AppCmd::AddressShown(Err(
+                            "this wallet's descriptors do not say which device they came from"
+                                .into(),
+                        ));
+                    };
+                    let kind = match crate::hardware::find_holding(&fingerprint).await {
+                        Ok(kind) => kind,
+                        Err(e) => return AppCmd::AddressShown(Err(e.to_string())),
+                    };
                     let policy = match session.device_policy(path).await {
                         Ok(policy) => policy,
                         Err(e) => return AppCmd::AddressShown(Err(e.to_string())),
@@ -1487,25 +1494,7 @@ impl Component for App {
                     ));
                     return;
                 };
-                let Some(meta) = wallet::Meta::load(&paths) else {
-                    return;
-                };
-                let Some(kind) = meta
-                    .device_kind
-                    .as_deref()
-                    .and_then(crate::hardware::Kind::from_label)
-                else {
-                    // A wallet imported from a pasted descriptor, or from a
-                    // device before this was recorded. Its file is still the
-                    // way through, which is why Save stays offered beside this.
-                    self.wallet.emit(WalletPageMsg::Toast(
-                        "Sieve does not know which device this wallet came from — save the \
-                         payment to a file instead"
-                            .into(),
-                    ));
-                    return;
-                };
-                let expected = meta.device_fingerprint.clone();
+                let _ = paths;
 
                 self.wallet.emit(WalletPageMsg::Toast(
                     "Check the payment on your device and approve it".into(),
@@ -1513,6 +1502,20 @@ impl Component for App {
 
                 sender.oneshot_command(async move {
                     let mut plan = *plan;
+                    // Which device, asked of the devices. The fingerprint is
+                    // this wallet's own descriptors', so finding the device and
+                    // checking it is the right one are the same step — they
+                    // cannot come to disagree.
+                    let Some(fingerprint) = session.key_fingerprint().await else {
+                        return AppCmd::Sent(Err(
+                            "this wallet's descriptors do not say which device they came from"
+                                .into(),
+                        ));
+                    };
+                    let kind = match crate::hardware::find_holding(&fingerprint).await {
+                        Ok(kind) => kind,
+                        Err(e) => return AppCmd::Sent(Err(e.to_string())),
+                    };
                     // The policy is read off the descriptor this wallet already
                     // holds, so the account the device is asked to sign for and
                     // the account the payment was built from cannot differ.
@@ -1521,7 +1524,7 @@ impl Component for App {
                         Err(e) => return AppCmd::Sent(Err(e.to_string())),
                     };
                     if let Err(e) =
-                        crate::hardware::sign(kind, &policy, expected.as_deref(), &mut plan.psbt)
+                        crate::hardware::sign(kind, &policy, Some(&fingerprint), &mut plan.psbt)
                             .await
                     {
                         return AppCmd::Sent(Err(e.to_string()));
@@ -2293,6 +2296,11 @@ impl Component for App {
                 self.balance_sats = Some(summary.balance_sats);
                 self.unlocked = true;
                 self.wallet.emit(WalletPageMsg::SetWatchOnly(watch_only));
+                // The same fact, and it has to be said on both paths a wallet
+                // arrives by — this one, and `restate_wallet`. Said on only one
+                // of them, the receive screen's Verify button stayed hidden on
+                // exactly the wallets it exists for.
+                self.wallet.emit(WalletPageMsg::SetDeviceBacked(watch_only));
                 self.wallet
                     .emit(WalletPageMsg::SetHasPassphrase(has_passphrase));
 
@@ -3347,11 +3355,14 @@ impl App {
             .emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
         self.wallet
             .emit(WalletPageMsg::SetWatchOnly(meta.watch_only));
-        self.wallet.emit(WalletPageMsg::SetDevice(
-            meta.device_kind
-                .as_deref()
-                .and_then(crate::hardware::Kind::from_label),
-        ));
+        // Whether this wallet's keys live on a device, decided by what its
+        // descriptors say rather than by what was recorded when it was
+        // imported — so a wallet made before Sieve kept that note is not shut
+        // out of the two features that need it. Which *kind* of device is not
+        // stored at all any more: it is asked of the devices at the moment it
+        // matters, which is also when the fingerprint gets checked.
+        self.wallet
+            .emit(WalletPageMsg::SetDeviceBacked(meta.watch_only));
         self.wallet
             .emit(WalletPageMsg::SetHasPassphrase(meta.bip39_passphrase));
         self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
@@ -3766,16 +3777,17 @@ impl App {
             }
             this.add(&phrase);
 
-            // The other half of a backup, and the half that risks nothing. A
-            // descriptor names every address this wallet will ever have and
-            // cannot spend from any of them — which is why this row, unlike
-            // the one above it, is available on a watch-only wallet and while
-            // locked.
+            // The other half of a backup, and the half that cannot lose money.
+            // It can lose all the privacy, which is a different sentence and
+            // has to be said: a descriptor names every address this wallet has
+            // ever had and will ever have. Available on a watch-only wallet and
+            // while locked, because it holds nothing a lock protects.
             let descriptors = adw::ActionRow::new();
             descriptors.set_title("Wallet descriptors");
             descriptors.set_subtitle(
-                "The public half: enough to recreate this wallet watch-only anywhere, and \
-                 not enough to spend from it",
+                "The public half: enough to watch this wallet anywhere, and not enough to \
+                 spend from it. Whoever has it can see every address and every payment, \
+                 past and future — this is the backup that costs privacy rather than money",
             );
             descriptors.set_subtitle_lines(3);
             descriptors.set_activatable(true);
