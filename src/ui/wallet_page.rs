@@ -32,6 +32,9 @@ pub enum WalletPageOutput {
         outpoint: String,
         frozen: bool,
     },
+    /// Save a reviewed payment for a signer elsewhere. The app owns the file
+    /// dialogs, as it does for labels and descriptors.
+    SaveUnsigned(Box<crate::wallet::send::Plan>),
     /// Announce an unconfirmed transaction to another peer.
     Rebroadcast {
         txid: String,
@@ -676,6 +679,8 @@ pub enum WalletPageMsg {
         outpoint: String,
         text: String,
     },
+    /// Save a reviewed payment for a signer elsewhere.
+    SaveUnsigned(Box<crate::wallet::send::Plan>),
     /// Name a payment just made, from what its request called itself.
     NameTransaction {
         txid: String,
@@ -2301,6 +2306,7 @@ impl Component for WalletPage {
                 SendOutput::SetCoinLabel { outpoint, text } => {
                     WalletPageMsg::SetCoinLabel { outpoint, text }
                 }
+                SendOutput::SaveUnsigned(plan) => WalletPageMsg::SaveUnsigned(plan),
             });
 
         let mut model = WalletPage {
@@ -2604,6 +2610,10 @@ impl Component for WalletPage {
             }
             WalletPageMsg::SetFrozen { outpoint, frozen } => {
                 let _ = sender.output(WalletPageOutput::SetFrozen { outpoint, frozen });
+            }
+
+            WalletPageMsg::SaveUnsigned(plan) => {
+                let _ = sender.output(WalletPageOutput::SaveUnsigned(plan));
             }
 
             // Straight onto the road every other label takes: the app owns the

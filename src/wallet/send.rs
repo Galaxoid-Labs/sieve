@@ -642,6 +642,95 @@ mod tests {
         }
     }
 
+    /// **What makes an exported payment file signable by somebody else.**
+    ///
+    /// A PSBT is only useful to another wallet if it says where the keys are.
+    /// Without `bip32_derivation` on an input — `tap_key_origins` for taproot —
+    /// a signing device has no way to know which of its keys the input belongs
+    /// to, and answers that it cannot sign. The file would look perfectly valid
+    /// and be useless, which is the failure worth catching here rather than on
+    /// somebody's Coldcard.
+    ///
+    /// The same on the change output, for a different reason: a device that
+    /// cannot verify change is its own has to show that output as a payment to
+    /// a stranger, and the person signing is asked to approve a transaction
+    /// that appears to send them their own money.
+    #[test]
+    fn an_exported_payment_says_where_its_keys_are() {
+        for script_type in ScriptType::ALL {
+            let network = Network::Signet;
+            let xprv = super::super::xprv_from_mnemonic(PHRASE, None, network).unwrap();
+            let mut wallet = hd_signer(xprv, script_type, network).unwrap();
+
+            let funded = wallet.reveal_next_address(KeychainKind::External).address;
+            let funding = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::new(
+                        "0000000000000000000000000000000000000000000000000000000000000001"
+                            .parse::<Txid>()
+                            .unwrap(),
+                        0,
+                    ),
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: funded.script_pubkey(),
+                }],
+            };
+            wallet.apply_unconfirmed_txs([(funding, 0u64)]);
+
+            let to = parse_address("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", network).unwrap();
+            let psbt = {
+                let mut builder = wallet.build_tx();
+                builder.add_recipient(to.script_pubkey(), Amount::from_sat(20_000));
+                builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+                builder.finish().expect("could not build the transaction")
+            };
+
+            let taproot = script_type == ScriptType::Taproot;
+            let input = &psbt.inputs[0];
+            let says_where = match taproot {
+                true => !input.tap_key_origins.is_empty(),
+                false => !input.bip32_derivation.is_empty(),
+            };
+            assert!(says_where, "{script_type}: no key origin on the input");
+
+            // And the previous output, without which a device cannot check the
+            // amount it is being asked to spend.
+            assert!(
+                input.witness_utxo.is_some() || input.non_witness_utxo.is_some(),
+                "{script_type}: nothing says what the input is worth"
+            );
+
+            // The change output, so a device can tell it is not a payment.
+            let change = psbt
+                .outputs
+                .iter()
+                .zip(&psbt.unsigned_tx.output)
+                .find(|(_, out)| wallet.is_mine(out.script_pubkey.clone()))
+                .map(|(psbt_out, _)| psbt_out)
+                .expect("the payment kept no change");
+            let change_says_where = match taproot {
+                true => !change.tap_key_origins.is_empty(),
+                false => !change.bip32_derivation.is_empty(),
+            };
+            assert!(
+                change_says_where,
+                "{script_type}: change carries no derivation, so a device would \
+                 show it as paying a stranger"
+            );
+
+            // And it survives the trip out to a file and back, which is the
+            // only journey that matters.
+            let bytes = crate::wallet::psbt::to_bytes(&psbt);
+            let returned = crate::wallet::psbt::from_bytes(&bytes).unwrap();
+            assert_eq!(returned, psbt, "{script_type} did not survive a round trip");
+        }
+    }
+
     /// Change from a transaction still waiting for a block is not available
     /// to spend, however tempting the balance looks.
     /// Choosing coins has to mean *only* those coins. BDK will happily treat

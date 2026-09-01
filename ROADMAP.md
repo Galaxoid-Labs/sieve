@@ -442,8 +442,15 @@ Left to build:
       Ledger recognise its own change outputs when signing a non-taproot payment.
 - [ ] **Record the device fingerprint in `Meta`**, so signing can refuse a device that is not
       the one this wallet was imported from instead of producing signatures that do not verify.
-- [ ] **PSBT export and import as files**, for air-gapped use — a Coldcard on an SD card, a
-      Jade over QR. No USB at all, and the only way some people will sign.
+- [x] **PSBT export**, on a watch-only wallet only, where it replaces Send. BIP-174 binary
+      with a base64 *Copy as text*, named for the txid the payment will have once broadcast,
+      and read back off disk before Sieve reports it saved. A test asserts an exported file
+      carries the key origins, input values and change derivation another wallet needs, across
+      all four script types — without those it would look valid and be unsignable.
+- [ ] **PSBT import**, which is the half that closes the loop and is deliberately not next.
+      The review screen is the whole safety story: a PSBT is a stranger's claim about what a
+      transaction does, and the only defence is recomputing every figure from our own
+      descriptors. `PSBT.md` has the design and records why USB signing comes first.
 - [ ] **Accounts past `0'`**, and a passphrase-derived device wallet, both of which currently
       have no way in.
 - [ ] Handle the device being unplugged, locked, or switched to another app mid-flow, rather

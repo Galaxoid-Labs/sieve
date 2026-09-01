@@ -1,6 +1,11 @@
 # Partially signed transactions
 
-A design, not an implementation. Nothing in this file exists yet.
+**Half built.** Export exists; import does not, and is not being built yet — see
+"Where this stopped" at the end for why.
+
+PSBT is not primarily about multisig, which is the easy assumption to make about
+it. It is about *the keys being somewhere else*, and for Sieve today that means
+hardware wallets.
 
 PSBT (BIP-174) is the format for *this payment needs a signature from somewhere
 else*. Sieve has two reasons to want it, one now and one later:
@@ -19,21 +24,38 @@ part where the signature comes from elsewhere.
 
 ## The three flows
 
-### Export unsigned
+### Export unsigned — **built**
 
 Build a payment in the send form exactly as now, then at the review step:
-**Save unsigned payment…** writes `payment.psbt`.
+**Save unsigned…** writes the file, and **Copy as text** puts the same payment
+on the clipboard as base64.
 
-On a watch-only wallet this button replaces *Send* rather than sitting beside
-it, which is what makes hardware wallets spendable before USB signing exists.
+**Only on a watch-only wallet, where it replaces Send.** This was originally
+written as "replaces Send rather than sitting beside it", and the first
+implementation did both — replacing it on watch-only and offering it alongside
+on a wallet that holds keys. That was wrong twice over. An unsigned payment file
+is worth something exactly when something *else* holds the keys; on a wallet that
+can sign it is a file somebody could have signed instead. And it turned the one
+dialog that must be read correctly into four buttons.
 
-### Import signed
+Files are named `sieve-<txid>.psbt`. Signing a segwit or taproot input adds
+witness data, which is not part of the txid — so for everything Sieve hands out
+an address on, that name is what the payment will be called once broadcast, and
+a card holding several says which is which.
+
+**The file is read back and compared before Sieve reports success.** Not
+ceremony: this file goes to a signer that is not this program, often on a card
+carried to a machine with no way to ask for another copy. A short write, a full
+disk or a card pulled early all produce a file that exists and will not parse.
+Finding that out here costs milliseconds; finding it out there costs the trip.
+
+### Import signed — not built
 
 The file comes back with signatures on it. Sieve finalises it
 (`Wallet::finalize_psbt`) and broadcasts through the existing
 `Requester::submit_package`. No new broadcast path.
 
-### Import anything
+### Import anything — not built
 
 A PSBT built somewhere else that this wallet can sign. Sieve shows what it
 does, signs with the vault key on the existing password path, then either
@@ -109,6 +131,36 @@ already uses, so it works through the Flatpak portal.
   of work, and the return trip needs a camera Sieve does not have yet.
 - **Broadcast-only import**, for a fully signed PSBT from elsewhere. Falls out
   of the above nearly free; include it if it is cheap.
+
+## Where this stopped, and why
+
+Export is in. Import is not, and is not next.
+
+**What PSBT files are actually for, once the list is honest.** A Coldcard on an
+SD card; an air-gapped second machine; a Jade over QR, which needs a camera
+Sieve does not have; and multisig, which is a milestone away. What they are
+*not* for is the device most likely to be plugged into the computer running
+this, because for a device on USB `HWI::sign_tx` is a better path than *save a
+file, find a card, carry it, bring it back*.
+
+So the ordering was wrong. PSBT-first was argued on the grounds that it needs no
+device on the desk to build or test — a developer-convenience argument wearing
+the clothes of a priority. The thing that makes a hardware wallet spendable is
+USB signing, and that is what M4a should reach for next.
+
+Export still earns its place: it takes a device-imported wallet from *cannot
+spend at all* to *can spend awkwardly*, it is finished and tested across all
+four script types, and it leaves no half-built state behind, because import was
+never started.
+
+**What to build when import comes back.** The review screen above, unchanged —
+it is still the whole safety story. And one thing learned since: once a
+transaction is signed *and finalised*, PSBT stops being the useful artefact. The
+thing to carry to a broadcasting machine is the raw transaction hex, which
+`sendrawtransaction` and every explorer's broadcast box will take. Partially
+signed stays a PSBT; fully signed should offer the hex as well. Building "sign
+and save it back out" on the same screen as "sign and broadcast" gets that for
+nothing.
 
 ## Multisig
 

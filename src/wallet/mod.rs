@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 pub mod accounts;
 pub mod labels;
 pub mod node;
+pub mod psbt;
 pub mod send;
 pub mod uri;
 pub mod watch;

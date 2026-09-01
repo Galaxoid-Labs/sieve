@@ -143,6 +143,10 @@ impl FactoryComponent for ExtraPayee {
 
 #[derive(Debug)]
 pub enum SendMsg {
+    /// Write the reviewed payment to a file for a signer elsewhere.
+    SaveUnsigned,
+    /// The same payment as base64, for pasting where a file cannot go.
+    CopyUnsigned,
     /// Freeze a coin, or let it be spent again.
     SetFrozen {
         outpoint: String,
@@ -213,6 +217,9 @@ pub enum SendMsg {
 pub enum SendOutput {
     /// Build this, watch-only, and hand the numbers back.
     Plan(Box<Draft>),
+    /// Save this payment for a signer elsewhere. The app owns the file
+    /// dialogs, as it does for labels and descriptors.
+    SaveUnsigned(Box<Plan>),
     /// Sign and broadcast the plan already reviewed.
     Send {
         plan: Box<Plan>,
@@ -1888,6 +1895,29 @@ impl Component for SendForm {
                 self.recount_payees(widgets);
             }
 
+            SendMsg::CopyUnsigned => {
+                let Some(plan) = self.plan.as_ref() else {
+                    return;
+                };
+                // Base64 is BIP-174's own text form, so what lands on the
+                // clipboard is the same payment the file would hold — for the
+                // signers that take a paste rather than a card.
+                let text = crate::wallet::psbt::to_base64(&plan.psbt);
+                if let Some(display) = gtk::gdk::Display::default() {
+                    display.clipboard().set_text(&text);
+                    let _ = sender.output(SendOutput::Toast(
+                        "Copied. Paste it into whatever will sign it".into(),
+                    ));
+                }
+            }
+
+            SendMsg::SaveUnsigned => {
+                let Some(plan) = self.plan.clone() else {
+                    return;
+                };
+                let _ = sender.output(SendOutput::SaveUnsigned(Box::new(plan)));
+            }
+
             SendMsg::SetCoinLabel { outpoint, text } => {
                 // Applied locally as well as sent on, so the tally's own copy
                 // of the names agrees with the row that was just renamed.
@@ -2288,13 +2318,34 @@ impl SendForm {
         // every part of it above is escaped.
         dialog.set_body_use_markup(true);
         dialog.add_response("cancel", "Cancel");
-        dialog.add_response("send", "Send");
-        dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("send"));
+        // Saving the payment for a signer elsewhere. On a watch-only wallet it
+        // *replaces* Send rather than sitting beside it, and that is the whole
+        // point: it is what makes a device-imported wallet able to spend at all
+        // before USB signing exists. Everything below this line was already
+        // computed watch-only, so nothing about the file needs a key.
+        // Saving the payment for a signer elsewhere, and **only** where there
+        // is no signer here. An unsigned payment file is worth something
+        // exactly when something else holds the keys: on a wallet that can
+        // sign, it is a file somebody could have signed instead, and offering
+        // it turns the one dialog that must be read correctly into four
+        // buttons. On a watch-only wallet it is not an extra — it replaces
+        // Send, because it is the only way through.
+        if self.watch_only {
+            dialog.add_response("copy", "Copy as text");
+            dialog.add_response("save", "Save unsigned…");
+            dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("save"));
+        } else {
+            dialog.add_response("send", "Send");
+            dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("send"));
+        }
         dialog.set_close_response("cancel");
 
         // The password buys one signature. It is asked for here rather than at
-        // unlock because nothing before this point needs a key.
+        // unlock because nothing before this point needs a key — and on a
+        // wallet that holds none it is not asked for at all, since there is
+        // nothing here for it to open.
         let password = gtk::PasswordEntry::new();
         password.set_show_peek_icon(true);
         password.set_placeholder_text(Some("Wallet password"));
@@ -2319,13 +2370,14 @@ impl SendForm {
             let sender = sender.clone();
             let password = password.clone();
             let passphrase = passphrase.clone();
-            dialog.connect_response(None, move |_, response| {
-                if response == "send" {
-                    sender.input(SendMsg::Confirm(
-                        Password(Zeroizing::new(password.text().to_string())),
-                        Password(Zeroizing::new(passphrase.text().to_string())),
-                    ));
-                }
+            dialog.connect_response(None, move |_, response| match response {
+                "send" => sender.input(SendMsg::Confirm(
+                    Password(Zeroizing::new(password.text().to_string())),
+                    Password(Zeroizing::new(passphrase.text().to_string())),
+                )),
+                "save" => sender.input(SendMsg::SaveUnsigned),
+                "copy" => sender.input(SendMsg::CopyUnsigned),
+                _ => {}
             });
         }
 

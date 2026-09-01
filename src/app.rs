@@ -400,6 +400,13 @@ pub enum AppMsg {
         outpoint: String,
         frozen: bool,
     },
+    /// Ask where to put a payment file, for a signer that is not this program.
+    SaveUnsigned(Box<wallet::send::Plan>),
+    /// Write it there.
+    WriteUnsigned {
+        plan: Box<wallet::send::Plan>,
+        path: std::path::PathBuf,
+    },
     /// Re-read what the header chain can tell us.
     RefreshChain,
     /// A dialog was dismissed, by us or by the person using it.
@@ -684,6 +691,9 @@ impl Component for App {
                     },
                     crate::ui::wallet_page::WalletPageOutput::SetFrozen { outpoint, frozen } => {
                         AppMsg::SetFrozen { outpoint, frozen }
+                    }
+                    crate::ui::wallet_page::WalletPageOutput::SaveUnsigned(plan) => {
+                        AppMsg::SaveUnsigned(plan)
                     }
                     crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
                     crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
@@ -1409,6 +1419,71 @@ impl Component for App {
                         chosen(file)
                     });
                 }
+            }
+
+            AppMsg::SaveUnsigned(plan) => {
+                let Some(window) = self.nav.root().and_downcast::<gtk::Window>() else {
+                    tracing::warn!("no window to hang the file dialog on");
+                    return;
+                };
+
+                let filter = gtk::FileFilter::new();
+                filter.set_name(Some("Payment files"));
+                filter.add_pattern(&format!("*.{}", wallet::psbt::EXTENSION));
+                let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+
+                let dialog = gtk::FileDialog::builder()
+                    .title("Save unsigned payment")
+                    .filters(&filters)
+                    .modal(true)
+                    .build();
+
+                // Named for the transaction it will become. Signing a segwit
+                // or taproot input adds witness data, which is not part of the
+                // txid — so for everything Sieve hands out an address on, this
+                // name is what the payment is called once it is broadcast, and
+                // a card holding several files says which is which. (A legacy
+                // input would change it, which is a wallet spending coins it
+                // will never receive more of.)
+                let short: String = plan
+                    .psbt
+                    .unsigned_tx
+                    .compute_txid()
+                    .to_string()
+                    .chars()
+                    .take(12)
+                    .collect();
+                dialog
+                    .set_initial_name(Some(&format!("sieve-{short}.{}", wallet::psbt::EXTENSION)));
+
+                let inspectable = crate::Inspectable::while_choosing_a_file();
+                let sender = sender.clone();
+                dialog.save(Some(&window), gtk::gio::Cancellable::NONE, move |file| {
+                    let _inspectable = &inspectable;
+                    if let Ok(file) = file
+                        && let Some(path) = file.path()
+                    {
+                        sender.input(AppMsg::WriteUnsigned {
+                            plan: plan.clone(),
+                            path,
+                        });
+                    }
+                });
+            }
+
+            AppMsg::WriteUnsigned { plan, path } => {
+                let message = match write_unsigned(&plan.psbt, &path) {
+                    Ok(()) => {
+                        tracing::info!("wrote an unsigned payment");
+                        "Saved. Sign it elsewhere, then bring it back".to_string()
+                    }
+                    Err(e) => {
+                        tracing::error!(%e, "could not write the payment file");
+                        crate::ui::send::capitalise(&e.to_string())
+                    }
+                };
+                self.wallet.emit(WalletPageMsg::Toast(message));
             }
 
             AppMsg::LabelFile { path, importing } => {
@@ -3072,7 +3147,35 @@ impl App {
         }
         self.start_session(sender);
     }
+}
 
+/// Write a payment file, and read it back before saying it was written.
+///
+/// The read is not ceremony. This file is going to a signer that is not this
+/// program — often onto a card, to be carried to a machine with no way to ask
+/// for another copy — and a short write, a full disk or a card pulled early all
+/// produce a file that exists and cannot be parsed. Finding that out here costs
+/// a few milliseconds; finding it out on the other machine costs the trip.
+fn write_unsigned(psbt: &bdk_wallet::bitcoin::Psbt, to: &std::path::Path) -> anyhow::Result<()> {
+    let bytes = wallet::psbt::to_bytes(psbt);
+    std::fs::write(to, &bytes)
+        .map_err(|e| anyhow::anyhow!("could not write {}: {e}", to.display()))?;
+
+    let written = std::fs::read(to)
+        .map_err(|e| anyhow::anyhow!("wrote {} but could not read it back: {e}", to.display()))?;
+    let parsed = wallet::psbt::from_bytes(&written).map_err(|e| {
+        anyhow::anyhow!("what was written to {} is not readable: {e}", to.display())
+    })?;
+    if parsed != *psbt {
+        anyhow::bail!(
+            "{} does not hold the payment that was reviewed",
+            to.display()
+        );
+    }
+    Ok(())
+}
+
+impl App {
     /// Write every label to a file in BIP-329's format.
     fn export_labels(&self, paths: &Paths, to: &std::path::Path) -> anyhow::Result<String> {
         let labels = wallet::labels::Labels::load(&paths.dir);
