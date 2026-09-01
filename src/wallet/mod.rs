@@ -421,6 +421,28 @@ pub struct Meta {
     /// and cannot sign. Signing is the device's job, through a PSBT.
     #[serde(default)]
     pub watch_only: bool,
+    /// The master fingerprint of the device this wallet was imported from.
+    ///
+    /// **So signing can refuse a device that is not this one.** A different
+    /// device holds different keys: asked to sign, it either refuses — because
+    /// the policy names an xpub it cannot derive — or, worse, produces
+    /// signatures that do not verify against these inputs, which surfaces as a
+    /// finalisation failure with nothing to say why. Checking the fingerprint
+    /// first turns that into "this is not the device this wallet came from",
+    /// which somebody can act on.
+    ///
+    /// Not a secret: a master fingerprint is four bytes of a public key's hash
+    /// and it travels in every descriptor this wallet already exports.
+    ///
+    /// `None` for wallets imported before this was recorded, and for every
+    /// wallet that holds its own keys.
+    #[serde(default)]
+    pub device_fingerprint: Option<String>,
+    /// Which kind of device — "Ledger", "Coldcard", "Specter". Recorded beside
+    /// the fingerprint because the fingerprint says *which* device and this
+    /// says *how to talk to it*, and signing needs both.
+    #[serde(default)]
+    pub device_kind: Option<String>,
 }
 
 /// Sieve's first metadata format: a birthday and nothing else.
@@ -459,6 +481,8 @@ impl Meta {
             scanned_hash: None,
             matched_blocks: None,
             watch_only: false,
+            device_fingerprint: None,
+            device_kind: None,
         }
     }
 
@@ -517,6 +541,8 @@ impl Meta {
     ) -> Self {
         Self {
             watch_only: true,
+            device_fingerprint: None,
+            device_kind: None,
             ..Self::new(
                 network,
                 birthday,
@@ -564,6 +590,8 @@ impl Meta {
             // That format predates watch-only wallets, so it can only be one
             // with a vault.
             watch_only: false,
+            device_fingerprint: None,
+            device_kind: None,
         };
         let _ = upgraded.save(paths);
         Some(upgraded)
@@ -2539,7 +2567,10 @@ pub fn import_descriptor(
     birthday: Checkpoint,
     name: Option<String>,
 ) -> Result<Summary> {
-    import_descriptors(&[text.to_string()], paths, network, birthday, name)
+    // A pasted descriptor names no device: nobody can say which machine holds
+    // the key, and guessing would put a fingerprint in the file that signing
+    // would then check against.
+    import_descriptors(&[text.to_string()], paths, network, birthday, name, None)
 }
 
 /// The same, for a wallet described by several descriptors at once.
@@ -2555,6 +2586,10 @@ pub fn import_descriptors(
     network: Network,
     birthday: Checkpoint,
     name: Option<String>,
+    // The device these came from, when they came from one: its kind, so
+    // signing knows what to connect to, and its fingerprint, so it can refuse
+    // a device that is not this one.
+    device: Option<(String, String)>,
 ) -> Result<Summary> {
     if texts.is_empty() {
         anyhow::bail!("there is nothing to import");
@@ -2590,6 +2625,10 @@ pub fn import_descriptors(
 
     let mut meta = Meta::watch_only(network, birthday, primary, name);
     meta.script_types = script_types;
+    if let Some((kind, fingerprint)) = device {
+        meta.device_kind = Some(kind);
+        meta.device_fingerprint = Some(fingerprint);
+    }
     meta.save(paths)?;
 
     let mut portfolio = accounts::Portfolio { accounts, primary };

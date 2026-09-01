@@ -826,6 +826,80 @@ impl Session {
     /// Broadcast first, then record locally. A transaction no peer accepted is
     /// not a transaction, and showing it as pending would be a lie the wallet
     /// then has to walk back.
+    /// The signing policy for a path, in the form a Ledger asks for.
+    ///
+    /// Read off the descriptor the wallet already holds rather than kept
+    /// separately: they describe the same account, and two records of one fact
+    /// drift. `<0;1>/*` becomes `/**` — the same statement, both chains, in the
+    /// notation the device's policy language uses.
+    pub async fn device_policy(&self, script_type: super::accounts::ScriptType) -> Result<String> {
+        let portfolio = self.portfolio.lock().await;
+        let account = portfolio
+            .accounts
+            .iter()
+            .find(|a| a.script_type == script_type)
+            .context("that derivation path is not part of this wallet")?;
+        let descriptor = account
+            .wallet
+            .public_descriptor(bdk_wallet::KeychainKind::External)
+            .to_string();
+        Ok(crate::hardware::policy_from_descriptor(&descriptor))
+    }
+
+    /// Finish a payment somebody else signed, and broadcast it.
+    ///
+    /// The counterpart to `sign_and_send` for a wallet that holds no keys: the
+    /// signatures came from a device or a file, and all that is left is to
+    /// finalise, check the result is a real transaction, and announce it.
+    ///
+    /// **Finalising is done by us, from our own descriptors.** A device hands
+    /// back partial signatures; turning those into script witnesses is the
+    /// wallet's job, and doing it here means a file that claims to be finished
+    /// is checked rather than believed.
+    pub async fn finalize_and_send(
+        &self,
+        mut plan: super::send::Plan,
+    ) -> Result<(bdk_wallet::bitcoin::Txid, Summary)> {
+        let mut portfolio = self.portfolio.lock().await;
+        let account = portfolio
+            .accounts
+            .iter_mut()
+            .find(|a| a.script_type == plan.from)
+            .context("that derivation path is not part of this wallet")?;
+
+        if !account
+            .wallet
+            .finalize_psbt(&mut plan.psbt, bdk_wallet::SignOptions::default())
+            .map_err(|e| anyhow!("the signed payment could not be finished: {e}"))?
+        {
+            bail!(
+                "that payment is not completely signed yet. Every input needs a signature \
+                 before it can be broadcast."
+            );
+        }
+
+        let tx = plan
+            .psbt
+            .extract_tx()
+            .map_err(|e| anyhow!("the signed transaction is not valid: {e}"))?;
+        let txid = tx.compute_txid();
+
+        self.requester
+            .submit_package(tx.clone())
+            .await
+            .map_err(|e| anyhow!("the transaction could not be announced: {e}"))?;
+
+        let seen = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        account.wallet.apply_unconfirmed_txs([(tx, seen)]);
+        account.persist()?;
+
+        let summary = Summary::from_portfolio(&mut portfolio)?;
+        Ok((txid, summary))
+    }
+
     pub async fn sign_and_send(
         &self,
         mut plan: super::send::Plan,

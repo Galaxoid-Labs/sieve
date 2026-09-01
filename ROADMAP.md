@@ -429,10 +429,25 @@ Working today:
 
 Left to build:
 
-- [ ] **Signing over USB** — `HWI::sign_tx(&mut Psbt)`. The PSBT is already built and reviewed
-      by the watch-only path; what is missing is handing it to the device, a "confirm on your
-      device" state that can be cancelled, finalizing, and broadcast. Today the send flow stops
-      at an explanatory page for a watch-only wallet.
+- [x] **Signing over USB** — `HWI::sign_tx(&mut Psbt)`, on a wallet imported from a device.
+      **Untested against real hardware**, which is the one thing left: every part of it that
+      can be checked without a device on the desk is, and none of the parts that need one are.
+      - **No wallet-policy registration**, which this list previously said was needed for
+        everything but taproot. `with_wallet` takes `hmac: Option<..>` and an *empty name*
+        marks a default policy the Ledger app accepts on sight; all four standard accounts are
+        default policies. Registration is for multisig and custom miniscript.
+      - **The policy is derived from the stored descriptor**, not kept beside it, because two
+        records of one fact drift — and a policy that has quietly stopped matching is a device
+        refusing to sign for a reason nothing on screen can explain.
+      - **`Meta` records the device's kind and fingerprint.** The kind says what to connect to,
+        the fingerprint says which device — checked before signing, because the wrong device
+        either refuses obscurely or returns signatures that fail to finalise with nothing to
+        say why.
+      - **Finalising is ours.** A device returns partial signatures; turning those into
+        witnesses is the wallet's job, so a file claiming to be finished is checked rather
+        than believed.
+- [ ] **Exercise signing against a real device.** Everything above is written and none of it
+      has met hardware.
 - [ ] **Verify address on device** — `display_address`. `AddressScript::P2TR(path)` works on a
       Ledger with no setup, so taproot wallets could have it immediately. The other three paths
       go through `AddressScript::Miniscript { index, change }`, which the device only answers

@@ -35,6 +35,8 @@ pub enum WalletPageOutput {
     /// Save a reviewed payment for a signer elsewhere. The app owns the file
     /// dialogs, as it does for labels and descriptors.
     SaveUnsigned(Box<crate::wallet::send::Plan>),
+    /// Sign it on the device this wallet came from, then broadcast.
+    SignOnDevice(Box<crate::wallet::send::Plan>),
     /// Announce an unconfirmed transaction to another peer.
     Rebroadcast {
         txid: String,
@@ -681,6 +683,10 @@ pub enum WalletPageMsg {
     },
     /// Save a reviewed payment for a signer elsewhere.
     SaveUnsigned(Box<crate::wallet::send::Plan>),
+    /// Sign it on the device this wallet came from, then broadcast.
+    SignOnDevice(Box<crate::wallet::send::Plan>),
+    /// Which device this wallet was imported from, if any.
+    SetDevice(Option<crate::hardware::Kind>),
     /// Name a payment just made, from what its request called itself.
     NameTransaction {
         txid: String,
@@ -2307,6 +2313,7 @@ impl Component for WalletPage {
                     WalletPageMsg::SetCoinLabel { outpoint, text }
                 }
                 SendOutput::SaveUnsigned(plan) => WalletPageMsg::SaveUnsigned(plan),
+                SendOutput::SignOnDevice(plan) => WalletPageMsg::SignOnDevice(plan),
             });
 
         let mut model = WalletPage {
@@ -2616,6 +2623,10 @@ impl Component for WalletPage {
                 let _ = sender.output(WalletPageOutput::SaveUnsigned(plan));
             }
 
+            WalletPageMsg::SignOnDevice(plan) => {
+                let _ = sender.output(WalletPageOutput::SignOnDevice(plan));
+            }
+
             // Straight onto the road every other label takes: the app owns the
             // file, so the app does the writing.
             WalletPageMsg::SetCoinLabel { outpoint, text } => {
@@ -2635,6 +2646,8 @@ impl Component for WalletPage {
                     self.rebuild_transactions(&summary);
                 }
             }
+
+            WalletPageMsg::SetDevice(kind) => self.send.emit(SendMsg::SetDevice(kind)),
 
             WalletPageMsg::SetWatchOnly(watch_only) => {
                 // Kept here too: the transaction page offers to replace a

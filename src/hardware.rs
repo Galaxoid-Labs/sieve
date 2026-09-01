@@ -30,6 +30,17 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Read back a kind recorded in a wallet's metadata.
+    ///
+    /// Paired with `label`, which writes it. A wallet whose device is no longer
+    /// a kind Sieve knows returns `None` rather than guessing — connecting to
+    /// the wrong sort of device is a worse answer than saying so.
+    pub fn from_label(text: &str) -> Option<Self> {
+        [Kind::Ledger, Kind::Coldcard, Kind::Specter]
+            .into_iter()
+            .find(|kind| kind.label().eq_ignore_ascii_case(text))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Kind::Ledger => "Ledger",
@@ -187,7 +198,10 @@ pub fn account_path(script_type: ScriptType, network: Network) -> Result<Derivat
 pub async fn account_descriptors(
     kind: Kind,
     network: Network,
-) -> Result<Vec<(ScriptType, String)>> {
+) -> Result<(
+    bdk_wallet::bitcoin::bip32::Fingerprint,
+    Vec<(ScriptType, String)>,
+)> {
     let device = connect(kind).await?;
 
     // Asked for first and logged, because it is the thing that explains most
@@ -254,7 +268,7 @@ pub async fn account_descriptors(
              The device said: {detail}"
         );
     }
-    Ok(found)
+    Ok((fingerprint, found))
 }
 
 /// Assemble the descriptor a device's key describes.
@@ -281,39 +295,118 @@ pub fn descriptor(
     }
 }
 
-/// The same account, written the way a Ledger wants it for signing.
+/// The account a wallet already holds, written the way a Ledger asks for it.
 ///
-/// **A "default" wallet policy, which needs no registration.** The Ledger app
+/// **Derived from the stored descriptor rather than kept separately.** They
+/// describe the same account, and two records of one fact drift — a policy that
+/// has quietly stopped matching the descriptor is a device that refuses to sign
+/// for a reason nothing on screen can explain.
+///
+/// A "default" wallet policy, which needs no registration. The Ledger app
 /// divides policies in two: standard single-signature ones it recognises on
 /// sight, and everything else — multisig, custom miniscript — which must be
 /// registered on the device once, confirmed by hand, and thereafter presented
-/// with the HMAC that registration returns. The four BIP-44/49/84/86 accounts
-/// are all in the first group, so signing needs no setup step at all.
+/// with the HMAC registration returns. All four of BIP-44/49/84/86 are in the
+/// first group, so signing needs no setup step at all.
 ///
-/// Two details carry that, and both are easy to get wrong:
+/// Three transformations, each of them required:
 ///
-/// - **The name must be empty.** It is what marks the policy default. A named
-///   policy is a registered one, and the device will ask for an HMAC Sieve does
-///   not have.
-/// - **`/**` rather than `/<0;1>/*`.** The same statement — both chains of the
-///   account — in the notation the device's policy language uses. `descriptor`
-///   above writes the other form because that is what BDK and other wallets
-///   read; this is the same account said to a different listener.
-pub fn policy(
-    script_type: ScriptType,
-    fingerprint: bdk_wallet::bitcoin::bip32::Fingerprint,
-    path: &DerivationPath,
-    xpub: &bdk_wallet::bitcoin::bip32::Xpub,
-) -> String {
-    let key = format!(
-        "[{fingerprint}/{}]{xpub}/**",
-        path.to_string().trim_start_matches("m/")
-    );
-    match script_type {
-        ScriptType::Legacy => format!("pkh({key})"),
-        ScriptType::NestedSegwit => format!("sh(wpkh({key}))"),
-        ScriptType::NativeSegwit => format!("wpkh({key})"),
-        ScriptType::Taproot => format!("tr({key})"),
+/// - **`/**` in place of the chain.** The same statement — both chains of the
+///   account — in the notation the policy language uses. BDK stores one chain
+///   per descriptor; the policy names the pair.
+/// - **`'` in place of `h`.** Both are valid hardened markers in a descriptor
+///   and the device's parser wants the apostrophe.
+/// - **The checksum goes.** It belongs to the descriptor, not to a policy.
+///
+/// The empty *name* that marks a policy default is applied at the call site, in
+/// `connect_for_signing`, because it is a property of the connection rather than
+/// of the string.
+pub fn policy_from_descriptor(descriptor: &str) -> String {
+    let body = descriptor.split('#').next().unwrap_or(descriptor);
+    let chains = body.replace("/0/*", "/**").replace("/<0;1>/*", "/**");
+
+    // Only inside the origin brackets. A blanket replacement of `h` turns
+    // `wpkh` into `wpk'` and eats every `h` in the base58 key — which is the
+    // sort of thing that reaches a device as an unparseable policy and comes
+    // back as a refusal with nothing to say why.
+    let (Some(open), Some(close)) = (chains.find('['), chains.find(']')) else {
+        return chains;
+    };
+    let mut out = String::with_capacity(chains.len());
+    out.push_str(&chains[..open]);
+    out.push_str(&chains[open..=close].replace('h', "'"));
+    out.push_str(&chains[close + 1..]);
+    out
+}
+
+/// Have a device sign a payment Sieve built.
+///
+/// The PSBT goes out carrying the key origins on every input and on the change
+/// output — `wallet::send`'s own test asserts that — and the device uses them to
+/// find its keys, sign, and hand back partial signatures. Nothing secret crosses
+/// the cable in either direction: the file describes public scripts and amounts,
+/// and what comes back is signatures.
+///
+/// **The fingerprint is checked first.** A different device holds different
+/// keys, and asked to sign it either refuses for a reason that needs decoding or
+/// returns signatures that do not verify — surfacing much later as a
+/// finalisation that fails with nothing to say why. Comparing four bytes turns
+/// that into a sentence somebody can act on.
+///
+/// The policy is only for a Ledger, and only because its app asks for one. Every
+/// other device reads the derivations out of the PSBT.
+pub async fn sign(
+    kind: Kind,
+    policy: &str,
+    expect_fingerprint: Option<&str>,
+    psbt: &mut bdk_wallet::bitcoin::Psbt,
+) -> Result<()> {
+    let device = connect_for_signing(kind, policy).await?;
+
+    if let Some(expected) = expect_fingerprint {
+        let found = device
+            .get_master_fingerprint()
+            .await
+            .map_err(|e| anyhow!("{}", explain(&e)))?
+            .to_string();
+        if !found.eq_ignore_ascii_case(expected) {
+            bail!(
+                "this is not the device this wallet was imported from. It reports {found}, \
+                 and the wallet was made from {expected}. Signing with the wrong device \
+                 produces signatures that do not match these coins."
+            );
+        }
+    }
+
+    device
+        .sign_tx(psbt)
+        .await
+        .map_err(|e| anyhow!("{}", explain(&e)))?;
+    Ok(())
+}
+
+/// A connection set up to sign, which for a Ledger means carrying the policy.
+///
+/// `connect` hands back a `Box<dyn HWI>`, and `with_wallet` is Ledger's own —
+/// so the policy has to be applied before the type is erased. The name is
+/// deliberately empty: that is what marks the policy *default*, which the app
+/// accepts without registration. A named policy is a registered one and would
+/// need the HMAC that registering returns.
+async fn connect_for_signing(kind: Kind, policy: &str) -> Result<Box<dyn HWI + Send>> {
+    match kind {
+        Kind::Ledger => {
+            let ledger = async_hwi::ledger::Ledger::try_connect_hid()
+                .map_err(|e| anyhow!("could not open the Ledger: {e}"))?;
+            let ledger = ledger.with_wallet("", policy, None).map_err(|e| {
+                anyhow!(
+                    "this account is not one the Ledger will sign for: {}",
+                    explain(&e)
+                )
+            })?;
+            Ok(Box::new(ledger))
+        }
+        // Everything else finds its keys from the PSBT's own derivations.
+        other => connect(other).await,
     }
 }
 
@@ -428,13 +521,11 @@ mod tests {
         );
     }
 
-    /// The signing policy and the descriptor describe the same account, and
-    /// the *only* differences allowed between them are the two the device's
-    /// policy language requires. Everything else matching is what makes it the
-    /// same wallet on both sides of the USB cable.
-    ///
-    /// Without a device on the desk this is the whole of what can be checked
-    /// about signing, so it checks it precisely.
+    /// The policy and the descriptor describe the same account, and the only
+    /// differences allowed are the ones the device's policy language requires.
+    /// Everything else matching is what makes it one wallet on both sides of
+    /// the cable — and without a device on the desk this is the whole of what
+    /// can be checked about signing, so it checks it precisely.
     #[test]
     fn the_signing_policy_is_the_same_account_as_the_descriptor() {
         let fingerprint = Fingerprint::from_str("ab12cd34").unwrap();
@@ -442,24 +533,42 @@ mod tests {
 
         for script_type in ScriptType::ALL {
             let path = account_path(script_type, Network::Bitcoin).unwrap();
-            let policy = policy(script_type, fingerprint, &path, &xpub);
             let descriptor = descriptor(script_type, fingerprint, &path, &xpub);
+            let policy = policy_from_descriptor(&descriptor);
 
-            // Both chains, in the notation each listener reads. Nested
-            // segwit closes two brackets, so the tail is not a fixed string.
+            // Both chains, in the notation the device reads.
             assert!(policy.contains("/**)"), "{script_type}: {policy}");
             assert!(!policy.contains("<0;1>"), "{script_type}: {policy}");
-            assert!(descriptor.contains("<0;1>"), "{script_type}: {descriptor}");
 
-            // The same key, origin and script function on both sides.
-            assert_eq!(
-                policy.replace("/**", "/<0;1>/*"),
-                descriptor,
-                "{script_type}: the policy and the descriptor are different accounts"
-            );
+            // Hardened steps as apostrophes, which is what its parser wants —
+            // checked on the origin alone, because a base58 key contains `h`
+            // legitimately and a blanket check would have to be satisfied by
+            // corrupting one.
+            let origin = &policy[policy.find('[').unwrap()..=policy.find(']').unwrap()];
+            assert!(!origin.contains('h'), "{script_type}: {origin}");
+            assert!(origin.contains('\''), "{script_type}: {origin}");
+            // And the key itself is untouched.
+            assert!(policy.contains(XPUB), "{script_type}: the key was altered");
+
+            // The same key, origin and script function underneath.
             assert!(policy.contains(&format!("[{fingerprint}/")), "{policy}");
             assert!(policy.contains(XPUB), "{policy}");
+            assert!(
+                policy.starts_with(descriptor.split('(').next().unwrap()),
+                "{script_type}: the policy builds a different script: {policy}"
+            );
         }
+    }
+
+    /// A stored descriptor is one chain and carries a checksum; a policy is
+    /// both chains and carries none.
+    #[test]
+    fn a_stored_descriptor_becomes_a_policy() {
+        let stored = "wpkh([ab12cd34/84h/0h/0h]xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSWGFNbi8Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj/0/*)#abcdefgh";
+        let policy = policy_from_descriptor(stored);
+        assert!(!policy.contains('#'), "{policy}");
+        assert!(policy.ends_with("/**)"), "{policy}");
+        assert!(policy.contains("[ab12cd34/84'/0'/0']"), "{policy}");
     }
 
     /// The descriptor a device's key becomes has to be one the importer reads

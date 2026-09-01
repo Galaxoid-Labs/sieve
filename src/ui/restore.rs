@@ -73,7 +73,10 @@ pub enum RestoreCmd {
     Devices(Vec<crate::hardware::Found>),
     /// A device answered with the descriptors of its accounts — one per
     /// standard path, the way a seed import searches all of them.
-    FromDevice(Result<Vec<String>, String>),
+    /// The device's kind and master fingerprint, and a descriptor per account
+    /// path. Both are recorded: the kind so signing knows what to connect to,
+    /// the fingerprint so it can refuse a device that is not this one.
+    FromDevice(Result<(String, String, Vec<String>), String>),
     Finished(Result<(Paths, Summary), String>),
 }
 
@@ -629,7 +632,13 @@ impl Component for Restore {
                         RestoreCmd::FromDevice(
                             crate::hardware::account_descriptors(kind, network)
                                 .await
-                                .map(|found| found.into_iter().map(|(_, text)| text).collect())
+                                .map(|(fingerprint, found)| {
+                                    (
+                                        kind.label().to_string(),
+                                        fingerprint.to_string(),
+                                        found.into_iter().map(|(_, text)| text).collect(),
+                                    )
+                                })
                                 .map_err(|e| e.to_string()),
                         )
                     });
@@ -726,7 +735,7 @@ impl Component for Restore {
                 return;
             }
 
-            RestoreCmd::FromDevice(Ok(descriptors)) => {
+            RestoreCmd::FromDevice(Ok((kind, fingerprint, descriptors))) => {
                 // The device answered; now it is an ordinary descriptor
                 // import, which is the whole point of the seam.
                 let Some(pending) = self.pending.take() else {
@@ -743,6 +752,7 @@ impl Component for Restore {
                             pending.network,
                             pending.birthday,
                             pending.name,
+                            Some((kind, fingerprint)),
                         )
                         .map(|summary| (created, summary))
                         .map_err(|e| e.to_string()),

@@ -147,6 +147,10 @@ pub enum SendMsg {
     SaveUnsigned,
     /// The same payment as base64, for pasting where a file cannot go.
     CopyUnsigned,
+    /// Hand the payment to the device this wallet came from.
+    SignOnDevice,
+    /// Which device this wallet was imported from, if any.
+    SetDevice(Option<crate::hardware::Kind>),
     /// Freeze a coin, or let it be spent again.
     SetFrozen {
         outpoint: String,
@@ -220,6 +224,8 @@ pub enum SendOutput {
     /// Save this payment for a signer elsewhere. The app owns the file
     /// dialogs, as it does for labels and descriptors.
     SaveUnsigned(Box<Plan>),
+    /// Sign this on the device the wallet was imported from, then broadcast.
+    SignOnDevice(Box<Plan>),
     /// Sign and broadcast the plan already reviewed.
     Send {
         plan: Box<Plan>,
@@ -255,6 +261,9 @@ pub struct SendForm {
     min_fee: Option<f64>,
     /// No keys in this wallet: it can build a payment but not sign one.
     watch_only: bool,
+    /// The device this wallet was imported from, when it was imported from one
+    /// — which is what decides whether signing over the cable is offered.
+    device: Option<crate::hardware::Kind>,
     has_passphrase: bool,
     /// Where the number in the fee field came from, said under it.
     fee_source: Option<String>,
@@ -1726,6 +1735,7 @@ impl Component for SendForm {
             max: false,
             min_fee: None,
             watch_only: false,
+            device: None,
             has_passphrase: false,
             fee_source: None,
             suggested: None,
@@ -1909,6 +1919,16 @@ impl Component for SendForm {
                         "Copied. Paste it into whatever will sign it".into(),
                     ));
                 }
+            }
+
+            SendMsg::SetDevice(kind) => self.device = kind,
+
+            SendMsg::SignOnDevice => {
+                let Some(plan) = self.plan.clone() else {
+                    return;
+                };
+                self.busy = true;
+                let _ = sender.output(SendOutput::SignOnDevice(Box::new(plan)));
             }
 
             SendMsg::SaveUnsigned => {
@@ -2333,8 +2353,17 @@ impl SendForm {
         if self.watch_only {
             dialog.add_response("copy", "Copy as text");
             dialog.add_response("save", "Save unsigned…");
-            dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-            dialog.set_default_response(Some("save"));
+            // A device on the cable is the shorter road: no file, no card, no
+            // carrying it anywhere. The file stays offered beside it, because
+            // it is the only road for a signer that is not plugged in.
+            if self.device.is_some() {
+                dialog.add_response("device", "Sign on device");
+                dialog.set_response_appearance("device", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("device"));
+            } else {
+                dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("save"));
+            }
         } else {
             dialog.add_response("send", "Send");
             dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
@@ -2377,6 +2406,7 @@ impl SendForm {
                 )),
                 "save" => sender.input(SendMsg::SaveUnsigned),
                 "copy" => sender.input(SendMsg::CopyUnsigned),
+                "device" => sender.input(SendMsg::SignOnDevice),
                 _ => {}
             });
         }

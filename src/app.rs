@@ -402,6 +402,8 @@ pub enum AppMsg {
     },
     /// Ask where to put a payment file, for a signer that is not this program.
     SaveUnsigned(Box<wallet::send::Plan>),
+    /// Hand the payment to the device this wallet came from, then broadcast.
+    SignOnDevice(Box<wallet::send::Plan>),
     /// Write it there.
     WriteUnsigned {
         plan: Box<wallet::send::Plan>,
@@ -694,6 +696,9 @@ impl Component for App {
                     }
                     crate::ui::wallet_page::WalletPageOutput::SaveUnsigned(plan) => {
                         AppMsg::SaveUnsigned(plan)
+                    }
+                    crate::ui::wallet_page::WalletPageOutput::SignOnDevice(plan) => {
+                        AppMsg::SignOnDevice(plan)
                     }
                     crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
                     crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
@@ -1419,6 +1424,63 @@ impl Component for App {
                         chosen(file)
                     });
                 }
+            }
+
+            AppMsg::SignOnDevice(plan) => {
+                let (Some(session), Some(paths)) = (self.session.clone(), self.active.clone())
+                else {
+                    self.wallet.emit(WalletPageMsg::Toast(
+                        "Not connected to the network yet — wait for peers".into(),
+                    ));
+                    return;
+                };
+                let Some(meta) = wallet::Meta::load(&paths) else {
+                    return;
+                };
+                let Some(kind) = meta
+                    .device_kind
+                    .as_deref()
+                    .and_then(crate::hardware::Kind::from_label)
+                else {
+                    // A wallet imported from a pasted descriptor, or from a
+                    // device before this was recorded. Its file is still the
+                    // way through, which is why Save stays offered beside this.
+                    self.wallet.emit(WalletPageMsg::Toast(
+                        "Sieve does not know which device this wallet came from — save the \
+                         payment to a file instead"
+                            .into(),
+                    ));
+                    return;
+                };
+                let expected = meta.device_fingerprint.clone();
+
+                self.wallet.emit(WalletPageMsg::Toast(
+                    "Check the payment on your device and approve it".into(),
+                ));
+
+                sender.oneshot_command(async move {
+                    let mut plan = *plan;
+                    // The policy is read off the descriptor this wallet already
+                    // holds, so the account the device is asked to sign for and
+                    // the account the payment was built from cannot differ.
+                    let policy = match session.device_policy(plan.from).await {
+                        Ok(policy) => policy,
+                        Err(e) => return AppCmd::Sent(Err(e.to_string())),
+                    };
+                    if let Err(e) =
+                        crate::hardware::sign(kind, &policy, expected.as_deref(), &mut plan.psbt)
+                            .await
+                    {
+                        return AppCmd::Sent(Err(e.to_string()));
+                    }
+                    AppCmd::Sent(
+                        session
+                            .finalize_and_send(plan)
+                            .await
+                            .map(|(txid, summary)| (txid.to_string(), summary))
+                            .map_err(|e| e.to_string()),
+                    )
+                });
             }
 
             AppMsg::SaveUnsigned(plan) => {
@@ -3222,6 +3284,11 @@ impl App {
             .emit(WalletPageMsg::SetMatchedBlocks(meta.matched_blocks));
         self.wallet
             .emit(WalletPageMsg::SetWatchOnly(meta.watch_only));
+        self.wallet.emit(WalletPageMsg::SetDevice(
+            meta.device_kind
+                .as_deref()
+                .and_then(crate::hardware::Kind::from_label),
+        ));
         self.wallet
             .emit(WalletPageMsg::SetHasPassphrase(meta.bip39_passphrase));
         self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
