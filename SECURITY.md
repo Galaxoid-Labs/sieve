@@ -28,6 +28,27 @@ claims otherwise is lying.
 
 ## Key material
 
+**Where it comes from** — `src/wallet/mod.rs`
+
+`getrandom::fill`, which is the `getrandom(2)` syscall on Linux — the same call
+the vault uses for its salt, its nonces and its data key. One entropy source in
+the program. A failure to read it stops wallet creation rather than falling back
+to anything, because a phrase from a fallback nobody chose is indistinguishable
+from a good one for as long as the wallet exists.
+
+`Mnemonic::generate` would have supplied its own from `rand`'s `ThreadRng` — a
+real CSPRNG, seeded from the OS, never unsafe — but it meant the one
+irreplaceable secret came from userspace while everything else came from the
+kernel, and one source is easier to argue about than two.
+
+Dice rolls, when somebody supplies them, are **mixed in and never substituted**:
+`os_bytes XOR SHA256(rolls)`. So no roll count and no loaded die can produce a
+phrase weaker than the operating system alone would have given. Replacing the OS
+bytes with `SHA256(rolls)` is verifiable and is the one thing that must never be
+built here; `DICE.md` records why, and that Electrum shipped exactly that and
+withdrew it. A test asserts the same rolls twice give *different* phrases, which
+is the only external sign that the mixing is still mixing.
+
 **At rest** — `src/vault/`
 
 The seed is sealed with XChaCha20-Poly1305 under a key derived by Argon2id at
@@ -58,18 +79,37 @@ not worth that. Sparrow's one improvement on the usual arrangement — locking
 watch-only wallets, on the grounds that public keys are still worth protecting
 — is the part Sieve adopted.
 
-**In memory** — `src/wallet/send.rs`, `src/wallet/node.rs`
+**In memory** — `src/wallet/send.rs`, `src/wallet/node.rs`, `src/wallet/mod.rs`
 
-The seed is decrypted at exactly two moments: signing a payment, and revealing
-the phrase. In both, the password is asked for again — being unlocked is not
-being able to spend. The signing wallet is built with
-`create_wallet_no_persist`, so key material never reaches a database, and is
-dropped when the signature is finished.
+The seed is decrypted at exactly three moments, and each asks for the password
+again — being unlocked is not being able to spend:
 
-Secrets travel in `Zeroizing`, and the types that carry them —
-`Password`, `Secret` — implement `Debug` by hand to print `<redacted>`.
-That is not tidiness: Relm4 traces every message under `RUST_LOG=relm4=trace`,
-and a derived `Debug` would have written seed phrases into the log.
+| Where | Why |
+|---|---|
+| `app.rs`, signing a payment | the only place a signature is made |
+| `ui/reveal.rs`, showing the phrase | the operation *is* the disclosure |
+| `wallet::add_script_types` | a derivation path nobody watched has no descriptors anywhere, and only the seed makes them |
+
+The signing wallet is built with `create_wallet_no_persist`, so key material
+never reaches a database, and is dropped when the signature is finished. The
+third case derives public descriptors and writes only those.
+
+`wallet::unlock` also opens the vault, and is deliberately not on that list: it
+decrypts to prove the password is right and drops the plaintext inside the
+function. `UnlockOutput::Unlocked` carries nothing but paths and a watch-only
+summary. **There is no field anywhere holding a decrypted seed for the session,
+and adding one is a bug.**
+
+Secrets travel in `Zeroizing`, and the types that carry them — `Password`,
+`Secret`, `Face` — implement `Debug` by hand to print `<redacted>`. That is not
+tidiness: Relm4 traces every message under `RUST_LOG=relm4=trace`, and a derived
+`Debug` would have written seed phrases into the log.
+
+`Face` is one die roll, and it is on that list for a reason worth stating: a
+single face looks harmless, and a derived `Debug` would have written the whole
+sequence to the log one line at a time. The rolls are a share of the seed until
+the phrase exists. They are never written to disk, and are dropped when the roll
+screen is left.
 
 **What that does not cover.** A Rust `String` can reallocate, leaving a copy of
 the old buffer for the allocator to hand out later; `Zeroizing` clears the
@@ -166,11 +206,11 @@ more people can read than the wallet file.
 
 ## The dependencies
 
-310 crates, audited with `cargo-audit` and governed by `deny.toml`. Both were
-run for the first time in the same pass that produced this document.
+310 crates, audited with `cargo-audit` and governed by `deny.toml`.
 
-**`cargo audit`: no vulnerabilities.** 310 crates against 1,226 RustSec
-advisories, no warnings, nothing yanked.
+**`cargo audit`: no vulnerabilities.** 310 crates against 1,235 RustSec
+advisories, no warnings, nothing yanked. Re-run when this file was last
+revised, not quoted from the pass that first produced it.
 
 **`cargo deny check`: advisories ok, bans ok, licenses ok, sources ok.**
 
@@ -188,14 +228,16 @@ parts of it are worth reading:
   on the list stops the check and gets read.
 - **Duplicate versions warn rather than fail**, because the warning is the
   point. Today it reports four versions of `bitcoin_hashes` (0.13, 0.14, 0.15,
-  0.20) and two of `rand_core` (0.6, 0.10), pulled in by different parts of
-  the Bitcoin stack. Four copies of a hashing implementation is not a
+  0.20) and two each of `rand_core` (0.6, 0.10) and `getrandom` (0.2, 0.4),
+  pulled in by different parts of the Bitcoin stack. Sieve's own entropy call is
+  `getrandom` 0.4, the direct dependency; 0.2 arrives under `rand`. Four copies of a hashing implementation is not a
   vulnerability, and it is exactly the shape of thing worth seeing rather than
   hiding — which is why the setting is `warn` and not `allow`.
 
-Neither tool runs in CI yet, because there is no CI yet; `PACKAGING.md` puts
-both in the release workflow, where a tag that fails an audit should not
-produce packages.
+**Both now run in CI**, on every push, alongside `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings` and `cargo test --locked`. An
+advisory published tomorrow therefore fails the next build rather than waiting
+for somebody to remember this file.
 
 ## Known gaps
 - **No reproducible build**, so a binary cannot be checked against this source.
@@ -212,5 +254,11 @@ produce packages.
 
 ## If you find something
 
-There is no security contact yet because there is no public repository yet.
-When there is, this section gets an address and a key.
+The repository is public — <https://github.com/Galaxoid-Labs/sieve> — and there
+is **still no security contact**, which is now a gap rather than a consequence.
+Until this section names one, a report has nowhere private to go: an issue is
+public the moment it is filed, and a vulnerability in a wallet should not be
+disclosed that way.
+
+Enabling GitHub's private vulnerability reporting on the repository is the
+smallest fix, and this section should then say so and give a key.
