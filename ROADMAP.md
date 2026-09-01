@@ -49,20 +49,9 @@ moved real money on mainnet. What is left is who can get it and what a device ca
    device cannot sign yet rather than failing at the last step. A release that ships this gap
    is keeping a promise it made; a release that never happens keeps none.
 
-Then, in rough order:
-
-- **Nothing the node downloads is kept.** [M2] `bip157::Node::new` destructures its config
-  with `data_path: _`, so the data directory Sieve hands it is discarded, and an attempt to
-  keep headers ourselves failed for a second reason — `build_with_wallets` sets its own chain
-  state one line before it builds, discarding any snapshot given to the builder. The note
-  about that is in `node.rs` where somebody would otherwise try it again.
-
-  What this actually costs is narrower than it was once written down as. `resume_point` moves
-  the recovery checkpoint forward, which is the one lever the API offers, and a synced wallet
-  starts from its own checkpoint — an ordinary warm start reaches a balance in about seven
-  seconds and re-downloads no headers. The cost lands on a **rescan** and on **importing a
-  wallet with history**, both of which re-fetch filters from the birthday, and on a second
-  wallet on the same network gaining nothing from the first.
+That is the whole list. Everything else on the plan is either built or written down as a
+decision not to build it — see M2 on keeping headers, M6 on `arti` and notifications, and M7
+on Secret Service and FIDO2. Five things that read as work for months and were not.
 
 ## Closed since that list was written
 
@@ -302,7 +291,7 @@ tests.
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never
 crosses a component boundary as a message.
 
-### M2 — Compact filter sync — DONE, except keeping what it downloads
+### M2 — Compact filter sync — DONE
 *Done when: a funded signet wallet shows the right balance after a cold start.* It does, on
 mainnet as well, from a cold start and from an interrupted one.
 
@@ -315,10 +304,30 @@ mainnet as well, from a cold start and from an interrupted one.
 - [x] A resume point (`Meta.scanned_to`), so an interrupted scan restarts where it stopped
       rather than at the birthday.
 - [x] Rescan on demand, behind a dialog that says what it costs.
-- [ ] Somewhere to keep what the node downloads. The library's own data directory is
-      discarded, so this means either a newer kyoto that honours it, or taking over the glue
-      between filters and wallet updates — which `node.rs` argues against, and which the
-      arithmetic may eventually justify.
+- **Deferred to upstream: somewhere to keep what the node downloads.** bip157 accepts a
+  `data_dir` and ignores it, so block headers live in memory. This sat here as work and the
+  arithmetic says it is not.
+
+  What gets re-fetched is **headers: about 77 MB and thirteen minutes**, and only by a wallet
+  still at its birthday. A synced wallet starts from its own checkpoint — BDK persists that —
+  and a warm start costs seven blocks. The case that actually hurts is a **rescan**, and there
+  headers are thirteen minutes of *several hours*: the rest is filters at 3–4 GB, which resume
+  already protects. So the prize is about five percent of the expensive thing.
+
+  The price is either a kyoto that honours the field — a watch on somebody else's project,
+  not work — or taking over `build_with_wallets` and reimplementing the glue that decides
+  which blocks get fetched, which is the core of the sync engine, rewritten to save thirteen
+  minutes.
+
+  There is history here worth not repeating. A store that wrote, merged, validated and loaded
+  900,000 headers **did nothing at all**: `build_with_wallets` sets its own chain state one
+  line before it builds and discards any snapshot handed to the builder. That store is gone,
+  and the one thing it was truly needed for — the block hash at the resume height — now comes
+  from `header_hash`, reading the node's own memory. The note in `node.rs` is there so nobody
+  builds it a second time.
+
+  And a restart's real cost is not headers at all: it is about a minute of peer discovery,
+  which remembered peers already attack.
 
 ### M3 — Receive — DONE
 - [x] `reveal_next_address` with persistence, and a QR rendered in-process — handing an address
