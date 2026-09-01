@@ -975,6 +975,37 @@ impl PhraseLength {
             PhraseLength::TwentyFour => 24,
         }
     }
+
+    /// How much entropy the phrase carries. BIP-39 fixes it at `words * 32 / 3`.
+    pub fn bits(self) -> u32 {
+        self.words() as u32 * 32 / 3
+    }
+}
+
+/// The dice offered for supplying entropy of one's own, smallest first.
+///
+/// d6 is the floor as well as the default, and the arithmetic is why: every
+/// smaller die is *more* work for the same bits — a d4 wants 128 rolls where a
+/// d6 wants 100, a coin 256 — so there is no trade to offer, only a worse
+/// option. The usual argument for a coin is that everybody has one, and it
+/// fails here too: anybody owning a d4 owns a d6.
+pub const DICE: [u32; 5] = [6, 8, 10, 12, 20];
+
+/// How many rolls of an `sides`-sided die carry a phrase's worth of entropy.
+///
+/// `bits / log2(sides)`, rounded up. **Derived rather than tabulated, and that
+/// is deliberate.** Feather documents 59 / 42 / 36 rolls for d6 / d12 / d20 and
+/// those numbers are right — for Monero's Polyseed, which encodes about 150
+/// bits. Transcribed into a 24-word BIP-39 wallet they are a hundred bits short,
+/// and the wallet would look entirely ordinary. A formula cannot be copied from
+/// the wrong source.
+///
+/// Rounding up puts d6 at 100 for 256 bits where Coldcard and SeedSigner say 99.
+/// Ninety-nine rolls carry 255.9 bits, which is not a real shortfall; but this
+/// rounds the way the arithmetic does rather than the way the convention does,
+/// and under mixing the difference cannot matter either way.
+pub fn rolls_needed(sides: u32, length: PhraseLength) -> u32 {
+    (f64::from(length.bits()) / f64::from(sides).log2()).ceil() as u32
 }
 
 /// A fresh English mnemonic of the requested length.
@@ -994,10 +1025,52 @@ impl PhraseLength {
 /// and a phrase generated from a fallback nobody chose is exactly the kind of
 /// silent weakness that looks identical to a good wallet.
 ///
-/// This is also the seam user-supplied entropy would use: dice would be *mixed
-/// into* these bytes, never substituted for them, so a bad roll cannot produce a
-/// phrase weaker than the OS alone would have given.
 pub fn generate_mnemonic(length: PhraseLength) -> Result<Zeroizing<String>> {
+    generate(length, None)
+}
+
+/// A fresh phrase with somebody's own dice rolls **mixed into** the entropy.
+///
+/// `rolls` is the sequence exactly as it was entered — `"5341266…"` — and it is
+/// hashed and XOR-ed over the operating system's bytes:
+///
+/// ```text
+/// entropy = os_bytes XOR SHA256(rolls)
+/// ```
+///
+/// **Mixed, never substituted, and the distinction is the whole design.** XOR
+/// with anything an attacker does not know leaves the result unknown to them;
+/// XOR with anything they do know leaves the other input untouched. So this
+/// cannot produce a phrase weaker than `generate_mnemonic` would have produced
+/// unaided — there is no roll count at which it becomes dangerous, and no die so
+/// loaded that it costs anything. Replacing the OS bytes with `SHA256(rolls)`
+/// would be verifiable by the person rolling and would also hand them a way to
+/// seal a wallet nobody can afford; `DICE.md` records why that trade is refused,
+/// and that Electrum shipped it and withdrew it.
+///
+/// What this does *not* provide is any way to check that the rolls were used at
+/// all. It defends against a broken entropy path, which is the failure that
+/// actually happens, and not against a malicious one, which would simply choose
+/// its own bytes after reading the rolls. The screen must not imply otherwise.
+///
+/// SHA-256 over the digits rather than a base-`n` conversion: the hash whitens,
+/// so a biased die still contributes its full min-entropy, and the digest is
+/// reproducible with `printf '%s' 5341266… | sha256sum` by anybody who wants to
+/// see what the rolls hashed to.
+pub fn generate_mnemonic_with_rolls(
+    length: PhraseLength,
+    rolls: &str,
+) -> Result<Zeroizing<String>> {
+    if rolls.is_empty() {
+        bail!("no dice rolls were entered");
+    }
+    generate(length, Some(rolls))
+}
+
+/// This is also the seam user-supplied entropy uses: dice are *mixed into* these
+/// bytes, never substituted for them, so a bad roll cannot produce a phrase
+/// weaker than the OS alone would have given.
+fn generate(length: PhraseLength, rolls: Option<&str>) -> Result<Zeroizing<String>> {
     let count = match length {
         PhraseLength::Twelve => WordCount::Words12,
         PhraseLength::TwentyFour => WordCount::Words24,
@@ -1007,6 +1080,16 @@ pub fn generate_mnemonic(length: PhraseLength) -> Result<Zeroizing<String>> {
     // twelve-word phrase, all 32 for twenty-four.
     let mut entropy = Zeroizing::new([0u8; 32]);
     getrandom::fill(entropy.as_mut()).context("no entropy available from the OS")?;
+
+    if let Some(rolls) = rolls {
+        use bdk_wallet::bitcoin::hashes::{Hash, sha256};
+        // Zeroized alongside the entropy: this digest is as good as the rolls,
+        // and the rolls are as good as a share of the seed.
+        let digest = Zeroizing::new(sha256::Hash::hash(rolls.as_bytes()).to_byte_array());
+        for (byte, extra) in entropy.iter_mut().zip(digest.iter()) {
+            *byte ^= extra;
+        }
+    }
 
     let generated: GeneratedKey<Mnemonic, Tap> =
         Mnemonic::generate_with_entropy((count, Language::English), *entropy)
@@ -1322,6 +1405,221 @@ mod tests {
         let a = generate_mnemonic(PhraseLength::Twelve).unwrap();
         let b = generate_mnemonic(PhraseLength::Twelve).unwrap();
         assert_ne!(*a, *b);
+    }
+
+    /// A repeated word in a phrase is normal, and it is also exactly what a
+    /// broken entropy path would look like — so the rate is measured rather
+    /// than asserted.
+    ///
+    /// BIP-39 indexes a 2048-word list with independent 11-bit chunks, and
+    /// nothing forbids the same index twice. The birthday arithmetic puts a
+    /// repeat somewhere in a 12-word phrase at ~3.2% and two *adjacent* words
+    /// matching at ~0.54%, or about one phrase in 187.
+    ///
+    /// Ignored because it generates fifty thousand phrases. Run it after
+    /// anything touches how entropy reaches BDK:
+    /// `cargo test --release -- --ignored --nocapture repeated_words`
+    #[test]
+    #[ignore = "statistical, generates 50k phrases"]
+    fn repeated_words_turn_up_at_the_rate_chance_predicts() {
+        const RUNS: usize = 50_000;
+        let (mut any, mut adjacent) = (0usize, 0usize);
+        for _ in 0..RUNS {
+            let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+            let words: Vec<&str> = phrase.split_whitespace().collect();
+            let mut sorted = words.clone();
+            sorted.sort_unstable();
+            let before = sorted.len();
+            sorted.dedup();
+            if sorted.len() != before {
+                any += 1;
+            }
+            if words.windows(2).any(|w| w[0] == w[1]) {
+                adjacent += 1;
+            }
+        }
+        let any_rate = any as f64 / RUNS as f64;
+        let adjacent_rate = adjacent as f64 / RUNS as f64;
+        println!(
+            "any repeat {any_rate:.4} (expect 0.0318), adjacent {adjacent_rate:.4} (expect 0.0054)"
+        );
+
+        // Generous bands: this is guarding against an entropy path that has
+        // gone badly wrong — zeros, a stuck byte, a truncated slice — not
+        // measuring the third decimal place. Anything that broken shows up as
+        // a rate many times over, not a few percent out.
+        assert!(
+            (0.020..0.045).contains(&any_rate),
+            "repeats at {any_rate}, chance says 0.0318 — entropy is not uniform"
+        );
+        assert!(
+            (0.002..0.011).contains(&adjacent_rate),
+            "adjacent repeats at {adjacent_rate}, chance says 0.0054"
+        );
+    }
+
+    /// Watching and handing out are separate questions, and legacy is the one
+    /// path where the answers differ. An imported wallet must still *watch*
+    /// BIP44 — money already there has to be found and spent, and refusing to
+    /// look would be losing it — while never handing out a fresh `1…`.
+    #[test]
+    fn legacy_is_watched_but_never_handed_out() {
+        assert!(!accounts::ScriptType::Legacy.can_receive());
+        for script_type in [
+            accounts::ScriptType::NestedSegwit,
+            accounts::ScriptType::NativeSegwit,
+            accounts::ScriptType::Taproot,
+        ] {
+            assert!(script_type.can_receive(), "{script_type}");
+        }
+        // And it is still one of the four an import searches, which is the
+        // half of the rule that is easy to break while fixing the other.
+        assert!(accounts::ScriptType::ALL.contains(&accounts::ScriptType::Legacy));
+    }
+
+    /// A wallet made here watches the two paths it hands addresses out on, and
+    /// can later be told to look on the rest.
+    #[test]
+    fn other_paths_can_be_added_to_a_wallet_that_was_not_watching_them() {
+        let paths = scratch("addpaths");
+        let phrase = generate_mnemonic(PhraseLength::Twelve).unwrap();
+        create(
+            &phrase,
+            b"a good password",
+            &paths,
+            FAST,
+            DEFAULT_NETWORK,
+            SIGNET_CHECKPOINTS[0],
+            &[
+                accounts::ScriptType::Taproot,
+                accounts::ScriptType::NativeSegwit,
+            ],
+            accounts::ScriptType::Taproot,
+            None,
+            None,
+            25,
+        )
+        .unwrap();
+
+        let before = Meta::load(&paths).unwrap();
+        assert_eq!(before.script_types.len(), 2);
+        assert!(!before.script_types.contains(&accounts::ScriptType::Legacy));
+
+        // A wrong password derives nothing — checked here, while there is still
+        // something to derive. Once every path is watched this returns early
+        // without opening the vault at all, so asking afterwards proves nothing.
+        assert!(
+            add_script_types(
+                &paths,
+                b"not the password",
+                None,
+                &accounts::ScriptType::ALL
+            )
+            .is_err()
+        );
+        assert_eq!(
+            Meta::load(&paths).unwrap().script_types.len(),
+            2,
+            "a refused attempt still changed the wallet"
+        );
+
+        let added = add_script_types(
+            &paths,
+            b"a good password",
+            None,
+            &[
+                accounts::ScriptType::Legacy,
+                accounts::ScriptType::NestedSegwit,
+            ],
+        )
+        .unwrap();
+        assert_eq!(added.len(), 2);
+
+        let after = Meta::load(&paths).unwrap();
+        assert_eq!(after.script_types.len(), 4);
+        // In path order, not in the order somebody asked for them.
+        let purposes: Vec<u32> = after.script_types.iter().map(|s| s.purpose()).collect();
+        assert_eq!(purposes, vec![44, 49, 84, 86]);
+        // And the new paths really have databases behind them.
+        for script_type in accounts::ScriptType::ALL {
+            assert!(
+                data_dir(&paths).join(script_type.db_file()).exists(),
+                "{script_type} has no database"
+            );
+        }
+
+        // Asking again for paths already watched changes nothing, and does not
+        // need the password to say so.
+        assert!(
+            add_script_types(&paths, b"a good password", None, &accounts::ScriptType::ALL)
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::remove_dir_all(paths.vault.parent().unwrap()).ok();
+    }
+
+    /// The roll counts the dice screen shows, against the arithmetic they come
+    /// from. Pinned because a wrong number here is a wallet with fewer bits than
+    /// the screen promised, and nothing downstream would ever notice.
+    #[test]
+    fn a_die_needs_as_many_rolls_as_its_bits_require() {
+        for (sides, twelve, twenty_four) in [
+            (6, 50, 100),
+            (8, 43, 86),
+            (10, 39, 78),
+            (12, 36, 72),
+            (20, 30, 60),
+        ] {
+            assert_eq!(
+                rolls_needed(sides, PhraseLength::Twelve),
+                twelve,
+                "d{sides}"
+            );
+            assert_eq!(
+                rolls_needed(sides, PhraseLength::TwentyFour),
+                twenty_four,
+                "d{sides}"
+            );
+        }
+        // Every offered die is at least as good as a d6, which is what makes d6
+        // the floor rather than merely the default.
+        for sides in DICE {
+            assert!(
+                rolls_needed(sides, PhraseLength::TwentyFour)
+                    <= rolls_needed(6, PhraseLength::TwentyFour),
+                "d{sides} asks for more rolls than a d6"
+            );
+        }
+    }
+
+    /// **The property the whole design rests on.** The rolls are mixed into the
+    /// operating system's entropy, not substituted for it — so the same rolls
+    /// twice must give two different phrases. If they ever gave the same one,
+    /// Sieve would have become a wallet whose seed a person can hand it, which
+    /// is exactly the mode `DICE.md` refuses: verifiable, and weak the moment
+    /// somebody rolls badly or reuses a sequence.
+    #[test]
+    fn the_same_rolls_do_not_give_the_same_phrase() {
+        let rolls = "5341266142536142536142536142531425361425361425361425";
+        let a = generate_mnemonic_with_rolls(PhraseLength::Twelve, rolls).unwrap();
+        let b = generate_mnemonic_with_rolls(PhraseLength::Twelve, rolls).unwrap();
+        assert_ne!(
+            *a, *b,
+            "rolls are being used as the seed, not mixed into it"
+        );
+    }
+
+    #[test]
+    fn rolls_do_not_change_the_shape_of_the_phrase() {
+        for (length, words) in [(PhraseLength::Twelve, 12), (PhraseLength::TwentyFour, 24)] {
+            let phrase = generate_mnemonic_with_rolls(length, "36142536142531425").unwrap();
+            assert_eq!(phrase.split_whitespace().count(), words);
+            Mnemonic::parse_in(Language::English, phrase.as_str()).unwrap();
+        }
+        // A roll sequence nobody entered is a caller mistake rather than an
+        // empty contribution, and quietly mixing in SHA256("") would hide it.
+        assert!(generate_mnemonic_with_rolls(PhraseLength::Twelve, "").is_err());
     }
 
     /// Sieve now supplies the entropy itself rather than letting BDK do it, so
@@ -2471,6 +2769,100 @@ pub fn rescan(paths: &Paths) -> Result<()> {
 
     Meta::forget_scan_progress(paths)?;
     Ok(())
+}
+
+/// Start watching derivation paths this wallet was not watching before.
+///
+/// **The situation this exists for.** A wallet made in Sieve watches taproot and
+/// native segwit, because those are the only paths it ever hands an address out
+/// on — money cannot arrive anywhere else. But the same recovery phrase can be
+/// restored into another wallet, used there on some other path, and brought
+/// back; and then Sieve shows a balance that is missing money and says nothing.
+/// That reads as coins having vanished, which is the worst sentence a wallet can
+/// put in front of somebody, and it is not even true.
+///
+/// Needs the password because the new path has to be *derived*: its descriptors
+/// are not in any database, and the only thing that can produce them is the seed
+/// in the vault. A watch-only wallet therefore cannot do this at all — its
+/// descriptors came from a device, and only that device can produce another.
+///
+/// The new account starts with no chain data at all, and that is what drags the
+/// whole scan back: `build_with_wallets` starts the node at the *lowest*
+/// checkpoint of any wallet it is given, so an account sitting at the birthday
+/// is enough to make the next scan a recovery from the birthday. The existing
+/// accounts re-match filters they have already seen, which costs time and finds
+/// nothing new.
+///
+/// The caller must have shut the node down first — these files are open while a
+/// session is running.
+pub fn add_script_types(
+    paths: &Paths,
+    password: &[u8],
+    passphrase: Option<&str>,
+    extra: &[accounts::ScriptType],
+) -> Result<Vec<accounts::ScriptType>> {
+    let mut meta = Meta::load(paths).context("this wallet has no metadata file")?;
+    if !paths.vault.exists() {
+        bail!(
+            "this wallet holds no keys of its own, so Sieve cannot derive another path for \
+             it. Import it again from the device, which is the only thing that can."
+        );
+    }
+
+    let wanted: Vec<accounts::ScriptType> = extra
+        .iter()
+        .copied()
+        .filter(|s| !meta.script_types.contains(s))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let blob = std::fs::read(&paths.vault)
+        .with_context(|| format!("cannot read {}", paths.vault.display()))?;
+    let secret = vault::open(&blob, password)?;
+    let phrase =
+        std::str::from_utf8(&secret).context("the vault does not contain readable text")?;
+
+    // The passphrase is part of the key, so deriving without one that was used
+    // would build descriptors for a different wallet entirely — and it would
+    // succeed, and find nothing, and look exactly like a path with no money on
+    // it. `Meta` knows one exists; only the person knows what it is.
+    if meta.bip39_passphrase && passphrase.is_none() {
+        bail!(
+            "this wallet was set up with a BIP-39 passphrase, which is part of the key. \
+             Searching another path needs it too."
+        );
+    }
+    let xprv = xprv_from_mnemonic(phrase, passphrase, meta.network())?;
+
+    let dir = data_dir(paths).to_path_buf();
+    for script_type in &wanted {
+        let db = dir.join(script_type.db_file());
+        // A wide window: this is a search through history rather than a fresh
+        // account, so the gaps between used addresses can be long.
+        let mut account = accounts::Account::create(
+            xprv,
+            *script_type,
+            &db,
+            meta.network(),
+            accounts::IMPORT_LOOKAHEAD,
+        )?;
+        account.persist()?;
+        tracing::info!(path = %script_type, "now watching a new derivation path");
+    }
+
+    meta.script_types.extend_from_slice(&wanted);
+    // Sorted so the breakdown and the filter list come out in path order rather
+    // than in the order somebody happened to add them.
+    meta.script_types.sort_by_key(|s| s.purpose());
+    meta.save(paths)?;
+
+    // The resume point belongs to a scan that was not looking for these
+    // scripts. Keeping it would start the next scan past blocks the new path
+    // has never been checked against, and skipped blocks are missing money.
+    Meta::forget_scan_progress(paths)?;
+    Ok(wanted)
 }
 
 pub fn remove(paths: &Paths) -> Result<()> {

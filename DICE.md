@@ -1,7 +1,9 @@
 # Dice, and other entropy a person brings themselves
 
-Design, not a plan. Nothing here exists yet — but unlike `NOTIFICATIONS.md`, the
-verdict is build it, and the reason is five weeks old.
+**Built.** This began as a design note; the reasoning is kept because the two
+schemes it argues against are the ones somebody will propose again.
+
+The verdict was build it, and the reason was five weeks old.
 
 ## Why this stopped being theoretical
 
@@ -30,9 +32,10 @@ happened: the argument for dice is not that `getrandom(2)` is suspect. It is tha
 *wiring mistake around* a good RNG is invisible, has happened, and was survivable for
 exactly the people who had brought their own randomness.
 
-## What Sieve does today
+## What Sieve does without dice
 
-`wallet::generate_mnemonic` asks for its own entropy:
+`wallet::generate_mnemonic` asks for its own entropy, and that path is unchanged
+— it is what every wallet made without touching the switch still uses:
 
 ```rust
 let mut entropy = Zeroizing::new([0u8; 32]);
@@ -45,8 +48,10 @@ uses for its salt, its nonces and its data key. There is one entropy source in t
 program and this is it. BDK takes 32 bytes and uses the first `bits / 8`: sixteen for
 a twelve-word phrase, all thirty-two for twenty-four.
 
-**That function is the seam.** Everything below is a change to how those 32 bytes are
-arrived at, and to nothing else.
+**That function is the seam**, and dice changed how those 32 bytes are arrived at
+and nothing else. `generate_mnemonic_with_rolls` is the same function with one XOR
+in the middle; `generate_mnemonic` still exists and still means "the operating
+system alone".
 
 ## Three schemes, and why only one is right
 
@@ -152,7 +157,7 @@ projects that chose replace are both **dedicated air-gapped signing devices** wh
 users are self-selected for exactly this care. Sieve is a desktop wallet whose first
 screen offers mainnet.
 
-## If it is built
+## How it is built
 
 **One new switch, not a choice of schemes.** Not "which dice mode" — that is a
 decision a person must make at the moment they know least about it, where both answers
@@ -168,7 +173,7 @@ for, which is `bits / log₂(sides)`.
 |---|---|---|---|---|
 | Coin (d2) | 1 | 128 | 256 | not offered |
 | d4 | 2 | 64 | 128 | not offered |
-| **d6** | 2.585 | **50** | **99** | default |
+| **d6** | 2.585 | **50** | **100** | default |
 | d8 | 3 | 43 | 86 | |
 | d10 | 3.322 | 39 | 78 | |
 | d12 | 3.585 | 36 | 72 | |
@@ -178,11 +183,17 @@ d6 is the default for unglamorous reasons: everybody owns one, and every verific
 tool in the ecosystem expects base-6 digits.
 
 **d6 is also the floor, and the table is why.** Everything below it is *more* work for
-the same bits — a d4 wants 128 rolls against d6's 99, a coin 256 — so there is no
+the same bits — a d4 wants 128 rolls against d6's 100, a coin 256 — so there is no
 trade-off to offer, only a worse option. The usual argument for supporting a coin is
 that everybody has one, and that fails here too: anybody who owns a d4 owns a d6, and
 anybody with neither is not going to finish 256 flips. The small rows stay in the table
 because the arithmetic is what rules them out, and somebody will otherwise ask.
+
+**The d6 count is 100 here, not the 99 everyone else quotes.** Ninety-nine rolls
+carry 255.9 bits, which is not a real shortfall, and it is the number Coldcard
+and SeedSigner both use. Sieve rounds the way the arithmetic does rather than
+the way the convention does — `rolls_needed` is `ceil(bits / log2(sides))` — and
+under mixing the difference cannot matter either way.
 
 **Derive these in code, never copy them from another wallet.** Feather documents
 59 / 42 / 36 rolls for d6 / d12 / d20, and those numbers are correct — for Monero's
@@ -229,65 +240,76 @@ Every fraction of a second of friction is multiplied by ninety-nine, and a perso
 gives up at roll 60 out of tedium is exactly the person the roll-count guidance was
 written for. **The entry screen is not a detail of this feature; it is most of it.**
 
-**A grid of faces, and the keyboard too — the buttons are the affordance, not the
-input method.** One button per face of the chosen die, clicked or tapped to record a
-roll, *and* the matching digit key doing the same thing. Neither alone is right:
+**A grid of faces, clicked. No keyboard entry at all.**
 
-- **Click-only is too slow, and the reason is physical.** Typing a digit is about a
-  fifth of a second and needs no visual targeting. A click is locate, travel, press —
-  closer to a second even with large buttons, and it costs an eye movement to the
-  screen on every single roll. Over ninety-nine rolls that is twenty seconds of typing
-  against a minute and a half of mousing, and the eye movement is the worse half. It
-  also breaks the one-handed anchor: a person is holding a die and a cup, and a hand
-  resting on the keypad never has to look, where a pointer must be aimed.
-- **Keyboard-only leaves the screen mute.** Nothing tells somebody what to press, a
-  touchscreen is locked out, and a die with more than ten faces has no single-key form
-  at all.
+An earlier draft of this document argued for buttons as the affordance with the
+number keys as a fast path, on the arithmetic that a keystroke is a fifth of a
+second where a click is closer to a whole one. That was right about the speed
+and wrong about the feature, because **a keyboard cannot express a die**.
 
-Together they cost nothing and each covers the other's gap. Lay the d6 grid out in
-**numeric-keypad order** — `4 5 6` above `1 2 3` — so the shortcut teaches itself.
+One keystroke is one digit. A d12 or a d20 has faces that take two, so typing
+`17` records a 1 and then a 7 — two rolls, neither of them the one that was
+thrown. Every workaround makes it worse: reading `0` as ten covers a d10 and
+nothing above it, and a two-key sequence needs a timeout, which is a race
+condition in the middle of a hundred-repetition task. Keyboard entry worked only
+for d6, d8 and d10, which made it a trap on exactly the dice that need the
+fewest throws.
 
-**Accept the numeric keypad as well as the number row.** The number row is a
-two-handed reach; keypad `1`–`6` is a 3×2 block under one hand.
+So the buttons are the input. The keyboard is not shut out — every face is a
+`gtk::Button` in a `gtk::FlowBox`, so Tab reaches it and Space or Return presses
+it, and a screen reader reads it — but there is no digit shortcut, and nothing on
+screen implies one.
 
-**Nothing else changes on screen.** No Enter, no confirmation, no per-roll animation,
-no toast — only the count and the bar move. Anything that redraws more than that will
-be felt ninety-nine times.
+**Whole rows, sized to the die.** The row width is the largest divisor of the
+face count that is at most five: 3×2 for a d6, 5×4 for a d20. A ragged last row
+reads as a rendering fault rather than a layout.
 
-**Backspace must undo the last roll**, and the grid needs a visible Undo beside it for
-whoever is clicking. They will get one wrong at roll 73. Without an undo the only
-options are to start over or to accept a roll that never happened, and both are worse
-than the mistake. This is the most important control on the screen after the faces
-themselves.
+**Not homogeneous.** A `FlowBox` set homogeneous stretches every child to an
+equal share of the clamp, which turned a d6 into three buttons the width of a
+finger. Sized to their content and centred instead.
 
-**Ignore invalid keys silently.** `7`, `8`, `9`, `0` and every letter do nothing — no
-error label, no red border, no shake. A person glancing between a die and a screen will
-hit them, and an error state dismissed ninety-nine times is intolerable. The count not
-advancing is feedback enough. (The buttons make this moot for clicks, which is one of
-the things they are for.)
+**Nothing else changes on screen.** No Enter, no confirmation, no per-roll
+animation, no toast — only the count and the bar move. Anything that redraws more
+than that will be felt a hundred times.
 
-**Keep it reachable without a mouse and legible to a screen reader.** A grid of
-`gtk::Button`s in a `gtk::FlowBox` — the same widget the word grid already uses — is
-focusable, labelled and tab-navigable for free. The tempting shortcut of a bare
-`gtk::EventControllerKey` on a `StatusPage` gives up all of that to save a few lines.
+**Undo beside the grid.** They will press one wrong at roll 73. Without an undo
+the only options are to start over or to accept a roll that never happened, and
+both are worse than the mistake. It is the most important control on the screen
+after the faces themselves.
 
-**Show the rolls as they are entered.** Somebody needs to see that the die that read 4
-was recorded as 4. This is safe *only because the scheme mixes* — the rolls are not
-the seed and cannot reconstruct it, which is the same property that lets the screen
-tell people not to keep them. Under replace-mode the same display would be putting
-the seed on screen in plaintext for the length of a long, distracted task. Another
-dividend of the right scheme.
+**Show the rolls as they are entered.** Somebody needs to see that the die that
+read 4 was recorded as 4. This is safe *only because the scheme mixes* — the rolls
+are not the seed and cannot reconstruct it, which is the same property that lets
+the screen tell people not to keep them. Under replace-mode the same display
+would be putting a seed on screen in plaintext for the length of a long,
+distracted task. Another dividend of the right scheme.
 
-**Show progress against the target, and let them stop anyway.** `73 / 99` and a bar.
-The finish button stays enabled the whole way with the honest count on it, because
-under mixing a short roll costs benefit and not safety. A hard gate would be
-pressure — and pressure at roll 90 is what makes somebody invent the last nine.
+**The target is a gate, not a suggestion.** `73 of 100 rolls`, a bar, and a
+finish button that stays shut until the count is met — its label counting down
+(`27 more rolls`) until it flips to `Use these 100 rolls`.
 
-**Offer the die type, because the button grid makes it pay.** This reverses an earlier
-draft of this document, and the button grid is why. Typed, a d20 is two keystrokes per
-roll — 120 presses against d6's 99, worse despite needing fewer throws. Clicked, it is
-one press per roll either way, so the table is read straight: **60 interactions against
-99**, and forty fewer times picking a die up off the floor.
+An earlier draft argued the opposite: that under mixing a short session costs
+benefit rather than safety, so the button should stay pressable and a hard gate
+would only be pressure. The first half of that is still true and the conclusion
+does not follow. Somebody who asked for a hundred rolls of their own entropy and
+stopped at thirty has most of what they came for missing, and **nothing
+afterwards will ever tell them** — the wallet is not weak, so no screen has cause
+to say anything. The count is the only moment it can be said, and it is said by
+not opening the door. The handler re-checks it too: a threshold enforced only by
+the sensitivity of the widget that crosses it is enforced by the view.
+
+**Say what the target buys, not just what it is.** The picker's row reads
+`50 rolls — at least the 128 bits a 12-word phrase carries`, recomputed from both
+the die and the phrase length. A bare number is a demand without a reason, and
+the reason is the whole point: the target is not a house rule, it is how many
+throws of *this* die carry the bits *this* phrase holds. Somebody who can see
+that can also see why a d20 halves the work.
+
+**Offer the die type, because the button grid makes it pay.** Typed, a d20 would
+have been two keystrokes per roll — 120 presses against d6's 100, worse despite
+needing fewer throws. Clicked, it is one press per roll either way, so the table
+reads straight: **60 interactions against 100**, and forty fewer times picking a
+die up off the floor.
 
 It is also the *right kind* of choice, which the schemes in the first half of this
 document were not. "Which die is in your hand?" is a question about the physical world
@@ -295,12 +317,12 @@ that somebody answers instantly and cannot answer wrongly. "Which entropy scheme
 question they would have to become a cryptographer to answer. Offering the first is not
 a precedent for offering the second.
 
-Show the roll count beside each option — *d6, 99 rolls · d10, 78 · d20, 60* — so the
+Show the roll count beside each option — *d6, 100 rolls · d10, 78 · d20, 60* — so the
 trade is visible at the moment of choosing, and default to d6 because it is what is in
 the drawer.
 
 One caveat on target size: twenty buttons are each smaller than six, and a smaller
-target is a slower one, so the win is real but less than 99-against-60 suggests.
+target is a slower one, so the win is real but less than 100-against-60 suggests.
 
 **Watch the idle timer.** Auto-lock defaults to five minutes, and this is the one screen
 where somebody legitimately stops for a while — to pick a die up off the floor, or
@@ -312,11 +334,11 @@ anywhere else in the app. Worth an explicit test rather than an assumption.
 
 ## Where this leaves it
 
-**Build the mixed version, as one advanced switch on the wallet-creation screen.** It
-is contained — `generate_mnemonic` already takes its own 32 bytes, so the change is a
-function that returns those bytes differently — it cannot make any wallet worse than
-Sieve already makes it, and it answers a failure that emptied five thousand wallets
-last month.
+**Built as the mixed version**, one advanced switch on the wallet-creation screen:
+`wallet::generate_mnemonic_with_rolls` does `os_bytes XOR SHA256(rolls)`, and a
+test asserts that the *same rolls twice give different phrases*. That test is the
+whole design in one assertion — if it ever passes as equal, Sieve has silently
+become replace-mode, and nothing else on the screen would show it.
 
 **Do not build replace-mode, now or later.** Not as an expert option, not behind a
 warning. Electrum shipped it and withdrew it, Sparrow declined it, and the losses it

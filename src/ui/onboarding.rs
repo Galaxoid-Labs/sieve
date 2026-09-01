@@ -33,6 +33,85 @@ pub struct SeedWord {
     word: String,
 }
 
+/// One face of a die, on its way into the roll sequence.
+///
+/// A newtype with a redacted `Debug` rather than a bare `u32`, and it is not
+/// paranoia: relm4 traces every message under `RUST_LOG=relm4=trace`, so a
+/// derived `Debug` would write the entire roll sequence to the log one line at a
+/// time. The rolls are a share of the seed until the phrase exists.
+#[derive(Clone, Copy)]
+pub struct Face(u32);
+
+impl std::fmt::Debug for Face {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// A die being rolled, and what has come up on it so far.
+struct DiceRolls {
+    sides: u32,
+    /// The sequence exactly as entered. Key material: `Zeroizing`, never
+    /// printed, and dropped as soon as the phrase has been made from it.
+    rolls: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for DiceRolls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DiceRolls {{ sides: {}, rolls: <redacted> }}",
+            self.sides
+        )
+    }
+}
+
+/// The dice picker's labels, in `wallet::DICE` order. A test keeps them aligned:
+/// the index out of the picker is what chooses the die, so a list that drifts
+/// from `DICE` would silently roll the wrong one.
+const DIE_LABELS: [&str; 5] = [
+    "6-sided (d6)",
+    "8-sided (d8)",
+    "10-sided (d10)",
+    "12-sided (d12)",
+    "20-sided (d20)",
+];
+
+/// Said under the roll grid, and both halves of it are load-bearing.
+const DICE_NOTE: &str = "Do not write these rolls down — they cannot recreate \
+                         your phrase on their own. And do not re-roll a run that \
+                         looks wrong: runs are what randomness looks like.";
+
+/// One face of the die, as a button on the roll screen.
+#[derive(Debug)]
+pub struct DieFace {
+    value: u32,
+}
+
+#[relm4::factory(pub)]
+impl FactoryComponent for DieFace {
+    type Init = u32;
+    type Input = ();
+    type Output = Face;
+    type CommandOutput = ();
+    type ParentWidget = gtk::FlowBox;
+
+    view! {
+        gtk::Button {
+            add_css_class: "die-face",
+            add_css_class: "numeric",
+            set_label: &self.value.to_string(),
+            connect_clicked[sender, value = self.value] => move |_| {
+                let _ = sender.output(Face(value));
+            },
+        }
+    }
+
+    fn init_model(value: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
+        DieFace { value }
+    }
+}
+
 #[relm4::factory(pub)]
 impl FactoryComponent for SeedWord {
     type Init = (usize, String);
@@ -78,6 +157,9 @@ impl FactoryComponent for SeedWord {
 enum Step {
     Welcome,
     Password,
+    /// Rolling a die for entropy of one's own. Only reached when that was asked
+    /// for on the password step; the default flow goes straight to the phrase.
+    Dice,
     Phrase,
     Verify,
     Working,
@@ -88,6 +170,7 @@ impl Step {
         match self {
             Step::Welcome => "welcome",
             Step::Password => "password",
+            Step::Dice => "dice",
             Step::Phrase => "phrase",
             Step::Verify => "verify",
             Step::Working => "working",
@@ -98,6 +181,7 @@ impl Step {
         match self {
             Step::Welcome | Step::Working => None,
             Step::Password => Some(Step::Welcome),
+            Step::Dice => Some(Step::Password),
             Step::Phrase => Some(Step::Password),
             Step::Verify => Some(Step::Phrase),
         }
@@ -114,6 +198,13 @@ pub enum OnboardingMsg {
     /// Whether a wallet list sits behind this screen.
     Back,
     Configured(Setup),
+    /// A die came up on this face. Carries a `Face` rather than a number so the
+    /// sequence cannot be reassembled from relm4's message trace.
+    Roll(Face),
+    /// Take back the last roll, for the one somebody presses wrong at roll 73.
+    UndoRoll,
+    /// Enough rolled: mix them in and make the phrase.
+    RollsDone,
     /// The chain was changed, which decides whether the warning is shown.
     NetworkChanged(u32),
     PhraseWritten,
@@ -141,6 +232,9 @@ pub struct Setup {
     /// Whether the warning against putting real money in unreviewed software
     /// was read and switched past. Only asked for on bitcoin.
     pub acknowledged: bool,
+    /// The die to roll for entropy of one's own, when that was asked for.
+    /// `None` — the default — means the operating system supplies it alone.
+    pub dice_sides: Option<u32>,
 }
 
 impl std::fmt::Debug for Setup {
@@ -201,6 +295,11 @@ pub struct Onboarding {
     /// 1-based word positions the user must type back.
     challenge: [usize; 3],
     words: FactoryVecDeque<SeedWord>,
+    /// The die chosen and what has been rolled on it, when somebody is supplying
+    /// entropy of their own. `None` is the default and the ordinary case.
+    dice: Option<DiceRolls>,
+    /// One button per face, rebuilt when a die is chosen.
+    faces: FactoryVecDeque<DieFace>,
     error: Option<String>,
 }
 
@@ -213,7 +312,123 @@ impl Onboarding {
     fn previous(&self) -> Option<Step> {
         match (self.step, self.skip_welcome) {
             (Step::Password, true) => None,
+            // Back from the words returns to the rolls rather than to the form,
+            // so one step backwards does not throw a hundred of them away.
+            // Leaving the roll screen itself is what discards them, and that is
+            // deliberate: they are key material, and the phrase they were about
+            // to make is being abandoned.
+            (Step::Phrase, _) if self.dice.is_some() => Some(Step::Dice),
             (step, _) => step.previous(),
+        }
+    }
+
+    /// Which step of how many, since rolling a die inserts one.
+    ///
+    /// Counted off `dice`, which is only set once the form is submitted — so the
+    /// password step says "of 3" while the switch is being considered and "of 4"
+    /// only once it has been acted on. That is the honest reading: nothing is
+    /// committed until Continue.
+    fn step_label(&self) -> &'static str {
+        step_label(self.step, self.dice.is_some())
+    }
+
+    /// How many rolls have been entered.
+    fn rolls_entered(&self) -> usize {
+        self.dice.as_ref().map_or(0, |d| d.rolls.chars().count())
+    }
+
+    /// How many this die needs to carry the phrase's own entropy.
+    fn rolls_wanted(&self) -> u32 {
+        self.dice
+            .as_ref()
+            .map_or(0, |d| wallet::rolls_needed(d.sides, self.length))
+    }
+
+    /// What the roll screen says above the grid.
+    ///
+    /// It states the guarantee and its limit in the same breath, because half of
+    /// it is the half people get wrong: rolls are mixed in, so they can only
+    /// add — and mixing is exactly why nothing here can prove they were used.
+    fn dice_description(&self) -> String {
+        let sides = self.dice.as_ref().map_or(6, |d| d.sides);
+        format!(
+            "Roll your {sides}-sided die and press the face that came up. These rolls are \
+             mixed into the randomness this computer already provides, so they can only \
+             add to it — never weaken it."
+        )
+    }
+
+    /// `73 / 100`, and what that means once it is passed.
+    fn roll_count_label(&self) -> String {
+        let entered = self.rolls_entered();
+        let wanted = self.rolls_wanted() as usize;
+        match entered >= wanted {
+            true => format!(
+                "{entered} of {wanted} rolls — enough for a {}-word phrase",
+                self.length.words()
+            ),
+            false => format!("{entered} of {wanted} rolls"),
+        }
+    }
+
+    fn roll_fraction(&self) -> f64 {
+        let wanted = self.rolls_wanted() as f64;
+        match wanted > 0.0 {
+            true => (self.rolls_entered() as f64 / wanted).min(1.0),
+            false => 0.0,
+        }
+    }
+
+    /// Whether enough has been rolled to carry the phrase's own entropy.
+    fn rolls_complete(&self) -> bool {
+        self.dice.is_some() && self.rolls_entered() >= self.rolls_wanted() as usize
+    }
+
+    /// The finish button, which says either what is left or what it will use.
+    ///
+    /// Held shut until the count is met. Under mixing a short session is not
+    /// *unsafe* — the operating system's bytes are underneath it either way —
+    /// but somebody who asked for a hundred rolls of their own entropy and
+    /// stopped at thirty has most of what they came for missing, and nothing
+    /// afterwards would ever tell them. The count is the only moment it can be
+    /// said, so it is said by not opening the door.
+    fn use_rolls_label(&self) -> String {
+        match self.rolls_complete() {
+            true => format!("Use these {} rolls", self.rolls_entered()),
+            false => {
+                let left = self.rolls_wanted() as usize - self.rolls_entered();
+                match left {
+                    1 => "One more roll".into(),
+                    n => format!("{n} more rolls"),
+                }
+            }
+        }
+    }
+
+    /// Make the phrase, mixing in the rolls when there are any, and move to the
+    /// screen that shows it.
+    ///
+    /// One place rather than two, so the dice path and the ordinary path cannot
+    /// come to differ in what they do with the result.
+    fn make_phrase(&mut self) {
+        let made = match &self.dice {
+            Some(dice) => wallet::generate_mnemonic_with_rolls(self.length, &dice.rolls),
+            None => wallet::generate_mnemonic(self.length),
+        };
+        match made {
+            Ok(phrase) => {
+                {
+                    let mut guard = self.words.guard();
+                    guard.clear();
+                    for (index, word) in phrase.split_whitespace().enumerate() {
+                        guard.push_back((index + 1, word.to_string()));
+                    }
+                }
+                self.mnemonic = Some(phrase);
+                self.challenge = pick_challenge(self.length.words());
+                self.step = Step::Phrase;
+            }
+            Err(e) => self.error = Some(e.to_string()),
         }
     }
 
@@ -256,6 +471,13 @@ fn phrase_warning(words: usize, passphrase: bool) -> String {
 /// copies of this number would eventually disagree, and the failure would be a
 /// button that refuses to light for a password the handler would have taken.
 const MIN_PASSWORD: usize = 8;
+
+/// A ceiling on the roll sequence, far past any honest session.
+///
+/// Not a limit anybody should meet: it exists so a key held down cannot grow the
+/// string without end. Extra rolls are free — SHA-256 absorbs any length — so
+/// there is no reason for this to be tight.
+const MAX_ROLLS: usize = 1024;
 
 /// The setup form reduced to what decides whether it is finished.
 ///
@@ -302,6 +524,56 @@ fn what_is_missing(form: FormState) -> Option<&'static str> {
         return Some("The two passphrases do not match.");
     }
     None
+}
+
+/// Why that many rolls, said beside the number.
+///
+/// The count on its own is a demand without a reason, and the reason is the
+/// whole point of the screen: the target is not a house rule, it is how many
+/// throws of *this* die carry the bits *this* phrase length holds. Somebody who
+/// can see that can also see why picking a d20 halves the work.
+///
+/// "At least" is exact rather than hedging: `rolls_needed` rounds up, so fifty
+/// d6 rolls carry 129.2 bits and not 128 on the nose.
+fn roll_target_note(sides: u32, length: wallet::PhraseLength) -> String {
+    format!(
+        "{} rolls — at least the {} bits a {}-word phrase carries",
+        wallet::rolls_needed(sides, length),
+        length.bits(),
+        length.words()
+    )
+}
+
+/// How many faces to put on a row, so the grid comes out a rectangle.
+///
+/// The largest divisor of the face count that is at most five — five being about
+/// as wide as the clamp holds at a comfortable button size. Every die Sieve
+/// offers divides evenly by this, which is what keeps the last row full.
+fn faces_per_line(sides: u32) -> u32 {
+    (2..=5)
+        .rev()
+        .find(|n| sides.is_multiple_of(*n))
+        .unwrap_or(sides)
+        .max(1)
+}
+
+/// Which step of how many, given whether a die is being rolled.
+///
+/// Free-standing so it can be checked without a display, like the other copy in
+/// this file. Saying "Step 2 of 3" on a four-step flow is a small lie that makes
+/// the last screen a surprise.
+fn step_label(step: Step, rolling: bool) -> &'static str {
+    match (step, rolling) {
+        (Step::Welcome, _) => "Set up",
+        (Step::Password, false) => "Step 1 of 3",
+        (Step::Password, true) => "Step 1 of 4",
+        (Step::Dice, _) => "Step 2 of 4",
+        (Step::Phrase, false) => "Step 2 of 3",
+        (Step::Phrase, true) => "Step 3 of 4",
+        (Step::Verify, false) => "Step 3 of 3",
+        (Step::Verify, true) => "Step 4 of 4",
+        (Step::Working, _) => "Creating",
+    }
 }
 
 /// Where the words came from, said under them.
@@ -369,13 +641,7 @@ impl Component for Onboarding {
                 set_title_widget = &adw::WindowTitle {
                     set_title: "Sieve",
                     #[watch]
-                    set_subtitle: match model.step {
-                        Step::Welcome => "Set up",
-                        Step::Password => "Step 1 of 3",
-                        Step::Phrase => "Step 2 of 3",
-                        Step::Verify => "Step 3 of 3",
-                        Step::Working => "Creating",
-                    },
+                    set_subtitle: model.step_label(),
                 },
                 pack_start = &gtk::Button {
                     set_icon_name: "go-previous-symbolic",
@@ -474,11 +740,16 @@ impl Component for Onboarding {
 
                 // ---- passphrase ----
                 add_named[Some("password")] = &adw::StatusPage {
-                    set_title: "Choose a password",
+                    // Named for the screen rather than for its first field. It
+                    // began as a password prompt and has since collected the
+                    // chain, the phrase length, the passphrase and the dice —
+                    // and a title naming one of six things reads as though the
+                    // rest arrived by accident.
+                    set_title: "Set up your wallet",
                     set_description: Some(
-                        "This locks the wallet on this computer. It is not part of your \
-                         recovery phrase — if you forget it you can still restore from \
-                         the words themselves."
+                        "The chain, the phrase and the passphrase are fixed once the \
+                         wallet is made. The password is not — that one can be changed \
+                         later."
                     ),
 
                     #[wrap(Some)]
@@ -489,6 +760,18 @@ impl Component for Onboarding {
                             set_spacing: 12,
 
                             adw::PreferencesGroup {
+                                set_title: "Password",
+                                // Off the page title and onto the group it
+                                // actually describes. Every other group here
+                                // names itself; this one was relying on the
+                                // heading, which is why the heading could not
+                                // say anything else.
+                                set_description: Some(
+                                    "This locks the wallet on this computer. It is not \
+                                     part of your recovery phrase — if you forget it you \
+                                     can still restore from the words themselves."
+                                ),
+
                                 #[name(name_row)]
                                 adw::EntryRow {
                                     set_title: "Wallet name (optional)",
@@ -581,6 +864,44 @@ impl Component for Onboarding {
                                         set_title: "Confirm passphrase",
                                     },
                                 },
+
+                                // Unlike the passphrase above it, nothing here
+                                // can go wrong: rolls are mixed into the
+                                // computer's own randomness, so the worst a
+                                // careless session does is add less than it
+                                // could have. That is why it sits behind a
+                                // plain switch and not behind a warning.
+                                #[name(dice_expander)]
+                                adw::ExpanderRow {
+                                    set_title: "Roll your own randomness",
+                                    set_subtitle: "Advanced. Dice rolls are mixed into \
+                                                   the randomness this computer \
+                                                   provides — they can only add to it, \
+                                                   never weaken it.",
+                                    set_show_enable_switch: true,
+                                    set_enable_expansion: false,
+
+                                    #[name(die_row)]
+                                    add_row = &adw::ComboRow {
+                                        set_title: "Die",
+                                        set_model: Some(&gtk::StringList::new(&DIE_LABELS)),
+                                    },
+
+                                    // On an ActionRow's suffix rather than on
+                                    // the ComboRow's subtitle: a subtitle
+                                    // squeezes a ComboRow's value into an
+                                    // ellipsis, which is the trap the Length
+                                    // row above and the Locking row in
+                                    // preferences both had to be dug out of.
+                                    #[name(roll_target_row)]
+                                    add_row = &adw::ActionRow {
+                                        set_title: "Rolls needed",
+                                        // Safe to wrap: this row has no value
+                                        // label to squeeze, which is the trap
+                                        // the Die row above it must avoid.
+                                        set_subtitle_lines: 2,
+                                    },
+                                },
                             },
 
                             #[name(continue_button)]
@@ -597,7 +918,7 @@ impl Component for Onboarding {
                                 connect_clicked[
                                     sender, pass_row, confirm_row, name_row, length_row,
                                     passphrase_expander, passphrase_row, passphrase_confirm_row,
-                                    network_row, acknowledge_row
+                                    network_row, acknowledge_row, dice_expander, die_row
                                 ] => move |_| {
                                     // An unexpanded row still holds whatever
                                     // was typed before it was switched off, so
@@ -629,8 +950,94 @@ impl Component for Onboarding {
                                         network: NETWORKS
                                             [(network_row.selected() as usize).min(1)],
                                         acknowledged: acknowledge_row.is_active(),
+                                        dice_sides: dice_expander
+                                            .enables_expansion()
+                                            .then(|| {
+                                                wallet::DICE[(die_row.selected() as usize)
+                                                    .min(wallet::DICE.len() - 1)]
+                                            }),
                                     }));
                                 },
+                            },
+                        },
+                    },
+                },
+
+                // ---- dice ----
+                add_named[Some("dice")] = &adw::StatusPage {
+                    set_title: "Roll your own randomness",
+                    #[watch]
+                    set_description: Some(&model.dice_description()),
+
+                    #[wrap(Some)]
+                    set_child = &adw::Clamp {
+                        set_maximum_size: 400,
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 18,
+
+                            // The buttons are the affordance and the accessible
+                            // path; the number keys are the fast one. Ninety-nine
+                            // clicks is a minute and a half of aiming a pointer,
+                            // and a hand resting on the keypad never has to look
+                            // away from the die.
+                            // Not homogeneous, and centred: homogeneous made
+                            // every face stretch to a share of the whole clamp,
+                            // so a d6 came out as three buttons the width of a
+                            // finger each. The rows per line are set when the
+                            // die is chosen, so every die gets whole rows
+                            // rather than a ragged last one.
+                            #[local_ref]
+                            face_grid -> gtk::FlowBox {
+                                set_selection_mode: gtk::SelectionMode::None,
+                                set_row_spacing: 6,
+                                set_column_spacing: 6,
+                                set_homogeneous: false,
+                                set_halign: gtk::Align::Center,
+                            },
+
+                            gtk::ProgressBar {
+                                #[watch]
+                                set_fraction: model.roll_fraction(),
+                            },
+
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                set_halign: gtk::Align::Center,
+                                #[watch]
+                                set_label: &model.roll_count_label(),
+                            },
+
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 12,
+                                set_halign: gtk::Align::Center,
+
+                                gtk::Button {
+                                    add_css_class: "pill",
+                                    set_label: "Undo",
+                                    #[watch]
+                                    set_sensitive: model.rolls_entered() > 0,
+                                    connect_clicked => OnboardingMsg::UndoRoll,
+                                },
+
+                                gtk::Button {
+                                    add_css_class: "suggested-action",
+                                    add_css_class: "pill",
+                                    #[watch]
+                                    set_label: &model.use_rolls_label(),
+                                    #[watch]
+                                    set_sensitive: model.rolls_complete(),
+                                    connect_clicked => OnboardingMsg::RollsDone,
+                                },
+                            },
+
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                add_css_class: "caption",
+                                set_wrap: true,
+                                set_justify: gtk::Justification::Center,
+                                set_label: DICE_NOTE,
                             },
                         },
                     },
@@ -795,6 +1202,9 @@ impl Component for Onboarding {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let words = FactoryVecDeque::builder().launch_default().detach();
+        let faces = FactoryVecDeque::builder()
+            .launch_default()
+            .forward(sender.input_sender(), OnboardingMsg::Roll);
         let model = Onboarding {
             passphrase: None,
             length: wallet::PhraseLength::Twelve,
@@ -808,9 +1218,12 @@ impl Component for Onboarding {
             name: None,
             challenge: [1, 2, 3],
             words,
+            dice: None,
+            faces,
             error: None,
         };
         let word_grid = model.words.widget();
+        let face_grid = model.faces.widget();
         let widgets = view_output!();
 
         // Continue answers for the whole form, so every control on the form has
@@ -877,6 +1290,29 @@ impl Component for Onboarding {
         // The starting state, which is "nothing typed yet" and so not ready.
         refresh();
 
+        // How many rolls the chosen die needs, which depends on the phrase
+        // length chosen two rows above it. Derived from wallet::rolls_needed
+        // rather than written down, so the screen cannot promise bits the
+        // arithmetic does not deliver.
+        let roll_target = {
+            let row = widgets.roll_target_row.clone();
+            let die = widgets.die_row.clone();
+            let length = widgets.length_row.clone();
+            std::rc::Rc::new(move || {
+                let sides = wallet::DICE[(die.selected() as usize).min(wallet::DICE.len() - 1)];
+                let phrase = match length.selected() == 1 {
+                    true => wallet::PhraseLength::TwentyFour,
+                    false => wallet::PhraseLength::Twelve,
+                };
+                row.set_subtitle(&roll_target_note(sides, phrase));
+            })
+        };
+        for row in [&widgets.die_row, &widgets.length_row] {
+            let roll_target = roll_target.clone();
+            row.connect_selected_notify(move |_| roll_target());
+        }
+        roll_target();
+
         ComponentParts { model, widgets }
     }
 
@@ -894,8 +1330,60 @@ impl Component for Onboarding {
                 let _ = sender.output(OnboardingOutput::WantsRestore);
             }
 
+            OnboardingMsg::Roll(Face(value)) => {
+                // Ignored anywhere but the roll screen: the key controller is on
+                // the window, so this arrives for any digit the focused widget
+                // did not want.
+                if self.step != Step::Dice {
+                    return;
+                }
+                let Some(dice) = self.dice.as_mut() else {
+                    return;
+                };
+                // Clicked, so the value is a face on this die by construction.
+                // Checked anyway, because the alternative to checking is
+                // silently hashing a face that does not exist.
+                let face = match (1..=dice.sides).contains(&value) {
+                    true => value,
+                    false => return,
+                };
+                // Well past any honest session, and only here so a key held
+                // down cannot grow the string without end.
+                if dice.rolls.chars().count() >= MAX_ROLLS {
+                    return;
+                }
+                // Base-36 so a face past 9 stays one character, which keeps
+                // "how many rolls" a matter of counting characters.
+                dice.rolls.push(char::from_digit(face, 36).unwrap_or('0'));
+            }
+
+            OnboardingMsg::UndoRoll => {
+                if let Some(dice) = self.dice.as_mut() {
+                    dice.rolls.pop();
+                }
+            }
+
+            OnboardingMsg::RollsDone => {
+                // The same gate the button is held shut by, asked again: a
+                // threshold enforced only by the sensitivity of the widget that
+                // crosses it is enforced by the view.
+                if self.rolls_complete() {
+                    self.make_phrase();
+                }
+            }
+
             OnboardingMsg::Back => match self.previous() {
-                Some(previous) => self.step = previous,
+                Some(previous) => {
+                    // Going back past the roll screen drops the rolls. They are
+                    // a share of a seed that is no longer being made, and
+                    // keeping them would mean a later run silently inheriting
+                    // entropy somebody thought they had walked away from.
+                    if self.step == Step::Dice {
+                        self.dice = None;
+                        self.faces.guard().clear();
+                    }
+                    self.step = previous;
+                }
                 // Already at the first step, so back means leaving setup.
                 None => {
                     let _ = sender.output(OnboardingOutput::Cancelled);
@@ -938,23 +1426,37 @@ impl Component for Onboarding {
                 self.passphrase = wanted.then(|| setup.passphrase.0.clone());
                 self.length = setup.length;
                 self.network = setup.network;
-                match wallet::generate_mnemonic(setup.length) {
-                    Ok(phrase) => {
-                        {
-                            let mut guard = self.words.guard();
-                            guard.clear();
-                            for (index, word) in phrase.split_whitespace().enumerate() {
-                                guard.push_back((index + 1, word.to_string()));
-                            }
+                self.password = Some(setup.password.0);
+                let trimmed = setup.name.trim();
+                self.name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+
+                match setup.dice_sides {
+                    // Rolling first: the phrase cannot be made until there is
+                    // something to mix into it.
+                    Some(sides) => {
+                        let mut guard = self.faces.guard();
+                        guard.clear();
+                        for face in 1..=sides {
+                            guard.push_back(face);
                         }
-                        self.mnemonic = Some(phrase);
-                        self.password = Some(setup.password.0);
-                        let trimmed = setup.name.trim();
-                        self.name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-                        self.challenge = pick_challenge(self.length.words());
-                        self.step = Step::Phrase;
+                        drop(guard);
+                        // A divisor of the face count, so the grid is a
+                        // rectangle: 2 rows of 3 for a d6, 4 of 5 for a d20. A
+                        // ragged last row reads as a rendering fault.
+                        let per_line = faces_per_line(sides);
+                        let grid = self.faces.widget();
+                        grid.set_min_children_per_line(per_line);
+                        grid.set_max_children_per_line(per_line);
+                        self.dice = Some(DiceRolls {
+                            sides,
+                            rolls: Zeroizing::new(String::new()),
+                        });
+                        self.step = Step::Dice;
                     }
-                    Err(e) => self.error = Some(e.to_string()),
+                    None => {
+                        self.dice = None;
+                        self.make_phrase();
+                    }
                 }
             }
 
@@ -1286,6 +1788,95 @@ mod tests {
             Some("Use a password of at least 8 characters."),
             "the password is above the acknowledgement on the screen"
         );
+    }
+
+    /// The picker's labels are positional: the index out of the ComboRow is what
+    /// selects from `wallet::DICE`, so a list that drifts would roll a die
+    /// nobody chose — and would ask for the wrong number of rolls with it.
+    #[test]
+    fn the_die_labels_line_up_with_the_dice() {
+        assert_eq!(DIE_LABELS.len(), wallet::DICE.len());
+        for (label, sides) in DIE_LABELS.iter().zip(wallet::DICE) {
+            assert!(
+                label.contains(&sides.to_string()),
+                "{label} is not the label for a d{sides}"
+            );
+        }
+        // d6 first, because it is the default and the floor both.
+        assert_eq!(wallet::DICE[0], 6);
+    }
+
+    /// Every page the stack can be asked for has to exist, dice included. A
+    /// name the stack does not have is a silent no-op that leaves the flow on
+    /// whichever page it was showing.
+    /// The number and its reason travel together, and both come from the same
+    /// arithmetic the phrase is actually made with.
+    #[test]
+    fn the_roll_target_says_what_it_buys() {
+        let note = roll_target_note(6, wallet::PhraseLength::Twelve);
+        assert!(note.starts_with("50 rolls"), "{note}");
+        assert!(note.contains("128 bits"), "{note}");
+        assert!(note.contains("12-word"), "{note}");
+
+        // A longer phrase asks for more of the same die, and says so.
+        let longer = roll_target_note(6, wallet::PhraseLength::TwentyFour);
+        assert!(longer.starts_with("100 rolls"), "{longer}");
+        assert!(longer.contains("256 bits"), "{longer}");
+
+        // And a bigger die asks for fewer, which is the trade the row exists
+        // to make visible.
+        let d20 = roll_target_note(20, wallet::PhraseLength::TwentyFour);
+        assert!(d20.starts_with("60 rolls"), "{d20}");
+        assert!(d20.contains("256 bits"), "{d20}");
+    }
+
+    /// A ragged last row reads as a rendering fault rather than a layout, so
+    /// every die Sieve offers has to divide evenly into its row width.
+    #[test]
+    fn every_die_lays_out_as_a_rectangle() {
+        for sides in wallet::DICE {
+            let per_line = faces_per_line(sides);
+            assert!(
+                (2..=5).contains(&per_line),
+                "d{sides} puts {per_line} on a row"
+            );
+            assert!(
+                sides.is_multiple_of(per_line),
+                "d{sides} would leave a ragged row"
+            );
+        }
+        assert_eq!(faces_per_line(6), 3);
+        assert_eq!(faces_per_line(20), 5);
+        // A prime face count has no rectangle; one row is the honest answer
+        // rather than a panic.
+        assert_eq!(faces_per_line(7), 7);
+    }
+
+    #[test]
+    fn the_dice_step_names_a_page() {
+        assert_eq!(Step::Dice.tag(), "dice");
+        assert_eq!(Step::Dice.previous(), Some(Step::Password));
+    }
+
+    /// Rolling adds a step, and the header has to count it. Saying "Step 2 of 3"
+    /// on a four-step flow is a small lie that makes the last screen a surprise.
+    #[test]
+    fn the_header_counts_the_roll_screen_when_there_is_one() {
+        for (step, rolling, expected) in [
+            (Step::Password, false, "Step 1 of 3"),
+            (Step::Password, true, "Step 1 of 4"),
+            (Step::Dice, true, "Step 2 of 4"),
+            (Step::Phrase, false, "Step 2 of 3"),
+            (Step::Phrase, true, "Step 3 of 4"),
+            (Step::Verify, false, "Step 3 of 3"),
+            (Step::Verify, true, "Step 4 of 4"),
+        ] {
+            assert_eq!(
+                step_label(step, rolling),
+                expected,
+                "{step:?} rolling={rolling}"
+            );
+        }
     }
 
     #[test]

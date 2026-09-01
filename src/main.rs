@@ -117,6 +117,14 @@ const GLOBAL_CSS: &str = ".qr-ground { background-color: #ffffff; border-radius:
        padding: 10px 12px; \
      } \
      .seed-index { opacity: 0.5; font-size: 0.8em; } \
+     .die-face { \
+       font-size: 1.05em; \
+       font-weight: 700; \
+       min-width: 48px; \
+       min-height: 34px; \
+       padding: 2px 6px; \
+       border-radius: 10px; \
+     } \
      .balance-mark { \
        font-size: 190px; \
        font-weight: 800; \
