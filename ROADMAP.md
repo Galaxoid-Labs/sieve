@@ -470,7 +470,7 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       off `direct_conflicts()` rather than remembered, so it survives restarts and cannot
       drift from what happened.
 
-### M6 — Privacy controls — the three below are all that is left
+### M6 — Privacy controls — one worth building, one small
 - [x] Tor for every outbound connection — peers, price, fees — through a system SOCKS5 proxy,
       with the proxy verified as actually being Tor (the `RESOLVE` extension), and kyoto's
       unproxied DNS seeding replaced by seeds resolved through Tor.
@@ -479,9 +479,14 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       distribution's own `tor` package is all it takes. With no Flatpak in the plan, nothing
       bundles Tor any more: `packaging/com.galaxoidlabs.Sieve.yml` and `scripts/fetch-tor.sh`
       are dead and `PACKAGING.md` says when to delete them.
-- [ ] `arti` instead of a child process, if its embedding story stabilises: today its SOCKS
-      listener is behind `experimental-api` and outside semver, and an arti client terminates
-      the process on an obsolete consensus.
+- **Dropped: `arti` instead of a child process.** It would remove the whole daemon problem —
+  finding a binary, the watchdog, adopting a leftover, `LD_LIBRARY_PATH` for a bundled build —
+  and it is not work, it is a watch on somebody else's project. Its SOCKS listener is still
+  behind `experimental-api` and outside semver, so using it means writing a local SOCKS server
+  over `arti_client` streams; and an arti client terminates the process on an obsolete
+  consensus, which a wallet cannot accept. It would also help almost nobody: `daemon::find`
+  looks on `PATH`, so a distribution's own `tor` package already works. Revisit if the
+  embedding story lands, not before.
 - [x] Onion peers, which this list still described as missing after they were built.
       `peers.rs` stores addresses as written rather than as `IpAddr` precisely so an onion one
       survives, validates their checksums before dialling, and `node.rs` offers them only when
@@ -506,14 +511,23 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       - **Clearing a name no longer clears the freeze.** `Labels::set` deleted the whole entry
         on an empty label, which would have taken `spendable: false` with it — a coin quietly
         becoming spendable because somebody unnamed it.
-- [ ] Manual peer pinning with `whitelist_only`, and an audit that nothing but Bitcoin p2p
-      leaves the machine.
-- [ ] Desktop notifications, opt-in and generic — designed and **deferred**. The mechanism is
-      a dozen lines of GIO; the problem is that the wallet keeps syncing while locked, so a
-      notification lands on the lock screen with the application's own name in the header,
-      which discloses more than any wording of the body can take back. See `NOTIFICATIONS.md`
-      for the two traps and for the scan-finished half, which is safe and could be built
-      alone.
+- [ ] **An audit that nothing but Bitcoin p2p leaves the machine.** Not a feature — a test.
+      With Tor off and both opt-ins off, run the wallet under a network namespace or `ss` and
+      assert that the only outbound connections are peers and DNS seeds. **This is the claim
+      the whole program is built on and the one thing about it never mechanically checked**:
+      `SECURITY.md` has a table of what leaves the machine, and every row of it is asserted
+      from reading the code. A test would make the README's first paragraph something Sieve
+      proves rather than something it says. It also catches the failure nobody would notice —
+      a dependency that phones home, added three versions from now.
+- [ ] Manual peer pinning with `whitelist_only`, separated from the audit it used to be
+      bundled with. Genuinely niche: it is for somebody running their own node who wants the
+      wallet to talk only to it. Small, and low priority against the line above.
+- **Deferred: desktop notifications**, opt-in and generic. The mechanism is a dozen lines of
+  GIO; the problem is that the wallet keeps syncing while locked, so a notification lands on
+  the lock screen with the application's own name in the header — disclosing that this machine
+  runs a Bitcoin wallet and that money just arrived in it, which no wording of the body takes
+  back. `NOTIFICATIONS.md` has the two traps, and the scan-finished half, which carries no
+  financial content, is safe and could still be built alone in an afternoon.
 
 ### M7 — Lock and key hygiene — DONE
 
