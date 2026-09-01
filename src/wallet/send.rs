@@ -61,6 +61,15 @@ pub struct Draft {
     /// else, because the point of choosing is that nothing is added behind
     /// your back.
     pub coins: Vec<bdk_wallet::bitcoin::OutPoint>,
+    /// Coins held back deliberately — BIP-329's `spendable: false`.
+    ///
+    /// Kept out of automatic selection entirely, which is the point: freezing a
+    /// coin is how somebody says "never spend this alongside my others", and a
+    /// coin that BDK picks up to make the numbers work would break exactly the
+    /// link they were avoiding. Carried on the draft rather than read from the
+    /// label file down here, because the wallet layer knows nothing about
+    /// labels and should not start.
+    pub frozen: Vec<bdk_wallet::bitcoin::OutPoint>,
 }
 
 /// The most data an `OP_RETURN` can carry and still relay everywhere.

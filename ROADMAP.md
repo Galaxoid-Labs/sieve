@@ -434,7 +434,7 @@ Sieve sends a device five commands, all of them reads: `enumerate`, `get_version
 prompt. Nothing it can send writes to a device — a wiped Ledger showing "set up as new /
 restore" was wiped by its own firmware, which is what three wrong PIN entries do.
 
-### M5 — Transaction history — DONE, except replaced state
+### M5 — Transaction history — DONE, except input labels
 - [x] `adw::ActionRow` list, detail page on an `adw::NavigationView`, confirmation depth, fee
       paid, pending state, and the fee rate the payment actually got.
 - [x] Filter the list by derivation path; the path named on each row when more than one is
@@ -450,12 +450,15 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       payment with no character changed on screen.
 - [x] Export the public descriptors — the backup that risks nothing. BIP-380 form with its
       checksum and nothing wrapped around it, so there is no Sieve format to learn.
-- [ ] Replaced state in the activity list. This said "needs RBF to exist first" and RBF now
-      exists, so it is unblocked and small: `direct_conflicts()` reads the fact straight off
-      the transaction graph, which is already how "already raised" is derived. Today a payment
-      that lost a replacement race sits in the list looking unconfirmed for ever.
+- [x] Replaced state, which the RBF work turned out to have finished. A payment that lost a
+      replacement race does not linger looking unconfirmed — `Wallet::transactions()` is
+      `list_canonical_txs`, so the loser stops being listed at all, which is the honest
+      rendering of a transaction that can no longer confirm. The winner carries the history
+      instead: `fee raised` on its row and an **Already raised** line on its detail page, read
+      off `direct_conflicts()` rather than remembered, so it survives restarts and cannot
+      drift from what happened.
 
-### M6 — Privacy controls — the five below are all that is left
+### M6 — Privacy controls — the three below are all that is left
 - [x] Tor for every outbound connection — peers, price, fees — through a system SOCKS5 proxy,
       with the proxy verified as actually being Tor (the `RESOLVE` extension), and kyoto's
       unproxied DNS seeding replaced by seeds resolved through Tor.
@@ -467,12 +470,30 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
 - [ ] `arti` instead of a child process, if its embedding story stabilises: today its SOCKS
       listener is behind `experimental-api` and outside semver, and an arti client terminates
       the process on an obsolete consensus.
-- [ ] Onion peers: `peers.rs` stores `IpAddr`, so a remembered peer cannot be an onion
-      address. kyoto dials them happily; only our own memory of them is missing.
+- [x] Onion peers, which this list still described as missing after they were built.
+      `peers.rs` stores addresses as written rather than as `IpAddr` precisely so an onion one
+      survives, validates their checksums before dialling, and `node.rs` offers them only when
+      Tor is on — handing one to a direct connection spends an attempt on something that
+      cannot work.
 - [x] Coin control, with the linking it avoids stated in the names given to the coins.
 - [x] BIP-329 labels, importable and exportable.
-- [ ] Coin freezing — BIP-329 already defines `spendable: false`, and the label file is
-      already written, so this is a flag and a filter rather than a new store.
+- [x] Coin freezing, written as BIP-329's `spendable: false` into the label file every other
+      label lives in, so a wallet reading the export holds the same coins back. A padlock on
+      each coin, and `plan()` adds frozen coins to `unspendable` beside the unconfirmed ones —
+      automatic selection must never reach for one to make the numbers work, since that would
+      break exactly the link somebody froze it to avoid.
+      - **Freezing must never be a one-way door**, and it briefly was. `has_funds` was pointed
+        at the frozen-adjusted figure, so freezing every coin on a path replaced the send form
+        with "Nothing to send" — and took the only route to the padlock away with it. The form
+        is drawn while the *path* holds anything; a row says so and names the way out; and
+        coin control has its own way in from Activity, because curating coins you have decided
+        not to spend should not begin by starting to spend.
+      - **Available means what a payment can reach**, so frozen coins come off it and the
+        Coins row says how much is held. Counting them would put a figure on screen that Max
+        fills in and the builder then refuses.
+      - **Clearing a name no longer clears the freeze.** `Labels::set` deleted the whole entry
+        on an empty label, which would have taken `spendable: false` with it — a coin quietly
+        becoming spendable because somebody unnamed it.
 - [ ] Manual peer pinning with `whitelist_only`, and an audit that nothing but Bitcoin p2p
       leaves the machine.
 - [ ] Desktop notifications, opt-in and generic — designed and **deferred**. The mechanism is
@@ -482,7 +503,7 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       for the two traps and for the scan-finished half, which is safe and could be built
       alone.
 
-### M7 — Lock and key hygiene — the three below are all that is left
+### M7 — Lock and key hygiene — the two below are all that is left
 
 - [x] `PR_SET_DUMPABLE(0)` is lifted for the length of a file dialog and restored after.
       Setting it makes the kernel re-own `/proc/<pid>` to root, so `xdg-desktop-portal`
@@ -498,8 +519,12 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       secret opening every wallet is a poor trade for typing one fewer password.
 - [ ] Opt-in Secret Service storage, labelled as convenience and not as a boundary.
 - [ ] FIDO2 `hmac-secret` as a second wrap.
-- [ ] Lock on screensaver as well as on sleep — a locked session is the other ordinary way a
-      machine is left unattended.
+- [x] Lock on screensaver as well as on sleep. Three subscriptions, because no single one
+      answers everywhere: `org.gnome.ScreenSaver`, the `org.freedesktop.ScreenSaver` that
+      everyone else implements, and logind's own `Session.Lock`, which `loginctl lock-session`
+      raises and which lockers implementing neither of the others still hook. They overlap on
+      purpose — locking an already locked wallet does nothing, and missing all three would
+      leave it open.
 - PSBT export/import and device signing moved to M4a.
 
 ### M8 — Package and release — IN PROGRESS, and the last thing in the way

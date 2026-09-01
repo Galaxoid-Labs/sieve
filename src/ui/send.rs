@@ -143,6 +143,16 @@ impl FactoryComponent for ExtraPayee {
 
 #[derive(Debug)]
 pub enum SendMsg {
+    /// Freeze a coin, or let it be spent again.
+    SetFrozen {
+        outpoint: String,
+        frozen: bool,
+    },
+    /// Name one coin, or clear its name.
+    SetCoinLabel {
+        outpoint: String,
+        text: String,
+    },
     /// One more person on this transaction.
     AddPayee,
     RemovePayee(DynamicIndex),
@@ -219,6 +229,11 @@ pub enum SendOutput {
     /// is now theirs. Carrying it through means the history says "Alice"
     /// without anybody typing it.
     NameTransaction { txid: String, text: String },
+    /// Hold a coin back, or release it. The app owns the label file, so it
+    /// does the writing — the same route a name takes.
+    SetFrozen { outpoint: String, frozen: bool },
+    /// Name one coin. Travels the same road, and lands in the same file.
+    SetCoinLabel { outpoint: String, text: String },
 }
 
 pub struct SendForm {
@@ -299,6 +314,36 @@ impl SendForm {
             .collect()
     }
 
+    /// How to name where these coins live, for copy that has to be true either
+    /// way.
+    ///
+    /// Each derivation path is its own wallet with its own coins, and a payment
+    /// is built from exactly one of them — so "all your coins" becomes false the
+    /// moment a second path holds anything, and false in the direction that
+    /// sends somebody hunting for money that is not missing. When only one path
+    /// is funded there is no distinction to draw, and naming it is jargon for a
+    /// difference that does not exist yet.
+    fn coins_scope(&self) -> String {
+        match self.fundable().len() > 1 {
+            true => format!(
+                "on {}",
+                self.source()
+                    .map(|a| a.script_type.label())
+                    .unwrap_or("this path")
+            ),
+            false => "in this wallet".to_string(),
+        }
+    }
+
+    /// Whether money this payment cannot reach is sitting unfrozen on another
+    /// path — the one genuinely useful thing to say to somebody looking at a
+    /// path where everything is held back.
+    fn spendable_elsewhere(&self) -> bool {
+        self.available_coins.iter().any(|coin| {
+            Some(coin.script_type) != self.from && coin.spendable() && !self.is_frozen(coin)
+        })
+    }
+
     fn source(&self) -> Option<&AccountSummary> {
         let fundable = self.fundable();
         match self.from {
@@ -318,16 +363,39 @@ impl SendForm {
     /// which coins to use. Max filled this field from the path balance while a
     /// selection was in force, which put a number on screen larger than the
     /// payment could ever send.
+    /// Frozen coins are subtracted, because "available" has to mean money this
+    /// payment can actually reach. Counting them would put a figure on screen
+    /// that Max fills in and the builder then refuses, which reads as the
+    /// wallet losing track of its own balance rather than as a coin somebody
+    /// held back on purpose.
     fn available_sats(&self) -> u64 {
         if !self.coins.is_empty() {
             return self
                 .coins_here()
                 .iter()
                 .filter(|coin| self.coins.contains(&coin.outpoint))
+                .filter(|coin| !self.is_frozen(coin))
                 .map(|coin| coin.sats)
                 .sum();
         }
-        self.source().map_or(0, |a| a.balance_sats)
+        let balance = self.source().map_or(0, |a| a.balance_sats);
+        let held: u64 = self
+            .coins_here()
+            .iter()
+            .filter(|coin| self.is_frozen(coin) && coin.spendable())
+            .map(|coin| coin.sats)
+            .sum();
+        balance.saturating_sub(held)
+    }
+
+    /// How much is frozen on the path being spent from, for the line that says
+    /// so under the balance. Nothing is said when nothing is frozen.
+    fn frozen_sats(&self) -> u64 {
+        self.coins_here()
+            .iter()
+            .filter(|coin| self.is_frozen(coin) && coin.spendable())
+            .map(|coin| coin.sats)
+            .sum()
     }
 
     fn available(&self) -> String {
@@ -381,7 +449,16 @@ impl SendForm {
 
         let here: Vec<crate::wallet::CoinSummary> =
             self.coins_here().into_iter().cloned().collect();
-        let selected = Rc::new(RefCell::new(self.coins.clone()));
+        // A coin frozen since this selection was made is not part of it. The
+        // row paints itself unticked either way; without this the tally behind
+        // it would still be counting money the builder will refuse.
+        let selected = Rc::new(RefCell::new(
+            self.coins
+                .iter()
+                .filter(|point| self.labels.spendable(&point.to_string()))
+                .copied()
+                .collect::<Vec<_>>(),
+        ));
 
         let page = adw::PreferencesPage::new();
 
@@ -437,7 +514,7 @@ impl SendForm {
         page.add(&tally);
 
         let list = adw::PreferencesGroup::new();
-        list.set_title("Coins on this path");
+        list.set_title(&format!("Coins {}", self.coins_scope()));
         let clear = gtk::Button::with_label("Choose for me");
         clear.set_valign(gtk::Align::Center);
         clear.add_css_class("flat");
@@ -457,32 +534,11 @@ impl SendForm {
             });
 
             let confirmations = coin.confirmations(self.tip);
-            let age = if coin.spendable() {
-                crate::ui::wallet_page::plural(
-                    confirmations as usize,
-                    "confirmation",
-                    "confirmations",
-                )
-            } else {
-                "Unconfirmed — cannot be spent yet".to_string()
-            };
             let reuse = if coin.reused_address {
                 " · reused address"
             } else {
                 ""
             };
-            row.set_subtitle(&format!(
-                "<tt>{}</tt>\n<span size=\"small\" alpha=\"60%\">{}{reuse}</span>",
-                gtk::glib::markup_escape_text(&coin.address),
-                gtk::glib::markup_escape_text(&format!(
-                    "{}{age}",
-                    coin.path
-                        .as_deref()
-                        .map(|p| format!("{p} · "))
-                        .unwrap_or_default()
-                )),
-            ));
-            row.set_subtitle_lines(4);
 
             let amount = gtk::Label::new(Some(
                 &self.settings.denomination.format(coin.sats, &self.network),
@@ -491,14 +547,187 @@ impl SendForm {
             amount.set_valign(gtk::Align::Center);
             row.add_suffix(&amount);
 
+            // Freezing is per coin and lives on the coin, so the control does
+            // too. A padlock rather than a switch: this is a state somebody put
+            // the coin into, and the row already carries a tick that means
+            // something else entirely.
+            let thaw = gtk::Button::new();
+            thaw.add_css_class("flat");
+            thaw.set_valign(gtk::Align::Center);
+            row.add_suffix(&thaw);
+
+            // A coin's name was only ever inherited — from the payment that
+            // brought it in, or the address it landed on. That gives two coins
+            // out of one transaction the same name, which is exactly when a
+            // name has to distinguish them; and a row reading "Not labelled"
+            // had nothing on it to do anything about that. BIP-329 keys a label
+            // on the outpoint for this, which is the same key the padlock
+            // already writes to.
+            let rename = gtk::Button::from_icon_name("document-edit-symbolic");
+            rename.add_css_class("flat");
+            rename.add_css_class("dim-label");
+            rename.set_valign(gtk::Align::Center);
+            rename.set_tooltip_text(Some("Name this coin"));
+            row.add_suffix(&rename);
+            {
+                let sender = sender.clone();
+                let row = row.clone();
+                let outpoint = coin.outpoint.to_string();
+                let current = self.coin_name(coin).unwrap_or_default();
+                rename.connect_clicked(move |button| {
+                    let dialog = adw::AlertDialog::new(
+                        Some("Name this coin"),
+                        Some(
+                            "Kept on the coin itself, so two coins from one payment can be \
+                             told apart. Stored beside every other label and exported with \
+                             them.",
+                        ),
+                    );
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("save", "Save");
+                    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+                    dialog.set_default_response(Some("save"));
+                    dialog.set_close_response("cancel");
+
+                    let group = adw::PreferencesGroup::new();
+                    let entry = adw::EntryRow::new();
+                    entry.set_title("Name");
+                    entry.set_text(&current);
+                    group.add(&entry);
+                    dialog.set_extra_child(Some(&group));
+
+                    {
+                        let sender = sender.clone();
+                        let outpoint = outpoint.clone();
+                        let row = row.clone();
+                        let entry = entry.clone();
+                        dialog.connect_response(None, move |_, response| {
+                            if response != "save" {
+                                return;
+                            }
+                            let text = entry.text().trim().to_string();
+                            // Painted here for the same reason the padlock is:
+                            // nothing rebuilds this page, so the row would
+                            // otherwise keep the name it was built with.
+                            row.set_title(&match text.is_empty() {
+                                true => "Not labelled".to_string(),
+                                false => gtk::glib::markup_escape_text(&text).to_string(),
+                            });
+                            sender.input(SendMsg::SetCoinLabel {
+                                outpoint: outpoint.clone(),
+                                text: text.clone(),
+                            });
+                        });
+                    }
+                    if let Some(window) = button.root() {
+                        dialog.present(Some(&window));
+                    }
+                });
+            }
+
             let tick = gtk::CheckButton::new();
             tick.set_valign(gtk::Align::Center);
-            tick.set_active(selected.borrow().contains(&coin.outpoint));
-            // An unconfirmed coin is not spendable, which is the same rule
-            // coin selection has followed since the day it was written.
-            tick.set_sensitive(coin.spendable());
             row.add_prefix(&tick);
             row.set_activatable_widget(Some(&tick));
+
+            // Everything the frozen state changes about this row, in one place
+            // that can be called again. The picker is built once and pushed —
+            // nothing rebuilds it — so without this the padlock wrote to the
+            // label file and left the screen exactly as it was, which looks
+            // precisely like a button that does nothing.
+            let paint = {
+                let row = row.clone();
+                let thaw = thaw.clone();
+                let tick = tick.clone();
+                let address = coin.address.clone();
+                let path = coin.path.clone();
+                let spendable = coin.spendable();
+                move |frozen: bool| {
+                    let age = if frozen {
+                        // Said first: it is the answer to "why can I not tick
+                        // this", and it is a state somebody chose rather than
+                        // one the chain imposed.
+                        "Frozen — held back deliberately".to_string()
+                    } else if spendable {
+                        crate::ui::wallet_page::plural(
+                            confirmations as usize,
+                            "confirmation",
+                            "confirmations",
+                        )
+                    } else {
+                        "Unconfirmed — cannot be spent yet".to_string()
+                    };
+                    row.set_subtitle(&format!(
+                        "<tt>{}</tt>\n<span size=\"small\" alpha=\"60%\">{}{reuse}</span>",
+                        gtk::glib::markup_escape_text(&address),
+                        gtk::glib::markup_escape_text(&format!(
+                            "{}{age}",
+                            path.as_deref()
+                                .map(|p| format!("{p} · "))
+                                .unwrap_or_default()
+                        )),
+                    ));
+                    match frozen {
+                        true => row.add_css_class("dim-label"),
+                        false => row.remove_css_class("dim-label"),
+                    }
+                    // The padlock says what the coin *is*, not what pressing it
+                    // would do: a closed one means frozen. Showing the action
+                    // instead put an open padlock on every frozen coin, which
+                    // reads as the opposite of the truth at a glance — and a
+                    // glance is all a list of coins gets. The tooltip carries
+                    // the action, where there is room to say it.
+                    thaw.set_icon_name(match frozen {
+                        true => "changes-prevent-symbolic",
+                        false => "changes-allow-symbolic",
+                    });
+                    // Quiet until it means something: an open padlock on every
+                    // ordinary coin is noise, and the one closed padlock in a
+                    // list should be what the eye lands on.
+                    match frozen {
+                        true => thaw.remove_css_class("dim-label"),
+                        false => thaw.add_css_class("dim-label"),
+                    }
+                    thaw.set_tooltip_text(Some(match frozen {
+                        true => "Frozen. Let this coin be spent again",
+                        false => {
+                            "Freeze this coin: never spend it, and never spend it \
+                                  alongside the others"
+                        }
+                    }));
+                    // An unconfirmed coin cannot be spent, which is the rule
+                    // coin selection has followed since it was written. A
+                    // frozen one cannot either, by a decision rather than by
+                    // the chain — and the builder holds both back whatever is
+                    // ticked here.
+                    tick.set_sensitive(spendable && !frozen);
+                    if frozen {
+                        tick.set_active(false);
+                    }
+                }
+            };
+            row.set_subtitle_lines(4);
+            tick.set_active(selected.borrow().contains(&coin.outpoint));
+            paint(self.is_frozen(coin));
+
+            {
+                let sender = sender.clone();
+                let outpoint = coin.outpoint.to_string();
+                let frozen = std::cell::Cell::new(self.is_frozen(coin));
+                let paint = paint.clone();
+                thaw.connect_clicked(move |_| {
+                    let now = !frozen.get();
+                    frozen.set(now);
+                    // Painted before the message goes anywhere: the label file
+                    // is the record, but the person pressing the button is
+                    // owed an answer on the frame they pressed it.
+                    paint(now);
+                    sender.input(SendMsg::SetFrozen {
+                        outpoint: outpoint.clone(),
+                        frozen: now,
+                    });
+                });
+            }
 
             checks.push((tick.clone(), coin.clone()));
             list.add(&row);
@@ -698,12 +927,27 @@ impl SendForm {
     fn coins_note(&self) -> String {
         let here = self.coins_here();
         if here.is_empty() {
-            return "Nothing to spend on this path".into();
+            return format!("Nothing to spend {}", self.coins_scope());
         }
+        // Said wherever the count is said, because a frozen coin is money the
+        // balance above no longer includes and the arithmetic would otherwise
+        // look wrong.
+        let held = self.frozen_sats();
+        let frozen = match held {
+            0 => String::new(),
+            sats => format!(
+                " · {} frozen",
+                self.settings.denomination.format(sats, &self.network)
+            ),
+        };
         if self.coins.is_empty() {
             return format!(
-                "Sieve is choosing, from {}",
-                crate::ui::wallet_page::plural(here.len(), "coin", "coins")
+                "Sieve is choosing, from {}{frozen}",
+                crate::ui::wallet_page::plural(
+                    here.iter().filter(|c| !self.is_frozen(c)).count(),
+                    "coin",
+                    "coins"
+                )
             );
         }
         let chosen: u64 = here
@@ -712,9 +956,9 @@ impl SendForm {
             .map(|coin| coin.sats)
             .sum();
         format!(
-            "{} of {} · {}",
+            "{} of {} · {}{frozen}",
             self.coins.len(),
-            here.len(),
+            here.iter().filter(|c| !self.is_frozen(c)).count(),
             self.settings.denomination.format(chosen, &self.network)
         )
     }
@@ -725,9 +969,27 @@ impl SendForm {
     fn coin_name(&self, coin: &crate::wallet::CoinSummary) -> Option<String> {
         use crate::wallet::labels::Kind;
         self.labels
-            .get(Kind::Tx, &coin.from_txid)
+            .get(Kind::Output, &coin.outpoint.to_string())
+            .or_else(|| self.labels.get(Kind::Tx, &coin.from_txid))
             .or_else(|| self.labels.get(Kind::Addr, &coin.address))
             .map(str::to_owned)
+    }
+
+    /// Whether this coin has been frozen — BIP-329's `spendable: false`.
+    fn is_frozen(&self, coin: &crate::wallet::CoinSummary) -> bool {
+        !self.labels.spendable(&coin.outpoint.to_string())
+    }
+
+    /// Every frozen coin on the path being spent from.
+    ///
+    /// Read when the draft is built rather than remembered, so a coin frozen
+    /// while this form was open is honoured without the form having to know.
+    fn frozen_outpoints(&self) -> Vec<bdk_wallet::bitcoin::OutPoint> {
+        self.available_coins
+            .iter()
+            .filter(|coin| self.is_frozen(coin))
+            .map(|coin| coin.outpoint)
+            .collect()
     }
 
     /// Whether the form describes a payment yet.
@@ -889,8 +1151,23 @@ impl SendForm {
         self.error = None;
     }
 
+    /// Whether this wallet holds anything at all on a spendable path.
+    ///
+    /// **Deliberately not `available_sats`, which subtracts frozen coins.**
+    /// This decides whether the send form is drawn at all, and a wallet whose
+    /// coins are all frozen still has to draw it: the only way to a coin's
+    /// padlock is the Coins row on this form, so hiding the form behind
+    /// "Nothing to send" locks somebody out of the control that would let them
+    /// back in. Freezing must never be a one-way door.
     fn has_funds(&self) -> bool {
-        self.available_sats() > 0
+        self.source().map_or(0, |a| a.balance_sats) > 0 || self.available_sats() > 0
+    }
+
+    /// Every coin on the path being spent from is frozen: there is money here
+    /// and this payment cannot touch any of it.
+    fn all_frozen(&self) -> bool {
+        let here = self.coins_here();
+        !here.is_empty() && here.iter().all(|coin| self.is_frozen(coin))
     }
 
     /// Shown only when there is a choice to make.
@@ -1006,6 +1283,37 @@ impl Component for SendForm {
                         set_visible: !model.watch_only
                             && !model.has_funds()
                             && model.sent.is_none(),
+                    },
+
+                    // Money here, and none of it reachable. Said plainly and
+                    // with the way out named, because the alternative is a
+                    // form whose every field works and whose Review button
+                    // never lights, for a reason nothing on screen mentions.
+                    // A group rather than an adw::Banner: a banner is designed
+                    // to pin flush across the top of a view, so inline among
+                    // rounded groups it has square corners by construction.
+                    adw::PreferencesGroup {
+                        #[watch]
+                        set_visible: model.all_frozen() && !model.watch_only,
+
+                        adw::ActionRow {
+                            add_css_class: "warning",
+                            #[watch]
+                            set_title: &format!("Every coin {} is frozen", model.coins_scope()),
+                            #[watch]
+                            set_subtitle: if model.spendable_elsewhere() {
+                                "Another derivation path still has coins you can spend — \
+                                 change From above, or release one here."
+                            } else {
+                                "Nothing can be spent until one is released."
+                            },
+                            set_subtitle_lines: 3,
+                            add_suffix = &gtk::Button {
+                                set_label: "Coins",
+                                set_valign: gtk::Align::Center,
+                                connect_clicked => SendMsg::ChooseCoins,
+                            },
+                        },
                     },
 
                     // A watch-only wallet can work out a payment down to the
@@ -1580,6 +1888,27 @@ impl Component for SendForm {
                 self.recount_payees(widgets);
             }
 
+            SendMsg::SetCoinLabel { outpoint, text } => {
+                // Applied locally as well as sent on, so the tally's own copy
+                // of the names agrees with the row that was just renamed.
+                self.labels
+                    .set(crate::wallet::labels::Kind::Output, &outpoint, &text);
+                let _ = sender.output(SendOutput::SetCoinLabel { outpoint, text });
+            }
+
+            SendMsg::SetFrozen { outpoint, frozen } => {
+                // Applied here as well as sent on, so the picker redraws now
+                // rather than waiting for the label file to come back around.
+                self.labels.set_spendable(&outpoint, !frozen);
+                // A coin that has just been frozen must not stay ticked: the
+                // builder would hold it back anyway, and a selection that
+                // silently does nothing is worse than one that visibly clears.
+                if frozen && let Ok(point) = outpoint.parse() {
+                    self.coins.retain(|chosen| *chosen != point);
+                }
+                let _ = sender.output(SendOutput::SetFrozen { outpoint, frozen });
+            }
+
             SendMsg::PayeeEdited => self.recount_payees(widgets),
 
             SendMsg::DataEdited => {
@@ -1785,6 +2114,7 @@ impl Component for SendForm {
                     data: self.data_bytes(),
                     fee_rate,
                     coins: self.coins.clone(),
+                    frozen: self.frozen_outpoints(),
                 })));
             }
 
@@ -2200,5 +2530,36 @@ mod tests {
     fn messages_start_like_sentences() {
         assert_eq!(capitalise("that is not a number"), "That is not a number");
         assert_eq!(capitalise(""), "");
+    }
+
+    /// Freezing must never be a one-way door.
+    ///
+    /// The only way to a coin's padlock was the Coins row on the send form, and
+    /// `has_funds` decided whether that form was drawn at all. Pointing it at
+    /// `available_sats`, which subtracts frozen coins, meant freezing every
+    /// coin on a path replaced the form with "Nothing to send" — and took the
+    /// unfreeze control away with it. A wallet with money in it that cannot be
+    /// spent and cannot be released is worse than one that simply refuses.
+    #[test]
+    fn freezing_everything_does_not_hide_the_way_to_unfreeze() {
+        use crate::wallet::labels::{Kind, Labels};
+
+        // The rule under test, stated over the two figures it reads: the form
+        // is drawn while the *path* holds anything, not while this payment can
+        // reach it.
+        let balance_sats = 100_000u64;
+        let available_sats = 0u64; // everything frozen
+        assert!(
+            balance_sats > 0 || available_sats > 0,
+            "the send form has to be drawn while the path holds anything at all"
+        );
+
+        // And a frozen coin stays frozen across a name being cleared, which is
+        // the other way somebody could have lost track of one.
+        let outpoint = "0000000000000000000000000000000000000000000000000000000000000000:0";
+        let mut labels = Labels::default();
+        labels.set_spendable(outpoint, false);
+        labels.set(Kind::Output, outpoint, "");
+        assert!(!labels.spendable(outpoint));
     }
 }

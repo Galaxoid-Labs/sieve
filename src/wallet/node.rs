@@ -705,9 +705,15 @@ impl Session {
         let pending = super::send::unconfirmed_outpoints(&account.wallet);
         let waiting_on_a_block = !pending.is_empty();
 
+        // Frozen coins join the pending ones: both are money the wallet can see
+        // and must not reach for. The difference is only that one of them will
+        // become spendable on its own.
+        let mut held_back = pending.clone();
+        held_back.extend(draft.frozen.iter().copied());
+
         let psbt = {
             let mut builder = account.wallet.build_tx();
-            builder.unspendable(pending);
+            builder.unspendable(held_back);
             builder.fee_rate(draft.fee_rate);
 
             // Chosen coins mean exactly those. `manually_selected_only` is

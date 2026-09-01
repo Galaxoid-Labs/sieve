@@ -99,7 +99,16 @@ impl Labels {
         let label = label.trim();
         let key = (kind, reference.to_owned());
         if label.is_empty() {
-            self.entries.remove(&key);
+            // Only the *name* is being cleared. An entry carrying anything
+            // else — a frozen coin's `spendable: false`, an imported
+            // `origin` — has to survive losing its name, or unnaming a coin
+            // would quietly unfreeze it.
+            match self.entries.get_mut(&key) {
+                Some(entry) if !entry.rest.is_empty() => entry.label.clear(),
+                _ => {
+                    self.entries.remove(&key);
+                }
+            }
             return;
         }
         match self.entries.get_mut(&key) {
@@ -117,6 +126,63 @@ impl Labels {
                     },
                 );
             }
+        }
+    }
+
+    /// Whether this coin may be spent.
+    ///
+    /// BIP-329's `spendable`, which defaults to **true**: an entry without the
+    /// field, or no entry at all, is an ordinary coin. Only an explicit `false`
+    /// freezes one, so a label file from another wallet cannot accidentally
+    /// make money unspendable here.
+    ///
+    /// `outpoint` is BIP-329's own form, `txid:vout`.
+    pub fn spendable(&self, outpoint: &str) -> bool {
+        self.entries
+            .get(&(Kind::Output, outpoint.to_owned()))
+            .and_then(|entry| entry.rest.get("spendable"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true)
+    }
+
+    /// Freeze a coin, or let it be spent again.
+    ///
+    /// Written into the label file rather than a store of our own, because
+    /// BIP-329 already defines this field and a wallet that reads the export
+    /// should see the same coins held back. Unfreezing removes the field rather
+    /// than writing `true`, so an untouched coin and a deliberately released
+    /// one look the same — which they are.
+    pub fn set_spendable(&mut self, outpoint: &str, spendable: bool) {
+        let key = (Kind::Output, outpoint.to_owned());
+        match self.entries.get_mut(&key) {
+            Some(entry) => {
+                match spendable {
+                    true => entry.rest.remove("spendable"),
+                    false => entry
+                        .rest
+                        .insert("spendable".to_owned(), serde_json::Value::Bool(false)),
+                };
+                // Nothing left to say about it: no name, no flags.
+                if entry.label.is_empty() && entry.rest.is_empty() {
+                    self.entries.remove(&key);
+                }
+            }
+            // Nothing recorded yet, and nothing to record unless it is being
+            // frozen.
+            None if !spendable => {
+                let mut rest = HashMap::new();
+                rest.insert("spendable".to_owned(), serde_json::Value::Bool(false));
+                self.entries.insert(
+                    key,
+                    Entry {
+                        kind: Kind::Output,
+                        reference: outpoint.to_owned(),
+                        label: String::new(),
+                        rest,
+                    },
+                );
+            }
+            None => {}
         }
     }
 
@@ -255,5 +321,53 @@ mod tests {
         let labels = Labels::load(&dir);
         assert_eq!(labels.get(Kind::Tx, TXID), Some("Rent"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// BIP-329 already defines `spendable`, so freezing writes into the file
+    /// every other label lives in rather than a store of Sieve's own — and a
+    /// wallet reading the export sees the same coins held back.
+    #[test]
+    fn a_coin_can_be_frozen_and_released() {
+        let outpoint = format!("{TXID}:1");
+        let mut labels = Labels::default();
+
+        // Nothing recorded means spendable. A label file from another wallet
+        // cannot accidentally make money unspendable here.
+        assert!(labels.spendable(&outpoint));
+
+        labels.set_spendable(&outpoint, false);
+        assert!(!labels.spendable(&outpoint));
+        assert!(labels.to_jsonl().unwrap().contains(r#""spendable":false"#));
+
+        // Releasing removes the field rather than writing `true`, so a coin
+        // nobody touched and one deliberately released look the same — which
+        // they are.
+        labels.set_spendable(&outpoint, true);
+        assert!(labels.spendable(&outpoint));
+        assert!(!labels.to_jsonl().unwrap().contains("spendable"));
+    }
+
+    /// Clearing a name used to delete the whole entry, which would have taken
+    /// the freeze with it: a coin would quietly become spendable because
+    /// somebody unnamed it.
+    #[test]
+    fn unnaming_a_frozen_coin_leaves_it_frozen() {
+        let outpoint = format!("{TXID}:0");
+        let mut labels = Labels::default();
+        labels.set(Kind::Output, &outpoint, "From an exchange");
+        labels.set_spendable(&outpoint, false);
+
+        labels.set(Kind::Output, &outpoint, "");
+        assert_eq!(
+            labels.get(Kind::Output, &outpoint),
+            None,
+            "the name is gone"
+        );
+        assert!(!labels.spendable(&outpoint), "and the freeze is not");
+
+        // Releasing a coin with no name left drops the entry entirely, rather
+        // than leaving a line that says nothing.
+        labels.set_spendable(&outpoint, true);
+        assert!(labels.is_empty());
     }
 }

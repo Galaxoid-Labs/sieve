@@ -367,6 +367,37 @@ the receive row and read as address reuse.
 The picker defaults to **native segwit** on every wallet that watches it, and never offers
 legacy at all. See the import model above for why those are two different rules.
 
+## Coins, and holding one back
+
+`wallet::labels` is the store for both: BIP-329 keys a label on `txid:vout`, and Sieve writes a
+name and a `spendable` flag against that key.
+
+**A coin's name is its own first, inherited second** — the coin, then the payment that brought
+it in, then the address it landed on. Inheritance alone gives every coin out of one transaction
+the same name, which is exactly when a name has to tell them apart.
+
+**Freezing is `spendable: false`, and it is a rule the builder keeps, not the view.**
+`node::plan` adds frozen coins to `unspendable` beside the unconfirmed ones, so automatic
+selection cannot reach for one to make the numbers work — which would break the link the coin
+was frozen to avoid. The picker also refuses to tick one, but that is a courtesy.
+
+**Three traps, all found by using it, all of which must stay shut:**
+
+1. **Freezing must never be a one-way door.** `has_funds` decides whether the send form is
+   drawn at all, so pointing it at the frozen-adjusted figure meant freezing everything
+   replaced the form with "Nothing to send" — taking the only route to the padlock with it.
+   It reads the *path* balance. Coin control also has its own way in from Activity.
+2. **Clearing a name must not clear the freeze.** `Labels::set` deleted the whole entry on an
+   empty label, `spendable` included.
+3. **The picker is built once and never rebuilt**, so anything a control changes has to be
+   painted onto the row by that control. A padlock that wrote to the file and left the screen
+   alone looked exactly like a button that does nothing.
+
+**Copy about coins has to survive a second funded path.** Each path is its own wallet with its
+own coins and a payment is built from one, so "all your coins" is false the moment another path
+holds anything — false in the direction that sends somebody hunting for money that is not
+missing. `coins_scope` says "in this wallet" or names the path, depending.
+
 ## The name
 
 **Sieve**, one word, and it stays that way. The GNOME naming guidance asks for

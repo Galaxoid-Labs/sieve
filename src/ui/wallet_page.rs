@@ -26,6 +26,12 @@ pub enum WalletPageOutput {
         reference: String,
         text: String,
     },
+    /// Hold a coin back, or release it. The app owns the label file, so it does
+    /// the writing — the same route a name takes.
+    SetFrozen {
+        outpoint: String,
+        frozen: bool,
+    },
     /// Announce an unconfirmed transaction to another peer.
     Rebroadcast {
         txid: String,
@@ -152,6 +158,9 @@ impl FactoryComponent for TxRow {
 
     view! {
         adw::ActionRow {
+            // Markup, so the direction and the name given to a payment are not
+            // the same text in the same weight.
+            set_use_markup: true,
             set_title: &self.title,
             set_subtitle: &self.subtitle,
             set_activatable: true,
@@ -254,7 +263,18 @@ impl FactoryComponent for TxRow {
             title: {
                 let direction = if incoming { "Received" } else { "Sent" };
                 match &label {
-                    Some(label) => format!("{direction} · {label}"),
+                    // The *name* is weighted, not the direction dimmed. Dimming
+                    // the direction made "Sent" look one way on a named payment
+                    // and another on an unnamed one, which is most of them —
+                    // the same word changing appearance for a reason that has
+                    // nothing to do with it. This way the direction reads
+                    // identically on every row and the name is what stands out,
+                    // which is right: the name is the only thing here that is
+                    // not already said by the icon and by the amount's colour.
+                    Some(label) => format!(
+                        "{direction} · <b>{}</b>",
+                        gtk::glib::markup_escape_text(label)
+                    ),
                     None => direction.to_owned(),
                 }
             },
@@ -646,6 +666,18 @@ pub enum WalletPageMsg {
     ShowAbout,
     /// Every address this wallet has handed out.
     ShowAddresses,
+    /// The coin list, and the padlocks on it.
+    ShowCoins,
+    /// Hold a coin back, or release it.
+    SetFrozen {
+        outpoint: String,
+        frozen: bool,
+    },
+    /// Name one coin.
+    SetCoinLabel {
+        outpoint: String,
+        text: String,
+    },
     /// Name a payment just made, from what its request called itself.
     NameTransaction {
         txid: String,
@@ -1220,6 +1252,13 @@ impl WalletPage {
     /// wallet watching legacy and taproot has one address to hand out, and a
     /// picker with a single row on it is a control that asks a question with
     /// one answer.
+    /// Whether there is anything for a coin list to list.
+    fn has_coins(&self) -> bool {
+        self.summary
+            .as_ref()
+            .is_some_and(|s| s.balance_sats > 0 || s.pending_sats > 0)
+    }
+
     fn has_path_choice(&self) -> bool {
         self.summary.as_ref().is_some_and(|s| {
             s.accounts
@@ -1590,6 +1629,30 @@ impl Component for WalletPage {
                                     set_valign: gtk::Align::Center,
                                     set_hexpand: true,
                                     set_label: "Transactions",
+                                },
+
+                                // Coin control, reachable without composing a
+                                // payment. It lived only behind the Coins row
+                                // on the send form, which meant curating coins
+                                // you had decided *not* to spend began by
+                                // starting to spend — and, once everything on
+                                // a path was frozen, could not be reached at
+                                // all.
+                                gtk::Button {
+                                    set_label: "Coins",
+                                    set_valign: gtk::Align::Center,
+                                    add_css_class: "flat",
+                                    // A word rather than a padlock: the icon
+                                    // named the one thing you can do in there
+                                    // rather than the thing it holds, and read
+                                    // as "locking" to anybody not already
+                                    // looking for the freeze control.
+                                    set_tooltip_text: Some(
+                                        "What this wallet holds, coin by coin"
+                                    ),
+                                    #[watch]
+                                    set_visible: !model.locked && model.has_coins(),
+                                    connect_clicked => WalletPageMsg::ShowCoins,
                                 },
 
                                 #[name(search_button)]
@@ -2265,6 +2328,12 @@ impl Component for WalletPage {
                 SendOutput::NameTransaction { txid, text } => {
                     WalletPageMsg::NameTransaction { txid, text }
                 }
+                SendOutput::SetFrozen { outpoint, frozen } => {
+                    WalletPageMsg::SetFrozen { outpoint, frozen }
+                }
+                SendOutput::SetCoinLabel { outpoint, text } => {
+                    WalletPageMsg::SetCoinLabel { outpoint, text }
+                }
             });
 
         let mut model = WalletPage {
@@ -2473,6 +2542,11 @@ impl Component for WalletPage {
             }
             WalletPageMsg::ShowAddresses => self.show_addresses(root, &sender),
 
+            // The picker belongs to the send component, which owns the
+            // selection and the tally. Reached from here it simply opens with
+            // no amount to measure against, which it already handles.
+            WalletPageMsg::ShowCoins => self.send.emit(crate::ui::send::SendMsg::ChooseCoins),
+
             WalletPageMsg::Search(query) => {
                 self.search = query;
                 if let Some(summary) = self.summary.clone() {
@@ -2561,6 +2635,20 @@ impl Component for WalletPage {
                     text,
                 });
             }
+            WalletPageMsg::SetFrozen { outpoint, frozen } => {
+                let _ = sender.output(WalletPageOutput::SetFrozen { outpoint, frozen });
+            }
+
+            // Straight onto the road every other label takes: the app owns the
+            // file, so the app does the writing.
+            WalletPageMsg::SetCoinLabel { outpoint, text } => {
+                let _ = sender.output(WalletPageOutput::SetLabel {
+                    kind: crate::wallet::labels::Kind::Output,
+                    reference: outpoint,
+                    text,
+                });
+            }
+
             WalletPageMsg::SetLabels(labels) => {
                 self.send.emit(SendMsg::SetLabels(labels.clone()));
                 self.labels = *labels;

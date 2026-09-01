@@ -100,6 +100,9 @@ pub struct App {
     /// Dropping this unsubscribes from logind, so it is held for the life of
     /// the app rather than let go at the end of `init`.
     sleep_watch: Option<gtk::gio::SignalSubscription>,
+    /// Screensaver and logind lock signals. Held for the life of the app: a
+    /// dropped subscription is an unsubscription.
+    screen_watch: Vec<gtk::gio::SignalSubscription>,
     /// The same for the desktop theme: dropping the monitor stops the watch,
     /// and the accent would then be whatever it was at startup. Never read for
     /// that reason — being held *is* what it does.
@@ -214,6 +217,72 @@ fn apply_palette(provider: &gtk::CssProvider) {
 /// with no logind simply never signals, which is why every step here fails
 /// quietly: locking is a precaution, and a precaution that cannot be armed is
 /// not an error worth putting in front of anybody.
+/// Lock when the session locks.
+///
+/// The third ordinary way a machine is left unattended, after walking away from
+/// it and shutting the lid — and the one an idle timeout is worst at, since
+/// locking the screen is exactly the moment somebody stops touching the machine
+/// on purpose rather than by accident.
+///
+/// Three subscriptions, because there is no single answer across desktops:
+///
+/// - `org.gnome.ScreenSaver`, which GNOME emits
+/// - `org.freedesktop.ScreenSaver`, the interface everyone else implements
+/// - logind's own `Session.Lock`, which `loginctl lock-session` raises and which
+///   most lockers hook, including ones that implement neither of the above
+///
+/// Overlapping on purpose: a desktop answering two of them locks the wallet
+/// twice, and locking an already locked wallet does nothing. Missing all three
+/// would leave it open, which is the failure worth avoiding.
+fn watch_for_session_lock(sender: &ComponentSender<App>) -> Vec<gtk::gio::SignalSubscription> {
+    let mut watches = Vec::new();
+
+    if let Ok(bus) = gtk::gio::bus_get_sync(gtk::gio::BusType::Session, gtk::gio::Cancellable::NONE)
+    {
+        for interface in ["org.gnome.ScreenSaver", "org.freedesktop.ScreenSaver"] {
+            let sender = sender.clone();
+            watches.push(bus.subscribe_to_signal(
+                None,
+                Some(interface),
+                Some("ActiveChanged"),
+                None,
+                None,
+                gtk::gio::DBusSignalFlags::NONE,
+                move |signal| {
+                    // Fires on the way in and the way out. Only the way in is
+                    // ours; unlocking the screen must not unlock the wallet.
+                    if signal
+                        .parameters
+                        .child_value(0)
+                        .get::<bool>()
+                        .unwrap_or(false)
+                    {
+                        sender.input(AppMsg::Lock(LockReason::Screen));
+                    }
+                },
+            ));
+        }
+    }
+
+    // logind's Lock carries no argument: it is the event.
+    if let Ok(bus) = gtk::gio::bus_get_sync(gtk::gio::BusType::System, gtk::gio::Cancellable::NONE)
+    {
+        let sender = sender.clone();
+        watches.push(bus.subscribe_to_signal(
+            Some("org.freedesktop.login1"),
+            Some("org.freedesktop.login1.Session"),
+            Some("Lock"),
+            None,
+            None,
+            gtk::gio::DBusSignalFlags::NONE,
+            move |_| sender.input(AppMsg::Lock(LockReason::Screen)),
+        ));
+    }
+
+    tracing::debug!(watches = watches.len(), "will lock when this session locks");
+    watches
+}
+
 fn watch_for_sleep(sender: &ComponentSender<App>) -> Option<gtk::gio::SignalSubscription> {
     let Ok(bus) = gtk::gio::bus_get_sync(gtk::gio::BusType::System, gtk::gio::Cancellable::NONE)
     else {
@@ -273,6 +342,10 @@ fn should_lock(
 pub enum LockReason {
     Idle,
     Suspend,
+    /// The session was locked — a screensaver came on, or somebody pressed the
+    /// lock key. The third ordinary way a machine is left unattended, after
+    /// walking away from it and shutting the lid.
+    Screen,
     /// Somebody asked for it.
     Asked,
 }
@@ -291,8 +364,10 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(8);
 
 const ICONS: &[&str] = &[
     crate::APP_ID,
+    "changes-allow-symbolic",
     "changes-prevent-symbolic",
     "channel-secure-symbolic",
+    "document-edit-symbolic",
     "document-open-recent-symbolic",
     "document-save-symbolic",
     "edit-copy-symbolic",
@@ -319,6 +394,12 @@ pub enum AppMsg {
     ShowOnboarding,
     ShowRestore,
     ShowPreferences,
+    /// Hold a coin back, or let it be spent again. BIP-329's `spendable`, in
+    /// the same file every other label lives in.
+    SetFrozen {
+        outpoint: String,
+        frozen: bool,
+    },
     /// Re-read what the header chain can tell us.
     RefreshChain,
     /// A dialog was dismissed, by us or by the person using it.
@@ -601,6 +682,9 @@ impl Component for App {
                         reference,
                         text,
                     },
+                    crate::ui::wallet_page::WalletPageOutput::SetFrozen { outpoint, frozen } => {
+                        AppMsg::SetFrozen { outpoint, frozen }
+                    }
                     crate::ui::wallet_page::WalletPageOutput::RetryTor => AppMsg::RetryTor,
                     crate::ui::wallet_page::WalletPageOutput::PlanSend(draft) => {
                         AppMsg::PlanSend(draft)
@@ -763,6 +847,7 @@ impl Component for App {
         let mut model = App {
             blocks_recorded: false,
             sleep_watch: None,
+            screen_watch: Vec::new(),
             theme_watch,
             accent_provider,
             desktop_settings,
@@ -832,6 +917,7 @@ impl Component for App {
         }
         model.watch_for_idle(&sender);
         model.sleep_watch = watch_for_sleep(&sender);
+        model.screen_watch = watch_for_session_lock(&sender);
 
         // The one opened last, if it is still there. Falling back to the
         // first by name is a sort order, not a choice anybody made.
@@ -1101,6 +1187,30 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetLabels(Box::new(labels)));
             }
 
+            AppMsg::SetFrozen { outpoint, frozen } => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                let mut labels = wallet::labels::Labels::load(&paths.dir);
+                labels.set_spendable(&outpoint, !frozen);
+                if let Err(e) = labels.save(&paths.dir) {
+                    tracing::error!(%e, "could not freeze a coin");
+                    self.wallet
+                        .emit(WalletPageMsg::Toast(crate::ui::send::capitalise(
+                            &e.to_string(),
+                        )));
+                    return;
+                }
+                self.wallet.emit(WalletPageMsg::Toast(
+                    match frozen {
+                        true => "Frozen. This coin will not be spent, on its own or with others",
+                        false => "Released. This coin can be spent again",
+                    }
+                    .into(),
+                ));
+                self.wallet.emit(WalletPageMsg::SetLabels(Box::new(labels)));
+            }
+
             AppMsg::ShowDescriptors => {
                 let Some(paths) = self.active.clone() else {
                     return;
@@ -1363,6 +1473,7 @@ impl Component for App {
                     match reason {
                         LockReason::Idle => "Locked after a while untouched",
                         LockReason::Suspend => "Locked because this computer went to sleep",
+                        LockReason::Screen => "Locked because the screen was locked",
                         LockReason::Asked => "Locked",
                     }
                     .into(),

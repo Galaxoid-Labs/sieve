@@ -36,9 +36,14 @@ behaves like the rest of the desktop rather than like a browser in a window.
 **Spending, carefully**
 - Payments built watch-only. Every number — amount, fee, change — is worked
   out before any key is involved.
-- **Coin control**: choose which coins a payment spends, with each named by the
-  label on the payment that brought it in, and the linking you are about to
-  create stated in plain words.
+- **Coin control**: choose which coins a payment spends, each named by you or by
+  the payment that brought it in, with the linking you are about to create
+  stated in plain words. Reachable from Activity as well as from the send form,
+  because deciding which coins *not* to spend should not begin by starting to
+  spend.
+- **Freeze a coin** so it is never spent — on its own or alongside others. Kept
+  as BIP-329's `spendable: false` in the same label file everything else uses,
+  so a wallet you export to holds the same coins back.
 - **Fee bump (RBF)** for a payment that is taking too long, with the race
   against the original explained rather than hidden.
 - **Try to cancel** an unconfirmed payment, by replacing it with one that pays
@@ -78,8 +83,9 @@ behaves like the rest of the desktop rather than like a browser in a window.
   omits them.
 - Activity filterable by derivation path, with the full path shown on every
   address and output: `m/86'/0'/0'/1/7`.
-- **Labels** on payments and addresses, stored in BIP-329's format so they can
-  be exported and imported anywhere else.
+- **Labels** on payments, addresses and individual coins, stored in BIP-329's
+  format so they can be exported and imported anywhere else. A coin without a
+  name of its own inherits one from the payment that brought it in.
 - Every address you have handed out, which are used, what each received, and
   which have been paid more than once.
 - **Search** the activity list by amount, address, transaction id, the name you
@@ -114,7 +120,8 @@ behaves like the rest of the desktop rather than like a browser in a window.
   nothing to decrypt — the password seals a known value instead, which gives a
   hardware-wallet or descriptor wallet something to fail against rather than
   leaving its whole history open to anyone who opens the app.
-- Idle auto-lock, and lock when the computer goes to sleep.
+- Idle auto-lock, and lock when the computer goes to sleep or the session is
+  locked — the three ordinary ways a machine is left unattended.
 
 **Looking like the rest of the desktop**
 - Light and dark follow the desktop, with no switch of Sieve's own: an
@@ -203,7 +210,7 @@ Then unplug the device and plug it in again.
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh
-cargo test          # 186 tests, needing no network and no display
+cargo test          # 189 tests, needing no network and no display
 cargo fmt --check
 cargo clippy -- -D warnings
 ```
