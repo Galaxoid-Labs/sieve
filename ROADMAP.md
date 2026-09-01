@@ -227,6 +227,12 @@ tests.
       and one source is easier to argue about than two. The phrase screen now says where the
       words came from and how many bits they carry, checked against BIP-39's `words * 32 / 3`
       by a test so the sentence cannot go stale.
+- [ ] Dice as **additional** entropy, XOR-mixed into those bytes and never replacing them.
+      Motivated by the Coldcard seed-generation failure of July 2026, where a build flag sent
+      five years of devices to a deterministic PRNG and the seeds that survived were the ones
+      with dice rolls in them. See `DICE.md` — for why mixing rather than replacing, why
+      Electrum shipped replace-mode and withdrew it, and for why the entry screen is most of
+      the work.
 
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never
 crosses a component boundary as a message.
