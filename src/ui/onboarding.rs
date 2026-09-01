@@ -246,6 +246,25 @@ fn phrase_warning(words: usize, passphrase: bool) -> String {
     }
 }
 
+/// Where the words came from, said under them.
+///
+/// Free-standing like `phrase_warning`, and for the same reason: this is a
+/// claim about how the wallet was made, so it is pinned by a test rather than
+/// left to drift when the code it describes changes. `wallet::generate_mnemonic`
+/// is what it describes — `getrandom::fill`, which is `getrandom(2)` on Linux,
+/// the same call the vault uses for its salt, nonces and data key.
+///
+/// Said at all because a person handed twelve words has no way to tell a good
+/// phrase from a bad one by looking: they are the same twelve words either way.
+/// The provenance is the only part that can be shown.
+fn entropy_note(words: usize) -> String {
+    let bits = words * 32 / 3;
+    format!(
+        "Chosen with {bits} bits of randomness from this computer's operating system — \
+         the same source that seals the wallet file, and the only one Sieve uses."
+    )
+}
+
 /// The chains offered when making a wallet, bitcoin first and by default.
 ///
 /// Order matters twice: it is what the picker shows, and it is what an index
@@ -576,6 +595,20 @@ impl Component for Onboarding {
                                 // into either, so no row is left ragged.
                                 set_min_children_per_line: 2,
                                 set_max_children_per_line: 3,
+                            },
+
+                            // Under the words rather than in the page
+                            // description, which is spoken for: that slot
+                            // carries the warning that anyone reading these
+                            // can spend the money, and provenance must not
+                            // crowd out custody.
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                add_css_class: "caption",
+                                set_wrap: true,
+                                set_justify: gtk::Justification::Center,
+                                #[watch]
+                                set_label: &entropy_note(model.length.words()),
                             },
 
                             gtk::Button {
@@ -990,6 +1023,32 @@ mod tests {
             guarded.contains("empty wallet"),
             "it has to say what happens, not just that a passphrase exists: {guarded}"
         );
+    }
+
+    /// The note under the words claims a number of bits. BIP-39 fixes what that
+    /// number is — a phrase carries `words * 32 / 3` bits — so the claim is
+    /// checked against the standard rather than against itself. A screen that
+    /// tells somebody they have 256 bits when they have 128 is worse than one
+    /// that says nothing, because it is the sentence they would rely on.
+    #[test]
+    fn the_phrase_screen_states_the_right_number_of_bits() {
+        assert!(
+            entropy_note(12).contains("128 bits"),
+            "{}",
+            entropy_note(12)
+        );
+        assert!(
+            entropy_note(24).contains("256 bits"),
+            "{}",
+            entropy_note(24)
+        );
+
+        // And it names the source rather than merely asserting the words are
+        // random, which is what every wallet says and none of them show.
+        for words in [12, 24] {
+            let note = entropy_note(words);
+            assert!(note.contains("operating system"), "{note}");
+        }
     }
 
     #[test]

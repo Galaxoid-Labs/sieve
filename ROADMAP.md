@@ -220,6 +220,13 @@ tests.
 - [x] Descriptor / xpub watch-only import — no vault, no password, and the send tab says
       plainly that signing happens wherever the keys are.
 - [ ] Signer worker owning the decrypted descriptor, one message at a time
+- [x] The phrase's entropy comes from `getrandom::fill` — the same `getrandom(2)` the vault
+      uses — rather than from BDK's `rand::thread_rng`. Both are cryptographically secure, so
+      nothing was unsafe; but the one irreplaceable secret in the program came from a
+      userspace generator while the vault's salt, nonces and data key came from the kernel,
+      and one source is easier to argue about than two. The phrase screen now says where the
+      words came from and how many bits they carry, checked against BIP-39's `words * 32 / 3`
+      by a test so the sentence cannot go stale.
 
 The mnemonic gets the same treatment as `Passphrase`: `Zeroizing`, redacted `Debug`, never
 crosses a component boundary as a message.

@@ -981,13 +981,36 @@ impl PhraseLength {
 ///
 /// Returned in a `Zeroizing<String>` and never logged. The caller shows it once
 /// and drops it.
+///
+/// **The entropy is asked for here rather than left to BDK.** `Mnemonic::generate`
+/// would supply its own from `rand`'s `ThreadRng` — a real CSPRNG, seeded from the
+/// OS, so nothing about that was unsafe. But it meant the one irreplaceable secret
+/// in the program came from a userspace generator while the vault's salt, nonces
+/// and data key came straight from the kernel. One source is easier to argue about
+/// than two, and this is the one the whole wallet rests on, so it gets the same
+/// `getrandom::fill` the vault uses — the `getrandom(2)` syscall on Linux.
+///
+/// A failure to read entropy stops wallet creation. It cannot be worked around,
+/// and a phrase generated from a fallback nobody chose is exactly the kind of
+/// silent weakness that looks identical to a good wallet.
+///
+/// This is also the seam user-supplied entropy would use: dice would be *mixed
+/// into* these bytes, never substituted for them, so a bad roll cannot produce a
+/// phrase weaker than the OS alone would have given.
 pub fn generate_mnemonic(length: PhraseLength) -> Result<Zeroizing<String>> {
     let count = match length {
         PhraseLength::Twelve => WordCount::Words12,
         PhraseLength::TwentyFour => WordCount::Words24,
     };
-    let generated: GeneratedKey<Mnemonic, Tap> = Mnemonic::generate((count, Language::English))
-        .map_err(|e| anyhow!("could not generate a recovery phrase: {e:?}"))?;
+
+    // BDK takes 32 bytes and uses the first `bits / 8` of them: 16 for a
+    // twelve-word phrase, all 32 for twenty-four.
+    let mut entropy = Zeroizing::new([0u8; 32]);
+    getrandom::fill(entropy.as_mut()).context("no entropy available from the OS")?;
+
+    let generated: GeneratedKey<Mnemonic, Tap> =
+        Mnemonic::generate_with_entropy((count, Language::English), *entropy)
+            .map_err(|e| anyhow!("could not generate a recovery phrase: {e:?}"))?;
     Ok(Zeroizing::new(generated.to_string()))
 }
 
@@ -1299,6 +1322,22 @@ mod tests {
         let a = generate_mnemonic(PhraseLength::Twelve).unwrap();
         let b = generate_mnemonic(PhraseLength::Twelve).unwrap();
         assert_ne!(*a, *b);
+    }
+
+    /// Sieve now supplies the entropy itself rather than letting BDK do it, so
+    /// the length it asked for is its own to get right. A phrase short of its
+    /// word count is a phrase short of its bits, and it would look perfectly
+    /// ordinary on screen: twelve words where twenty-four were chosen is half
+    /// the security with nothing to see.
+    #[test]
+    fn a_phrase_has_the_bits_that_were_asked_for() {
+        for (length, words) in [(PhraseLength::Twelve, 12), (PhraseLength::TwentyFour, 24)] {
+            let phrase = generate_mnemonic(length).unwrap();
+            assert_eq!(phrase.split_whitespace().count(), words, "{length:?}");
+            // And it is a phrase BIP-39 accepts, which is what proves the
+            // checksum over those bits is right.
+            Mnemonic::parse_in(Language::English, phrase.as_str()).unwrap();
+        }
     }
 
     /// Cheap parameters: these tests exercise the plumbing, not the KDF.
