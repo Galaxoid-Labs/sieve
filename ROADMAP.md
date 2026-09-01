@@ -26,10 +26,28 @@ a migration and a re-scan.
 Written after a full evening of using the wallet on mainnet, and kept current as the list is
 worked through. The milestone in brackets is where the work belongs.
 
-1. **Hardware signing and PSBT files.** [M4a] A device-imported wallet can receive forever and
+**The wallet itself is finished for a software-seed user.** Create or import, sync, receive,
+label, send with coin control, bump, cancel, Tor, auto-lock — that path is complete and has
+moved real money on mainnet. What is left is who can get it and what a device can do.
+
+1. **Nobody else can install it.** [M8] No tag exists, no signing key is made, no package is
+   published. The release workflow builds, packages and signs on `workflow_dispatch`, so the
+   machinery is proven; what is missing is the trust chain — signing key, signed tag, signed
+   `SHA256SUMS`, `sieve-bin` on the AUR. That is mostly one-time ceremony, and it gates every
+   improvement after it: until it exists, nothing that gets built reaches anybody.
+
+   One item inside it is not ceremony. **udev rules have to ship with the package**, because
+   `hardware::udev_hint()` already promises them and without them a plugged-in device is
+   invisible — the commonest first-run failure on Linux.
+
+2. **Hardware signing and PSBT files.** [M4a] A device-imported wallet can receive forever and
    never spend, and there is no air-gapped path at all. The PSBT half is designed but not
    built — see `PSBT.md`, which also records what multisig would need and why it is a
    milestone rather than a feature.
+
+   It is second rather than first because it is *honestly labelled*: the send flow says a
+   device cannot sign yet rather than failing at the last step. A release that ships this gap
+   is keeping a promise it made; a release that never happens keeps none.
 
 Then, in rough order:
 
@@ -211,7 +229,7 @@ Adwaita shell, vault (Argon2id KEK wrapping a random DEK at 256 MiB / 3 passes /
 XChaCha20-Poly1305, header bound as AAD), atomic writes, process hardening, eight vault
 tests.
 
-### M1 — Wallet creation and unlock — MOSTLY DONE
+### M1 — Wallet creation and unlock — DONE
 *Done when: create a wallet, close the app, reopen, unlock back into the same wallet.*
 
 - [x] First-run detection routes to onboarding instead of unlock
@@ -247,7 +265,12 @@ tests.
       key, with copy saying so, rather than appearing broken.
 - [x] Descriptor / xpub watch-only import — no vault, no password, and the send tab says
       plainly that signing happens wherever the keys are.
-- [ ] Signer worker owning the decrypted descriptor, one message at a time
+- **Dropped: a signer worker owning the decrypted descriptor.** It was the plan when this
+      list was written and it is now the opposite of the rule the wallet keeps: the seed is
+      decrypted at the point of use and dropped inside the function that used it, and there is
+      no field anywhere holding one open for the session. A worker *owning* a decrypted
+      descriptor is precisely the thing `CLAUDE.md` calls a bug. Signing asks for the password
+      again instead, which is what makes "unlocked" and "able to spend" different states.
 - [x] The phrase's entropy comes from `getrandom::fill` — the same `getrandom(2)` the vault
       uses — rather than from BDK's `rand::thread_rng`. Both are cryptographically secure, so
       nothing was unsafe; but the one irreplaceable secret in the program came from a
@@ -291,8 +314,18 @@ mainnet as well, from a cold start and from an interrupted one.
 - [x] BIP-21 URIs, written on this screen and read on the send side.
 - [x] The issued-address list, with used/unused state, what each received, and reuse called out.
 - [x] A name on an address, set before it is handed out.
+- [x] **Native segwit is the default selection**, taproot one row down. `bc1q` is refused by
+      nothing where `bc1p` is still turned away by some exchanges, and that failure lands on
+      the person being paid — who learns of it when a sender says the address bounced, and
+      cannot know the row below would have worked. The privacy this gives up is real and is
+      stated where the choice is made.
+- [x] **No wallet ever hands out a legacy address**, though an imported one still watches
+      BIP44 so money already there is found and can be spent. Watching a path and handing out
+      an address on it are separate questions; `ScriptType::can_receive` is the second one.
+- [x] **Search other derivation paths**, for the case that reads as lost money: a phrase
+      restored into another wallet, used on a path this one does not watch, brought back.
 
-### M4 — Send
+### M4 — Send — DONE, except silent payments
 - [x] Address and amount validation — wrong-network addresses get their own message, and
       amounts are read with integer arithmetic in whichever unit is on display.
 - [x] Watch-only PSBT construction, so the form and the review cost nothing secret.
@@ -357,7 +390,7 @@ mainnet as well, from a cold start and from an interrupted one.
 Exercised end to end on signet: built, signed, broadcast, shown as pending, and confirmed on
 its own through ordinary filter sync — no explorer, no server told which transaction to watch.
 
-### M4a — Hardware signers
+### M4a — Hardware signers — READ-ONLY; SIGNING NOT BUILT
 *Done when: a payment can be built in Sieve, confirmed on a device screen, and broadcast, with
 Sieve never holding a key.*
 
@@ -401,7 +434,7 @@ Sieve sends a device five commands, all of them reads: `enumerate`, `get_version
 prompt. Nothing it can send writes to a device — a wiped Ledger showing "set up as new /
 restore" was wiped by its own firmware, which is what three wrong PIN entries do.
 
-### M5 — Transaction history
+### M5 — Transaction history — DONE, except replaced state
 - [x] `adw::ActionRow` list, detail page on an `adw::NavigationView`, confirmation depth, fee
       paid, pending state, and the fee rate the payment actually got.
 - [x] Filter the list by derivation path; the path named on each row when more than one is
@@ -417,9 +450,12 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       payment with no character changed on screen.
 - [x] Export the public descriptors — the backup that risks nothing. BIP-380 form with its
       checksum and nothing wrapped around it, so there is no Sieve format to learn.
-- [ ] Replaced state, which needs RBF to exist first.
+- [ ] Replaced state in the activity list. This said "needs RBF to exist first" and RBF now
+      exists, so it is unblocked and small: `direct_conflicts()` reads the fact straight off
+      the transaction graph, which is already how "already raised" is derived. Today a payment
+      that lost a replacement race sits in the list looking unconfirmed for ever.
 
-### M6 — Privacy controls
+### M6 — Privacy controls — the five below are all that is left
 - [x] Tor for every outbound connection — peers, price, fees — through a system SOCKS5 proxy,
       with the proxy verified as actually being Tor (the `RESOLVE` extension), and kyoto's
       unproxied DNS seeding replaced by seeds resolved through Tor.
@@ -446,7 +482,7 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       for the two traps and for the scan-finished half, which is safe and could be built
       alone.
 
-### M7 — Lock and key hygiene
+### M7 — Lock and key hygiene — the three below are all that is left
 
 - [x] `PR_SET_DUMPABLE(0)` is lifted for the length of a file dialog and restored after.
       Setting it makes the kernel re-own `/proc/<pid>` to root, so `xdg-desktop-portal`
@@ -466,7 +502,7 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       machine is left unattended.
 - PSBT export/import and device signing moved to M4a.
 
-### M8 — Package and release
+### M8 — Package and release — IN PROGRESS, and the last thing in the way
 Native packages, three of them, and no Flatpak. See `PACKAGING.md` for why, what it costs,
 and the order of work.
 
