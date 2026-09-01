@@ -2958,17 +2958,22 @@ impl App {
         let privacy = adw::PreferencesGroup::new();
         if self.unlocked {
             privacy.set_title("Locking");
+            // On the group rather than on the row, which is the same trap the
+            // phrase-length row in onboarding.rs already fell into: a subtitle
+            // this long squeezes a ComboRow's value into an ellipsis, because
+            // set_subtitle_lines turns wrapping on and a wrapping label asks
+            // for the whole unwrapped string. "After 5 minutes" became "…".
+            //
+            // It reads better here anyway. Shutting the balance and history is
+            // equally what Lock now does, so as a row subtitle it described
+            // half of what it applies to.
+            privacy.set_description(Some(
+                "Shuts the balance and history. Your recovery phrase is sealed either way — it is \
+                 only ever decrypted at the moment of signing.",
+            ));
 
             let idle = adw::ComboRow::new();
             idle.set_title("Lock when untouched");
-            // On the row rather than on the group: a paragraph in a group
-            // description sits above every row in it and pushes the controls off
-            // the screen. What is worth saying fits in a sentence.
-            idle.set_subtitle(
-                "Shuts the balance and history. Your recovery phrase is sealed either way — it is \
-             only ever decrypted at the moment of signing.",
-            );
-            idle.set_subtitle_lines(3);
             idle.set_model(Some(&gtk::StringList::new(
                 &crate::settings::IdleLock::ALL.map(|i| i.label()),
             )));
