@@ -424,10 +424,16 @@ and the order of work.
       dependencies. `options=(!lto)` is load-bearing — see `PACKAGING.md`.
 - [x] `--version` and `--help`, answered before a display is opened, so a container can check
       the package it just installed.
-- [ ] A release workflow: `.github/workflows/release.yml` is written and has never run, for
-      want of a remote.
-- [ ] Install the icon and desktop entry properly: the gresource is for the app's own use and
-      does nothing for the desktop's icon theme.
+- [x] A release workflow, run end to end. `workflow_dispatch` builds, packages and signs
+      without publishing — publishing stays tag-only — so the whole path could be rehearsed
+      before a tag existed. It took five attempts, and every failure was worth having found
+      then rather than on a tag: the Arch job fetching a tarball the release had not made
+      yet, Fedora shipping a rustc below the MSRV, two `.deb` builds writing the same
+      filename, a duplicated `runs-on` GitHub rejected outright, and a version assertion
+      comparing against the branch name.
+- [x] Install the icon and desktop entry properly, verified rather than assumed: the Arch job
+      installs the package and then checks the entry and the icons are on disk,
+      `desktop-file-validate` passes, and `udevadm verify` accepts the rules.
 - [x] `cargo-deb` and `cargo-generate-rpm` metadata. Without it both tools produced a package
       holding the binary and nothing else — no launcher entry, no icon, no udev rules — which
       installs cleanly and leaves somebody with a wallet they cannot start and a signer their
