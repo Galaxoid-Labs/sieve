@@ -515,7 +515,7 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       for the two traps and for the scan-finished half, which is safe and could be built
       alone.
 
-### M7 — Lock and key hygiene — the two below are all that is left
+### M7 — Lock and key hygiene — DONE
 
 - [x] `PR_SET_DUMPABLE(0)` is lifted for the length of a file dialog and restored after.
       Setting it makes the kernel re-own `/proc/<pid>` to root, so `xdg-desktop-portal`
@@ -529,8 +529,22 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       constant, so a wallet with no keys still has a password to fail against. Per-wallet
       passwords stay — a single application password was considered and rejected, since one
       secret opening every wallet is a poor trade for typing one fewer password.
-- [ ] Opt-in Secret Service storage, labelled as convenience and not as a boundary.
-- [ ] FIDO2 `hmac-secret` as a second wrap.
+- **Dropped: Secret Service storage for the wallet password.** It is not the macOS Keychain
+  and the difference is the whole argument. On an ordinary Linux session the login keyring is
+  unlocked by PAM at login, so a password kept there is protected by *being logged in* rather
+  than by anything anybody knows — while the threat this wallet actually defends against is
+  somebody who has the disk. Putting the password beside the vault weakens precisely the
+  boundary the vault exists to draw. **Sieve doing its own locking and encryption is the
+  answer to this, not a step on the way to it.** It sat on this list as "convenience, not a
+  boundary", and a convenience that erodes the only boundary is not one worth shipping.
+- **Deferred: FIDO2 `hmac-secret` as a second wrap.** The strongest idea on this list —
+  `Argon2id(password) XOR hmac-secret(token)` means the file cannot be opened without both,
+  and unlike the keyring it genuinely adds a factor rather than moving one. Two reasons it
+  waits. It is **a new way to lose money** unless enrolment, a second token and a written
+  recovery path all land with it, and that is most of the work and none of the interesting
+  part. And it **changes the vault format**, so it wants a magic-byte bump and a migration —
+  which should follow an external review of that format rather than land just before one and
+  make the reviewed thing the old thing.
 - [x] Lock on screensaver as well as on sleep. Three subscriptions, because no single one
       answers everywhere: `org.gnome.ScreenSaver`, the `org.freedesktop.ScreenSaver` that
       everyone else implements, and logind's own `Session.Lock`, which `loginctl lock-session`
@@ -597,8 +611,9 @@ and the order of work.
 - [ ] Then a pull request adding one line to Omarchy's install menu — `PACKAGING.md` has the
       shape of the entry and why the category is the awkward part.
 - [ ] Delete the Flatpak manifest and `scripts/fetch-tor.sh` once the AUR package is proven.
-- [ ] `org.freedesktop.portal.Secret`, reproducible builds, and external review of the vault
-      format and the signing path.
+- [ ] Reproducible builds, and external review of the vault format and the signing path.
+      (`org.freedesktop.portal.Secret` was here too and went with the Secret Service item in
+      M7, for the same reason.)
 
 **Mainnet is not gated, and this milestone no longer claims it is.** Both making a wallet
 and importing one offer bitcoin first and by default, behind a switch acknowledging that the

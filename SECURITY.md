@@ -71,6 +71,14 @@ watch-only wallet has no recovery phrase to restore from. Which is why the
 dialog that sets one asks for it twice and will not accept a pair that
 disagree.
 
+**The password is never handed to the desktop keyring**, and that is a decision rather than
+an omission. Secret Service is not the macOS Keychain: on an ordinary Linux session the login
+keyring is unlocked by PAM at login, so a password kept there is guarded by *being logged in*
+rather than by anything anybody knows — while the adversary this vault is built against is
+the one holding the disk. Storing the password beside the file it opens erodes the only
+boundary that file draws. Sieve doing its own locking and encryption is the answer to that,
+not a stage on the way to something better.
+
 **One password per wallet, not one for the app.** Electrum and Sparrow are
 both per-wallet-file too, so this is the ordinary arrangement rather than an
 unusual one. A single application password was considered and rejected: it
