@@ -170,6 +170,11 @@ Then, in rough order:
   (`m/84'/0'/0'/1/7`), read from the descriptor's origin rather than assumed.
 - **Review payment is disabled until the form describes a payment**, with a tooltip saying
   what is still missing, rather than being pressable and answering with an error.
+- **The welcome-screen preview is gone**, and with it the last thing in the UI that was there
+  for the person building Sieve rather than the person using it. The whole chain went —
+  the menu button, `WalletPageMsg`/`WalletPageOutput::ShowWelcome`, `AppMsg::PreviewWelcome`
+  and `OnboardingMsg::PreviewWelcome` — so there is no half-removed path left to send an
+  onboarding component that already has a wallet back to its first step.
 
 ## Milestones
 
@@ -479,13 +484,6 @@ software is unreviewed. The gate was never real — `ui/restore.rs` had let main
 a long time, and the wallet has been run against it with real coins — and a signet default
 that somebody had to change to reach their own money taught nobody anything. The
 acknowledgement is a sentence people read; a wrong default is a step people click past.
-
-## Before anyone else runs it
-
-- [ ] Remove the **Welcome screen (preview)** item from the header menu. It exists to look at
-      the first-run screen without starting over, is marked TEMPORARY in five places, and is
-      the one thing in the UI that is there for the person building it rather than the person
-      using it.
 
 ## Running alongside
 

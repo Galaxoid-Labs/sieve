@@ -24,8 +24,6 @@ pub enum WalletPageOutput {
         reference: String,
         text: String,
     },
-    /// TEMPORARY — show the welcome screen for a look at it.
-    ShowWelcome,
     /// Announce an unconfirmed transaction to another peer.
     Rebroadcast {
         txid: String,
@@ -642,8 +640,6 @@ pub enum WalletPageMsg {
     NameAddress(String),
     /// What this program is, and whose work it stands on.
     ShowAbout,
-    /// TEMPORARY — see the welcome screen without starting over.
-    ShowWelcome,
     /// Every address this wallet has handed out.
     ShowAddresses,
     /// Name a payment just made, from what its request called itself.
@@ -1300,20 +1296,6 @@ impl Component for WalletPage {
                                     set_xalign: 0.0,
                                 },
                                 connect_clicked => WalletPageMsg::ShowAbout,
-                            },
-
-                            // TEMPORARY — for looking at the welcome screen
-                            // without deleting a wallet to reach it. Remove
-                            // this button and `WalletPageOutput::ShowWelcome`
-                            // with it.
-                            gtk::Button {
-                                add_css_class: "flat",
-                                #[wrap(Some)]
-                                set_child = &gtk::Label {
-                                    set_label: "Welcome screen (preview)",
-                                    set_xalign: 0.0,
-                                },
-                                connect_clicked => WalletPageMsg::ShowWelcome,
                             },
                         },
                     },
@@ -2446,12 +2428,6 @@ impl Component for WalletPage {
                         .add_toast(adw::Toast::new(&crate::ui::send::capitalise(&message)));
                 }
             },
-
-            // TEMPORARY — remove with the button that sends it.
-            WalletPageMsg::ShowWelcome => {
-                self.close_menu();
-                let _ = sender.output(WalletPageOutput::ShowWelcome);
-            }
 
             WalletPageMsg::ShowAbout => {
                 self.close_menu();
