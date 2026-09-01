@@ -188,6 +188,18 @@ Then, in rough order:
   (`m/84'/0'/0'/1/7`), read from the descriptor's origin rather than assumed.
 - **Review payment is disabled until the form describes a payment**, with a tooltip saying
   what is still missing, rather than being pressable and answering with an error.
+- **Toasts last two seconds, not libadwaita's five**, and every one of the seventeen goes
+  through `ui::toast` rather than `adw::Toast::new` — one decision in one place, because
+  seventeen call sites each choosing would drift and the drift would read as sluggishness
+  rather than as a number somebody picked. Short is safe here because nothing in Sieve is
+  announced *only* by a toast: a sent payment is in the activity list, a frozen coin wears a
+  padlock, a raised fee opens the page it made. The toast is a receipt for something whose
+  result is already on screen.
+- **A payment's name is weighted on its activity row**, and the direction is not dimmed to
+  achieve it. Dimming "Sent" made the same word look one way on a named payment and another
+  on an unnamed one, which is most of them. The name is the half worth emphasising anyway:
+  the direction is already said by the icon on the left and by the amount's colour on the
+  right, so the name is the only thing on the row not repeated somewhere else.
 - **Continue on the wallet-creation form gets the same treatment**, and finding the rule
   worth writing down once turned up a bug behind it. `what_is_missing` takes seven booleans
   rather than the text — so no password leaves the widget holding it to be judged — and both
@@ -485,9 +497,9 @@ restore" was wiped by its own firmware, which is what three wrong PIN entries do
       - **Freezing must never be a one-way door**, and it briefly was. `has_funds` was pointed
         at the frozen-adjusted figure, so freezing every coin on a path replaced the send form
         with "Nothing to send" — and took the only route to the padlock away with it. The form
-        is drawn while the *path* holds anything; a row says so and names the way out; and
-        coin control has its own way in from Activity, because curating coins you have decided
-        not to spend should not begin by starting to spend.
+        is drawn while the *path* holds anything, and the row that says everything is frozen
+        carries a button through to the picker — so the way back in is on the screen that
+        tells you why you are stuck.
       - **Available means what a payment can reach**, so frozen coins come off it and the
         Coins row says how much is held. Counting them would put a figure on screen that Max
         fills in and the builder then refuses.

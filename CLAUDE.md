@@ -386,7 +386,8 @@ was frozen to avoid. The picker also refuses to tick one, but that is a courtesy
 1. **Freezing must never be a one-way door.** `has_funds` decides whether the send form is
    drawn at all, so pointing it at the frozen-adjusted figure meant freezing everything
    replaced the form with "Nothing to send" — taking the only route to the padlock with it.
-   It reads the *path* balance. Coin control also has its own way in from Activity.
+   It reads the *path* balance, and the row that says everything is frozen carries its own
+   way through to the picker.
 2. **Clearing a name must not clear the freeze.** `Labels::set` deleted the whole entry on an
    empty label, `spendable` included.
 3. **The picker is built once and never rebuilt**, so anything a control changes has to be

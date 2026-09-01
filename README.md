@@ -38,9 +38,7 @@ behaves like the rest of the desktop rather than like a browser in a window.
   out before any key is involved.
 - **Coin control**: choose which coins a payment spends, each named by you or by
   the payment that brought it in, with the linking you are about to create
-  stated in plain words. Reachable from Activity as well as from the send form,
-  because deciding which coins *not* to spend should not begin by starting to
-  spend.
+  stated in plain words.
 - **Freeze a coin** so it is never spent — on its own or alongside others. Kept
   as BIP-329's `spendable: false` in the same label file everything else uses,
   so a wallet you export to holds the same coins back.

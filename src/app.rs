@@ -1219,7 +1219,7 @@ impl Component for App {
                     Ok(pairs) => pairs,
                     Err(e) => {
                         self.prefs
-                            .add_toast(adw::Toast::new(&format!("Cannot read them: {e}")));
+                            .add_toast(crate::ui::toast(&format!("Cannot read them: {e}")));
                         return;
                     }
                 };
@@ -1305,7 +1305,7 @@ impl Component for App {
                     Ok(pairs) => pairs,
                     Err(e) => {
                         self.prefs
-                            .add_toast(adw::Toast::new(&format!("Cannot read them: {e}")));
+                            .add_toast(crate::ui::toast(&format!("Cannot read them: {e}")));
                         return;
                     }
                 };
@@ -1427,11 +1427,11 @@ impl Component for App {
                         crate::ui::send::capitalise(&e.to_string())
                     }
                 };
-                self.prefs.add_toast(adw::Toast::new(&message));
+                self.prefs.add_toast(crate::ui::toast(&message));
             }
 
             AppMsg::PrefsToast(message) => {
-                self.prefs.add_toast(adw::Toast::new(&message));
+                self.prefs.add_toast(crate::ui::toast(&message));
             }
 
             AppMsg::Stirred => {
@@ -1640,12 +1640,12 @@ impl Component for App {
                 };
                 if password.0.trim().is_empty() {
                     self.prefs
-                        .add_toast(adw::Toast::new("A password cannot be empty"));
+                        .add_toast(crate::ui::toast("A password cannot be empty"));
                     return;
                 }
                 match wallet::set_watch_only_password(&paths, password.0.as_bytes()) {
                     Ok(()) => {
-                        self.prefs.add_toast(adw::Toast::new(
+                        self.prefs.add_toast(crate::ui::toast(
                             "This wallet will ask for that password when it is opened",
                         ));
                         self.rebuild_preferences(&sender);
@@ -1653,7 +1653,7 @@ impl Component for App {
                     Err(e) => {
                         tracing::error!(%e, "could not set the wallet password");
                         self.prefs
-                            .add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                            .add_toast(crate::ui::toast(&crate::ui::send::capitalise(
                                 &e.to_string(),
                             )));
                     }
@@ -1667,13 +1667,13 @@ impl Component for App {
                 match wallet::clear_watch_only_password(&paths) {
                     Ok(()) => {
                         self.prefs
-                            .add_toast(adw::Toast::new("This wallet now opens without asking"));
+                            .add_toast(crate::ui::toast("This wallet now opens without asking"));
                         self.rebuild_preferences(&sender);
                     }
                     Err(e) => {
                         tracing::error!(%e, "could not remove the wallet password");
                         self.prefs
-                            .add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                            .add_toast(crate::ui::toast(&crate::ui::send::capitalise(
                                 &e.to_string(),
                             )));
                     }
@@ -1973,7 +1973,7 @@ impl Component for App {
                 if let Err(e) = wallet::remove(&paths) {
                     tracing::error!(%e, "could not remove the wallet");
                     self.prefs
-                        .add_toast(adw::Toast::new(&crate::ui::send::capitalise(
+                        .add_toast(crate::ui::toast(&crate::ui::send::capitalise(
                             &e.to_string(),
                         )));
                     return;
@@ -2499,7 +2499,7 @@ impl Component for App {
                     // app looking as though it is on Tor when it is not.
                     self.settings.tor = false;
                     self.settings.save();
-                    self.prefs.add_toast(adw::Toast::new(&message));
+                    self.prefs.add_toast(crate::ui::toast(&message));
                     self.wallet.emit(WalletPageMsg::TorProblem(None));
                 } else {
                     // Tor was already on and could not be brought up. Going

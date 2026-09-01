@@ -666,8 +666,6 @@ pub enum WalletPageMsg {
     ShowAbout,
     /// Every address this wallet has handed out.
     ShowAddresses,
-    /// The coin list, and the padlocks on it.
-    ShowCoins,
     /// Hold a coin back, or release it.
     SetFrozen {
         outpoint: String,
@@ -1252,13 +1250,6 @@ impl WalletPage {
     /// wallet watching legacy and taproot has one address to hand out, and a
     /// picker with a single row on it is a control that asks a question with
     /// one answer.
-    /// Whether there is anything for a coin list to list.
-    fn has_coins(&self) -> bool {
-        self.summary
-            .as_ref()
-            .is_some_and(|s| s.balance_sats > 0 || s.pending_sats > 0)
-    }
-
     fn has_path_choice(&self) -> bool {
         self.summary.as_ref().is_some_and(|s| {
             s.accounts
@@ -1629,30 +1620,6 @@ impl Component for WalletPage {
                                     set_valign: gtk::Align::Center,
                                     set_hexpand: true,
                                     set_label: "Transactions",
-                                },
-
-                                // Coin control, reachable without composing a
-                                // payment. It lived only behind the Coins row
-                                // on the send form, which meant curating coins
-                                // you had decided *not* to spend began by
-                                // starting to spend — and, once everything on
-                                // a path was frozen, could not be reached at
-                                // all.
-                                gtk::Button {
-                                    set_label: "Coins",
-                                    set_valign: gtk::Align::Center,
-                                    add_css_class: "flat",
-                                    // A word rather than a padlock: the icon
-                                    // named the one thing you can do in there
-                                    // rather than the thing it holds, and read
-                                    // as "locking" to anybody not already
-                                    // looking for the freeze control.
-                                    set_tooltip_text: Some(
-                                        "What this wallet holds, coin by coin"
-                                    ),
-                                    #[watch]
-                                    set_visible: !model.locked && model.has_coins(),
-                                    connect_clicked => WalletPageMsg::ShowCoins,
                                 },
 
                                 #[name(search_button)]
@@ -2503,7 +2470,7 @@ impl Component for WalletPage {
                 // keep showing the last one's.
                 self.refresh_address_label();
             }
-            WalletPageMsg::Toast(message) => self.toaster.add_toast(adw::Toast::new(&message)),
+            WalletPageMsg::Toast(message) => self.toaster.add_toast(crate::ui::toast(&message)),
             WalletPageMsg::SetChain(chain) => {
                 if let Some(info) = &chain {
                     self.distinct_peers = info.peers.len();
@@ -2542,11 +2509,6 @@ impl Component for WalletPage {
             }
             WalletPageMsg::ShowAddresses => self.show_addresses(root, &sender),
 
-            // The picker belongs to the send component, which owns the
-            // selection and the tally. Reached from here it simply opens with
-            // no amount to measure against, which it already handles.
-            WalletPageMsg::ShowCoins => self.send.emit(crate::ui::send::SendMsg::ChooseCoins),
-
             WalletPageMsg::Search(query) => {
                 self.search = query;
                 if let Some(summary) = self.summary.clone() {
@@ -2564,7 +2526,7 @@ impl Component for WalletPage {
                     return;
                 };
                 self.toaster
-                    .add_toast(adw::Toast::new("Telling another peer…"));
+                    .add_toast(crate::ui::toast("Telling another peer…"));
                 let _ = sender.output(WalletPageOutput::Rebroadcast { txid, from });
             }
 
@@ -2583,7 +2545,7 @@ impl Component for WalletPage {
                 else {
                     return;
                 };
-                self.toaster.add_toast(adw::Toast::new(if cancel {
+                self.toaster.add_toast(crate::ui::toast(if cancel {
                     "Building the cancellation…"
                 } else {
                     "Building the replacement…"
@@ -2606,9 +2568,14 @@ impl Component for WalletPage {
                 self.show_transaction(&with, root, &sender);
 
                 let short: String = with.chars().take(12).collect();
-                let toast = adw::Toast::new(&format!("Fee raised — this is now {short}…"));
-                toast.set_timeout(6);
-                self.toaster.add_toast(toast);
+                // Held no longer than any other. It used to sit for six
+                // seconds because it names a transaction id, but the page
+                // underneath is already the replacement's own — the id is
+                // there to read for as long as anybody wants it, and the
+                // toast is only saying which page it just opened.
+                self.toaster.add_toast(crate::ui::toast(&format!(
+                    "Fee raised — this is now {short}…"
+                )));
                 // Deliberately without the transaction ids. At info level
                 // these reach the journal, where they identify the user's own
                 // payments to anybody who can read it — and the journal is
@@ -2620,7 +2587,7 @@ impl Component for WalletPage {
                 Ok(plan) => self.confirm_bump(plan, root, &sender),
                 Err(message) => {
                     self.toaster
-                        .add_toast(adw::Toast::new(&crate::ui::send::capitalise(&message)));
+                        .add_toast(crate::ui::toast(&crate::ui::send::capitalise(&message)));
                 }
             },
 
@@ -2809,7 +2776,7 @@ impl Component for WalletPage {
                 if let Ok(txid) = result.as_ref() {
                     let short: String = txid.chars().take(12).collect();
                     self.toaster
-                        .add_toast(adw::Toast::new(&format!("Payment sent — {short}…")));
+                        .add_toast(crate::ui::toast(&format!("Payment sent — {short}…")));
                 }
                 self.send.emit(SendMsg::Sent(result));
             }
