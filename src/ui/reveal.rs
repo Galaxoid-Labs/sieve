@@ -25,6 +25,22 @@ impl std::fmt::Debug for Password {
     }
 }
 
+/// The phrase, on its way from the worker that decrypted it to the screen.
+///
+/// **A newtype with a redacted `Debug`, and that is the reason it exists.**
+/// relm4 opens a span around every command result with the message formatted
+/// into it — `info_span!("update_cmd_with_view", cmd_output=?message)` in its
+/// own `component/sync/builder.rs` — so a bare `Result<String, String>` here
+/// wrote the whole recovery phrase into a tracing field, in the one component
+/// whose entire purpose is showing that phrase.
+pub struct Revealed(Zeroizing<String>);
+
+impl std::fmt::Debug for Revealed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Revealed(<redacted>)")
+    }
+}
+
 /// What the vault turned out to hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Held {
@@ -66,7 +82,7 @@ pub enum RevealMsg {
 
 #[derive(Debug)]
 pub enum RevealCmd {
-    Opened(Result<String, String>),
+    Opened(Result<Revealed, String>),
 }
 
 pub struct Reveal {
@@ -282,7 +298,11 @@ impl Component for Reveal {
                                 .map_err(|e| e.to_string())
                         })
                         .and_then(|secret| {
+                            // `from_utf8` takes ownership of the vector rather
+                            // than copying it, so the buffer that ends up
+                            // zeroized is the one the vault handed back.
                             String::from_utf8(secret.to_vec())
+                                .map(|text| Revealed(Zeroizing::new(text)))
                                 .map_err(|_| "The wallet file is not readable text.".to_string())
                         });
                     RevealCmd::Opened(result)
@@ -301,7 +321,7 @@ impl Component for Reveal {
         self.busy = false;
 
         match result {
-            Ok(secret) => {
+            Ok(Revealed(secret)) => {
                 // Twelve or twenty-four words is a phrase; anything else is
                 // the key this wallet was imported from.
                 self.held = Held::of(&secret);
@@ -312,7 +332,7 @@ impl Component for Reveal {
                         guard.push_back((index + 1, word.to_string()));
                     }
                 }
-                self.shown = Some(Zeroizing::new(secret));
+                self.shown = Some(secret);
             }
             Err(message) => self.error = Some(message),
         }
@@ -321,6 +341,31 @@ impl Component for Reveal {
 
 #[cfg(test)]
 mod tests {
+    /// The command that carries the phrase must not print it.
+    ///
+    /// relm4 formats every command result into a span field —
+    /// `cmd_output=?message` — so this type's `Debug` is not a nicety. It was
+    /// `Result<String, String>` and wrote whole recovery phrases into the log
+    /// of the one screen that exists to show them.
+    #[test]
+    fn a_revealed_phrase_does_not_print_itself() {
+        let phrase = "abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon about";
+        let revealed = super::Revealed(zeroize::Zeroizing::new(phrase.to_string()));
+        assert_eq!(format!("{revealed:?}"), "Revealed(<redacted>)");
+
+        // And the same through the message relm4 actually formats.
+        let message = super::RevealCmd::Opened(Ok(revealed));
+        let printed = format!("{message:?}");
+        assert!(!printed.contains("abandon"), "{printed}");
+        assert!(!printed.contains("about"), "{printed}");
+
+        // The error half is not a secret and must still be readable, or a
+        // failure to open the vault becomes impossible to diagnose.
+        let failed = super::RevealCmd::Opened(Err("Incorrect password".into()));
+        assert!(format!("{failed:?}").contains("Incorrect password"));
+    }
+
     use super::Held;
 
     #[test]

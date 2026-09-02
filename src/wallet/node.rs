@@ -538,7 +538,13 @@ impl Session {
                     .wallet
                     .apply_update(update)
                     .map_err(|e| anyhow!("could not apply the update: {e}"))?,
-                None => tracing::warn!(?id, "update for an unknown descriptor"),
+                // Without the id: it is derived from the descriptor, so it
+                // is a stable fingerprint for this wallet, and this is a
+                // `warn` — visible by default, in the log somebody pastes when
+                // they are asking for help with the very problem it reports.
+                None => {
+                    tracing::warn!("an update arrived for a descriptor this wallet is not watching")
+                }
             }
         }
 

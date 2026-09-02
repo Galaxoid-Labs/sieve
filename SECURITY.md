@@ -302,6 +302,48 @@ more people can read than the wallet file.
 - **The balance at `debug`.** The most sensitive number the app holds that is
   not a key. Now a transaction count.
 
+## Findings from the second pass
+
+Seven, found by auditing the whole tree rather than a diff. All fixed in the
+commit that adds this section, and the interesting part is not the list — it is
+that **one of them was a fix this file already claimed to have made.**
+
+- **The recovery phrase could reach the log.** `RevealCmd::Opened` was a
+  `Result<String, String>` with a derived `Debug`, and relm4 formats every
+  command result into a span field — `cmd_output=?message`, in its own
+  `component/sync/builder.rs`. So showing the phrase wrote the phrase. It was
+  the rule this project states first about secrets, broken in the one component
+  whose entire purpose is that phrase. Now a redacted `Revealed` newtype, with
+  a test that formats the message and looks for the words.
+- **The balance was back in the logs**, at `debug`, after the paragraph above
+  says it was taken out. Nothing failed when it returned; a document is not a
+  mechanism. `no_balance_in_the_logs` reads `app.rs` and fails on any `tracing`
+  call mentioning a balance — a test about text, because the failure was.
+- **An unprotected copy of the seed during signing.** The vault's own buffer is
+  `Zeroizing`; `str::to_string` made a second copy that lived across the whole
+  broadcast and was freed with the phrase still in it. Two other sites doing the
+  same conversion borrow instead of copying, and were already right.
+- **The data key survived the error paths in `vault::open`.** `dek.zeroize()`
+  ran only after everything that could fail had succeeded, so a wrong key length
+  or a body that failed authentication returned the key to the allocator intact.
+  A guard that only fires on success is not a guard; it is `Zeroizing` now.
+- **A vault header could ask for unlimited memory.** KDF parameters are read
+  before anything can be authenticated — the header *is* the associated data —
+  so a file somebody else wrote decided an allocation. The AAD binding already
+  stops the attack that matters, weakening `m_cost` to brute-force a password;
+  this closes the one it does not, which is asking for terabytes. Capped at
+  1 GiB, four times the default.
+- **`SeedWord` derived `Debug` holding a word of the phrase.** Not reachable by
+  relm4's logging today, because its `Input` is `()`. Fenced anyway: it is one
+  message signature away from being the finding above.
+- **A descriptor id at `warn`.** Derived from the descriptor, so a stable
+  fingerprint for the wallet, in a log people paste when asking for help.
+
+**What this pass did not cover**, so the next one knows where to start: network
+disclosure and tracking, which is a separate audit; fuzzing the descriptor,
+PSBT and BIP-21 parsers; and any dynamic analysis at all — no sanitisers, no
+timing work. The `unsafe` blocks were read and not analysed.
+
 ## The dependencies
 
 310 crates, audited with `cargo-audit` and governed by `deny.toml`.

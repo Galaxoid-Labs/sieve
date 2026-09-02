@@ -27,10 +27,22 @@ impl std::fmt::Debug for Secret {
 ///
 /// A chip each rather than a block of text: these get copied onto paper by
 /// hand, and the number beside a word is what makes that possible to check.
-#[derive(Debug)]
 pub struct SeedWord {
     position: usize,
     word: String,
+}
+
+/// Hand-written for the reason `Face` and `Word` have one: this holds a word
+/// of a recovery phrase, and a derived `Debug` would print it. Nothing routes
+/// a `SeedWord` through a logged message today — its `Input` is `()` — so this
+/// is a fence rather than a fix, put up because the type is one message
+/// signature away from being the leak that `RevealCmd` was.
+impl std::fmt::Debug for SeedWord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeedWord")
+            .field("position", &self.position)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One face of a die, on its way into the roll sequence.
@@ -1574,6 +1586,21 @@ impl Component for Onboarding {
 
 #[cfg(test)]
 mod tests {
+    /// A word of the phrase must not print itself, even though nothing logs
+    /// one today. The type is one message signature away from being the leak
+    /// `RevealCmd` was.
+    #[test]
+    fn a_seed_word_does_not_print_itself() {
+        let word = super::SeedWord {
+            position: 7,
+            word: "abandon".into(),
+        };
+        let printed = format!("{word:?}");
+        assert!(!printed.contains("abandon"), "{printed}");
+        // The number is not a secret, and it is what makes the rest legible.
+        assert!(printed.contains('7'), "{printed}");
+    }
+
     use super::*;
 
     #[test]

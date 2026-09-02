@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 mod atomic;
 #[allow(unused_imports)]
@@ -66,10 +66,39 @@ impl Default for KdfParams {
     }
 }
 
+/// The most memory a vault header may ask Argon2 for, in KiB.
+///
+/// One gibibyte, four times the default. The parameters that sealed a file
+/// travel in its header so that raising the defaults does not strand existing
+/// wallets — which means the header decides an allocation, and it is read
+/// *before* anything is authenticated. Authentication cannot come first: the
+/// header is the associated data, and the key needed to check the tag is what
+/// these parameters derive.
+///
+/// So a file somebody else wrote could ask for terabytes and take the process
+/// down with it. The AAD binding already stops the attack that matters —
+/// weakening `m_cost` on an existing file to brute-force the password, which
+/// changes the AAD and fails the tag — and this closes the one it does not.
+const MAX_M_COST: u32 = 1024 * 1024;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Header {
     kdf: KdfParams,
     network: String,
+}
+
+impl KdfParams {
+    /// Refuse parameters no honest sealer would have written.
+    fn sane(&self) -> Result<()> {
+        if self.m_cost > MAX_M_COST {
+            bail!(
+                "this wallet file asks for {} MiB to open, which is more than Sieve will \
+                 allocate. The file is damaged or was not written by Sieve.",
+                self.m_cost / 1024
+            );
+        }
+        Ok(())
+    }
 }
 
 fn random(buf: &mut [u8]) -> Result<()> {
@@ -173,10 +202,21 @@ pub fn open(blob: &[u8], passphrase: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let nonce_dek: [u8; NONCE_LEN] = take(blob, &mut cursor, NONCE_LEN)?.try_into().unwrap();
     let body = &blob[cursor..];
 
+    header.kdf.sane()?;
     let kek = derive_kek(passphrase, &salt, header.kdf)?;
-    let mut dek = XChaCha20Poly1305::new((&*kek).into())
-        .decrypt(&XNonce::from(nonce_kek), Payload { msg: &wrapped, aad })
-        .map_err(|_| anyhow::anyhow!("Incorrect password, or the wallet file has been damaged."))?;
+    // `Zeroizing` rather than a bare `Vec` and a `zeroize()` at the end. The
+    // call at the end only runs when everything after it succeeded, so the two
+    // failure paths below — a wrapped key of the wrong length, and a body that
+    // does not authenticate — were handing the data key back to the allocator
+    // with the key still in it. A guard that only fires on success is not a
+    // guard.
+    let dek = Zeroizing::new(
+        XChaCha20Poly1305::new((&*kek).into())
+            .decrypt(&XNonce::from(nonce_kek), Payload { msg: &wrapped, aad })
+            .map_err(|_| {
+                anyhow::anyhow!("Incorrect password, or the wallet file has been damaged.")
+            })?,
+    );
 
     let dek_key: &[u8; KEY_LEN] = dek
         .as_slice()
@@ -185,7 +225,6 @@ pub fn open(blob: &[u8], passphrase: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let plaintext = XChaCha20Poly1305::new(dek_key.into())
         .decrypt(&XNonce::from(nonce_dek), Payload { msg: body, aad })
         .map_err(|_| anyhow::anyhow!("vault contents failed authentication"))?;
-    dek.zeroize();
 
     Ok(Zeroizing::new(plaintext))
 }
@@ -200,6 +239,55 @@ mod tests {
         t_cost: 1,
         p_cost: 1,
     };
+
+    /// A vault header cannot ask for unlimited memory.
+    ///
+    /// The parameters that sealed a file travel in its header, and they are
+    /// read before anything can be authenticated — the header *is* the
+    /// associated data, and checking the tag needs the key these parameters
+    /// derive. So a file somebody else wrote decides an allocation, and
+    /// without a ceiling it could ask for terabytes and take the process with
+    /// it.
+    #[test]
+    fn a_header_cannot_ask_for_unlimited_memory() {
+        let sealed = seal(b"seed", b"password", "bitcoin", FAST).unwrap();
+        // Sanity: the file opens as written.
+        assert_eq!(&*open(&sealed, b"password").unwrap(), b"seed");
+
+        // Now rewrite the header to demand every byte Argon2 will take. The
+        // AAD binding means it cannot decrypt afterwards — that is the point,
+        // and is why the *only* thing this can achieve is exhausting memory.
+        let greedy = KdfParams {
+            m_cost: u32::MAX,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        assert!(greedy.sane().is_err(), "an absurd cost must be refused");
+        assert!(FAST.sane().is_ok(), "ordinary parameters must be accepted");
+        assert!(
+            KdfParams::default().sane().is_ok(),
+            "the shipping defaults must be able to open their own files"
+        );
+
+        // A real file carrying it is refused before any allocation happens,
+        // and the message says the file is wrong rather than the password.
+        let mut forged = sealed.clone();
+        let header_len =
+            u16::from_le_bytes([forged[MAGIC.len()], forged[MAGIC.len() + 1]]) as usize;
+        let start = MAGIC.len() + 2;
+        let mut header: serde_json::Value =
+            serde_json::from_slice(&forged[start..start + header_len]).unwrap();
+        header["kdf"]["m_cost"] = serde_json::json!(u32::MAX);
+        let rewritten = serde_json::to_vec(&header).unwrap();
+        let len = u16::try_from(rewritten.len()).unwrap();
+        let mut rebuilt = forged[..MAGIC.len()].to_vec();
+        rebuilt.extend_from_slice(&len.to_le_bytes());
+        rebuilt.extend_from_slice(&rewritten);
+        rebuilt.extend_from_slice(&forged.split_off(start + header_len));
+
+        let error = open(&rebuilt, b"password").unwrap_err().to_string();
+        assert!(error.contains("more than Sieve will allocate"), "{error}");
+    }
 
     /// Not run by default — it exists to measure the KDF cost on real hardware
     /// before the parameters are locked into shipped vault files.

@@ -2442,8 +2442,14 @@ impl Component for App {
                         Ok(Err(message)) => return AppCmd::Sent(Err(message)),
                         Err(e) => return AppCmd::Sent(Err(format!("Signing failed: {e}"))),
                     };
+                    // `Zeroizing`, because this is a second copy of the
+                    // recovery phrase and it lives across the whole of
+                    // `sign_and_send` — including the await on a broadcast.
+                    // The vault's own buffer is cleared when it drops; a plain
+                    // `String` made from it was being handed back to the
+                    // allocator with the phrase still in it.
                     let text = match std::str::from_utf8(&secret) {
-                        Ok(text) => text.to_string(),
+                        Ok(text) => zeroize::Zeroizing::new(text.to_string()),
                         Err(_) => {
                             return AppCmd::Sent(
                                 Err("The wallet file is not readable text".into()),
@@ -2590,7 +2596,13 @@ impl Component for App {
                 generation,
                 result: Ok(summary),
             } if self.current(generation) => {
-                tracing::debug!(balance = summary.balance_sats, "wallet updated");
+                // A count, never the balance. Under a desktop session this
+                // reaches the journal, which more people can read than the
+                // wallet file — and a debug log is exactly what somebody
+                // pastes when asking for help. SECURITY.md has said so since
+                // the logging pass; the balance came back anyway, which is why
+                // `no_balance_in_the_logs` now holds the line.
+                tracing::debug!(transactions = summary.transactions.len(), "wallet updated");
                 // What this scan cost in blocks, so the next one can draw a
                 // bar for the phase the node reports no total for. Once per
                 // session: later updates are new tips, not this scan.
@@ -4116,6 +4128,48 @@ mod tests {
     use super::*;
     use crate::settings::IdleLock;
     use std::time::Duration;
+
+    /// The balance must never be logged, and this reads the source to check.
+    ///
+    /// **A test about text rather than behaviour, because the failure was.**
+    /// `SECURITY.md` recorded the balance being taken out of the logs — "the
+    /// most sensitive number the app holds that is not a key" — and it came
+    /// back anyway, and stayed until somebody went looking. Nothing failed. A
+    /// document saying a thing is true is not a mechanism for keeping it true.
+    ///
+    /// Under a desktop session `debug` reaches the journal, which more people
+    /// can read than the wallet file, and a debug log is precisely what gets
+    /// pasted into an issue by somebody asking for help.
+    #[test]
+    fn no_balance_in_the_logs() {
+        let source = include_str!("app.rs");
+        // Everything above the test module: this test necessarily talks about
+        // balances and would otherwise find itself.
+        let code = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(before, _)| before);
+
+        for (number, line) in code.lines().enumerate() {
+            let Some(start) = line.find("tracing::") else {
+                continue;
+            };
+            // A macro call can wrap over several lines, so take everything
+            // from here to the end of the statement.
+            let rest: String = code
+                .lines()
+                .skip(number)
+                .take(8)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let call = rest.split_once(");").map_or(rest.as_str(), |(c, _)| c);
+            assert!(
+                !call.contains("balance"),
+                "a balance reaches the log at src/app.rs:{}: {}",
+                number + 1,
+                &line[start..]
+            );
+        }
+    }
 
     #[test]
     fn an_untouched_wallet_locks_once_its_interval_passes() {
