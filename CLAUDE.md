@@ -111,6 +111,24 @@ public key into, the worst habit this program could encourage.
 published key and address rather than against itself, because a wrong version swap yields a key
 that parses perfectly and describes somebody else's wallet.
 
+**A descriptor with more than one key works, and both chains have to move.** `split_paths`
+used `replacen(…, 1)`, which is right for one key and wrong for every multisig: the change
+descriptor it built had one cosigner on the change chain and the rest still on the receive one.
+That is a *different* wallet. It parsed, it derived perfectly good addresses, and none of them
+were this wallet's change — so change would never have been seen, as an understated balance
+with nothing on screen to explain it. Both branches substitute every occurrence now, and
+`wsh(`/`sh(wsh(` are accepted so a multisig descriptor with no origin is not told it "does not
+say which kind of addresses it makes" when it plainly does.
+
+`ScriptType` on an imported descriptor is a *label and a database filename*, not a derivation
+rule — the descriptor is stored and used exactly as written. That is why a P2WSH multisig can
+be filed under native segwit without being BIP-84.
+
+**`External:` / `Internal:` pairs are read as written.** Several wallets export the two chains
+as labelled lines rather than one multipath descriptor. Taken as given rather than derived,
+because a wallet that writes both down knows better than a rule guessing the second from the
+first.
+
 `wallet::watch::parse` turns what a device exports into the pair of descriptors BDK wants. It
 takes a multipath descriptor (`…/<0;1>/*`), a single-path one ending `/0/*`, or a bare extended
 key with its origin, and infers the script type from the purpose in that origin — 84h is native
@@ -815,7 +833,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 222 tests; no network, no display
+cargo test                       # 225 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging

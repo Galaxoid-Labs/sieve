@@ -225,7 +225,7 @@ Then unplug the device and plug it in again.
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh
-cargo test          # 222 tests, needing no network and no display
+cargo test          # 225 tests, needing no network and no display
 cargo fmt --check
 cargo clippy -- -D warnings
 ```

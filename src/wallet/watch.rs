@@ -154,6 +154,25 @@ pub fn parse(text: &str) -> Result<Descriptors> {
     // A SLIP-132 prefix is itself an answer: `zpub` *means* BIP-84. An `xpub`
     // says nothing, which is why a bare one is refused — so this is the rule
     // applied to a key that carries the information, not an exception to it.
+    // A labelled pair, which is what several wallets export rather than one
+    // multipath descriptor — Bitkey's "current wallet descriptor" among them:
+    //
+    //     External: wsh(sortedmulti(2,…/0/*,…))
+    //     Internal: wsh(sortedmulti(2,…/1/*,…))
+    //
+    // Taken as given rather than derived, because a wallet that writes both
+    // chains down knows better than a rule that guesses the second from the
+    // first.
+    if let Some((external, internal)) = labelled_pair(text) {
+        let script_type =
+            script_type_of(&external).or_else(|e| normalise_slip132(&external).1.ok_or(e))?;
+        return Ok(Descriptors {
+            external,
+            internal,
+            script_type,
+        });
+    }
+
     let script_type = match script_type_of(text) {
         Ok(script_type) => script_type,
         Err(e) => from_prefix.ok_or(e)?,
@@ -206,6 +225,38 @@ fn holds_private_key(text: &str) -> bool {
         .any(|token| token.get(1..4) == Some("prv"))
 }
 
+/// Two descriptors written down under labels, if that is what this is.
+///
+/// Case-insensitive on the label and tolerant of the separator, because this
+/// is a convention rather than a standard — wallets write `External:`,
+/// `external =`, and worse. Anything that does not hold both labels is left
+/// alone, so this cannot swallow an ordinary descriptor.
+fn labelled_pair(text: &str) -> Option<(String, String)> {
+    let mut external = None;
+    let mut internal = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        let (label, rest) = line.split_once([':', '='])?;
+        let value = rest.trim();
+        if value.is_empty() {
+            return None;
+        }
+        // Strip a checksum here too: these arrive with one, and the pair is
+        // returned without going back through the caller's stripping.
+        let value = value.split('#').next().unwrap_or(value).trim().to_string();
+        match label.trim().to_ascii_lowercase().as_str() {
+            "external" | "receive" | "receiving" => external = Some(value),
+            "internal" | "change" => internal = Some(value),
+            _ => return None,
+        }
+    }
+
+    let (external, internal) = (external?, internal?);
+    // Both must be descriptors. Two labels around something else is not this.
+    (external.contains('(') && internal.contains('(')).then_some((external, internal))
+}
+
 /// Which standard path this key or descriptor belongs to.
 ///
 /// From the purpose in the key origin — 84h is native segwit and so on —
@@ -232,11 +283,21 @@ fn script_type_of(text: &str) -> Result<ScriptType> {
         Some("84") => Ok(ScriptType::NativeSegwit),
         Some("86") => Ok(ScriptType::Taproot),
         // A descriptor still says which script it builds, even without an
-        // origin; only the bare-key case is genuinely ambiguous.
+        // origin; only the bare-key case is genuinely ambiguous. A descriptor
+        // carries its own chain — `/0/*` — so unlike a bare key it needs no
+        // origin to be complete, and an origin is only there for signing.
         _ if text.starts_with("tr(") => Ok(ScriptType::Taproot),
         _ if text.starts_with("wpkh(") => Ok(ScriptType::NativeSegwit),
         _ if text.starts_with("sh(wpkh(") => Ok(ScriptType::NestedSegwit),
         _ if text.starts_with("pkh(") => Ok(ScriptType::Legacy),
+        // A script hash — a multisig, usually. The label is approximate: a
+        // P2WSH output is bech32 like a P2WPKH one but is not BIP-84, and
+        // `ScriptType` here only names the account and its database file. What
+        // governs the addresses is the descriptor, which is stored and used
+        // exactly as written. Refusing these instead would refuse a wallet
+        // Sieve can watch perfectly well.
+        _ if text.starts_with("wsh(") => Ok(ScriptType::NativeSegwit),
+        _ if text.starts_with("sh(wsh(") => Ok(ScriptType::NestedSegwit),
         _ => bail!(
             "this does not say which kind of addresses it makes. Paste a descriptor, \
              or an extended key with its derivation path — \
@@ -259,29 +320,43 @@ fn wrap(key: &str, script_type: ScriptType, chain: u8) -> Result<String> {
 /// Split a descriptor into its receive and change forms.
 fn split_paths(descriptor: &str) -> Result<(String, String)> {
     // Multipath: <0;1> is the standard way of writing both chains at once.
-    if let Some(start) = descriptor.find('<') {
-        let end = descriptor[start..]
-            .find('>')
-            .map(|offset| start + offset)
-            .ok_or_else(|| anyhow!("that descriptor has an unclosed <…>"))?;
-        let choices: Vec<&str> = descriptor[start + 1..end].split(';').collect();
-        if choices.len() != 2 {
-            bail!("Sieve reads multipath descriptors with two chains, like <0;1>");
+    //
+    // **Every group, not the first.** A multisig descriptor writes one per
+    // cosigner — `wsh(sortedmulti(2,A/<0;1>/*,B/<0;1>/*,C/<0;1>/*))` — and
+    // substituting only the first left the others as literal `<0;1>`.
+    if descriptor.contains('<') {
+        let mut external = String::with_capacity(descriptor.len());
+        let mut internal = String::with_capacity(descriptor.len());
+        let mut rest = descriptor;
+        while let Some(start) = rest.find('<') {
+            let end = rest[start..]
+                .find('>')
+                .map(|offset| start + offset)
+                .ok_or_else(|| anyhow!("that descriptor has an unclosed <…>"))?;
+            let choices: Vec<&str> = rest[start + 1..end].split(';').collect();
+            if choices.len() != 2 {
+                bail!("Sieve reads multipath descriptors with two chains, like <0;1>");
+            }
+            external.push_str(&rest[..start]);
+            external.push_str(choices[0]);
+            internal.push_str(&rest[..start]);
+            internal.push_str(choices[1]);
+            rest = &rest[end + 1..];
         }
-        let head = &descriptor[..start];
-        let tail = &descriptor[end + 1..];
-        return Ok((
-            format!("{head}{}{tail}", choices[0]),
-            format!("{head}{}{tail}", choices[1]),
-        ));
+        external.push_str(rest);
+        internal.push_str(rest);
+        return Ok((external, internal));
     }
 
     // Single path. The receive chain ends /0/*, and its change chain is /1/*.
+    //
+    // **All of them**, for the same reason: with one key per cosigner, moving
+    // only the first produced a change descriptor describing a *different*
+    // multisig — one signer on the change chain and the rest still on the
+    // receive one. It parsed, it derived addresses, and they were not this
+    // wallet's change addresses. Change would simply not have been seen.
     if descriptor.contains("/0/*") {
-        return Ok((
-            descriptor.to_string(),
-            descriptor.replacen("/0/*", "/1/*", 1),
-        ));
+        return Ok((descriptor.to_string(), descriptor.replace("/0/*", "/1/*")));
     }
 
     // A descriptor with no wildcard describes one address, not a wallet.
@@ -376,6 +451,79 @@ mod tests {
         const ZPRV: &str = "zprvAWgYBBk7JR8Gjrh4UJQ2uJdG1r3WNRRfURiABBE3RvMXYSrRJL62XuezvGdPvG6GFBZduosCc1YP5wixPox7zhZLfiUm8aunE96BBa4Kei5";
         let err = parse(ZPRV).unwrap_err().to_string();
         assert!(err.contains("private key"), "{err}");
+    }
+
+    const B: &str = "xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL";
+    const C: &str = "xpub6ELHKXNimKbxMCytPh7EdC2QXx46T9qLDJWGnTraz1H9kMMFdcduoU69wh9cxP12wDxqAAfbaESWGYt5rREsX1J8iR2TEunvzvddduAPYcY";
+
+    /// Every cosigner moves to the change chain, not only the first.
+    ///
+    /// **This was wrong, and silently.** `replacen(…, 1)` is correct for a
+    /// descriptor with one key and wrong for every multisig: it produced a
+    /// change descriptor describing a *different* wallet — one signer on the
+    /// change chain and the rest still on the receive one. It parsed, it
+    /// derived perfectly good addresses, and they were not this wallet's
+    /// change addresses, so change would never have been seen. An understated
+    /// balance with nothing on screen to explain it.
+    #[test]
+    fn every_cosigner_moves_to_the_change_chain() {
+        let external = format!(
+            "wsh(sortedmulti(2,[aaaaaaaa/84h/0h/0h]{XPUB}/0/*,\
+             [bbbbbbbb/84h/0h/0h]{B}/0/*,[cccccccc/84h/0h/0h]{C}/0/*))"
+        );
+        let parsed = parse(&external).unwrap();
+
+        assert_eq!(parsed.external.matches("/0/*").count(), 3);
+        assert_eq!(
+            parsed.internal.matches("/1/*").count(),
+            3,
+            "every key must be on the change chain: {}",
+            parsed.internal
+        );
+        assert_eq!(
+            parsed.internal.matches("/0/*").count(),
+            0,
+            "no key may be left on the receive chain: {}",
+            parsed.internal
+        );
+    }
+
+    /// The same, written the multipath way.
+    #[test]
+    fn every_multipath_group_is_substituted() {
+        let text = format!("wsh(sortedmulti(2,{XPUB}/<0;1>/*,{B}/<0;1>/*,{C}/<0;1>/*))");
+        let parsed = parse(&text).unwrap();
+        assert!(
+            !parsed.external.contains('<') && !parsed.internal.contains('<'),
+            "a group was left unsubstituted: {} / {}",
+            parsed.external,
+            parsed.internal
+        );
+        assert_eq!(parsed.external.matches("/0/*").count(), 3);
+        assert_eq!(parsed.internal.matches("/1/*").count(), 3);
+    }
+
+    /// A wallet that writes both chains down is believed rather than guessed at.
+    #[test]
+    fn a_labelled_pair_is_taken_as_given() {
+        let external =
+            format!("wsh(sortedmulti(2,[aaaaaaaa/84h/0h/0h]{XPUB}/0/*,{B}/0/*,{C}/0/*))");
+        let internal =
+            format!("wsh(sortedmulti(2,[aaaaaaaa/84h/0h/0h]{XPUB}/1/*,{B}/1/*,{C}/1/*))");
+        let bundle = format!("External: {external}\nInternal: {internal}");
+
+        let parsed = parse(&bundle).unwrap();
+        assert_eq!(parsed.external, external);
+        assert_eq!(parsed.internal, internal);
+        assert_eq!(parsed.script_type, ScriptType::NativeSegwit);
+
+        // Labels are a convention, not a standard.
+        let loose = format!("receive = {external}\nchange = {internal}");
+        assert_eq!(parse(&loose).unwrap().external, external);
+
+        // An ordinary descriptor is not mistaken for a pair.
+        let plain = format!("wpkh([ab12cd34/84h/0h/0h]{XPUB}/0/*)");
+        assert_eq!(parse(&plain).unwrap().external, plain);
     }
 
     #[test]
