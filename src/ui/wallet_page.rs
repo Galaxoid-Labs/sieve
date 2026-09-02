@@ -309,21 +309,6 @@ impl FactoryComponent for TxRow {
     }
 }
 
-/// The balance mark's classes for a network.
-///
-/// A free function so the mapping can be tested without building a page full
-/// of widgets — the mapping is the part that matters.
-fn mark_classes(network: Option<&str>) -> &'static [&'static str] {
-    match network {
-        Some("bitcoin") => &["balance-mark", "mark-bitcoin"],
-        Some("signet") => &["balance-mark", "mark-signet"],
-        Some("testnet") | Some("testnet4") => &["balance-mark", "mark-testnet"],
-        // Regtest is a chain on this machine, and an unknown network is not
-        // ours to colour: the plain mark suits both.
-        _ => &["balance-mark"],
-    }
-}
-
 /// "1 coin", "3 coins".
 /// Said as an offer, not a question: an address works perfectly well without
 /// a name, and the field must not read as something owed before you can use it.
@@ -683,6 +668,8 @@ pub enum WalletPageMsg {
     SetLabels(Box<crate::wallet::labels::Labels>),
     /// Name the address currently on the receive screen.
     NameAddress(String),
+    /// Leave the address-label field without saving what is in it.
+    CancelAddressLabel,
     /// What this program is, and whose work it stands on.
     ShowAbout,
     /// Every address this wallet has handed out.
@@ -804,7 +791,16 @@ impl WalletPage {
         if address == "—" {
             return None;
         }
-        super::qr::texture(&super::qr::payment_uri(&address))
+        // The chain decides the mark's colour, and an unsynced wallet has no
+        // summary to ask — `brand` answers with bitcoin's own orange for
+        // anything it does not recognise, which is the right guess for a
+        // Bitcoin mark.
+        let network = self
+            .summary
+            .as_ref()
+            .map(|s| s.network.as_str())
+            .unwrap_or_default();
+        super::qr::texture(&super::qr::payment_uri(&address), network)
     }
 
     /// Whether this path is one the wallet actually watches.
@@ -1149,14 +1145,6 @@ impl WalletPage {
         }
     }
 
-    /// The balance mark's classes, which carry its tint.
-    ///
-    /// From the summary, so it clears with everything else when a wallet is
-    /// switched rather than leaving one chain's colour over another's money.
-    fn mark_classes(&self) -> &'static [&'static str] {
-        mark_classes(self.summary.as_ref().map(|s| s.network.as_str()))
-    }
-
     /// The clock consensus uses, which is not the tip's own timestamp.
     fn median_time(&self) -> String {
         let Some(chain) = &self.chain else {
@@ -1418,7 +1406,8 @@ impl Component for WalletPage {
                     #[watch]
                     set_title: &model.name,
                     #[watch]
-                    set_subtitle: model.summary.as_ref().map_or("", |s| s.network.as_str()),
+                    set_subtitle: model.summary.as_ref()
+                        .map_or("", |s| crate::wallet::network_label_of(&s.network)),
                 },
 
                 // Preferences belong in a dialog reached from the header, not
@@ -1577,11 +1566,12 @@ impl Component for WalletPage {
                                 // barely there and takes its colour from the
                                 // theme rather than being painted on.
                                 add_overlay = &gtk::Label {
-                                    // Tinted by network, so which chain this
-                                    // wallet is on is answerable at a glance
-                                    // rather than by reading a subtitle.
-                                    #[watch]
-                                    set_css_classes: model.mark_classes(),
+                                    // The desktop's accent on every chain. It
+                                    // is decoration, and nothing about it now
+                                    // depends on the wallet — which is what
+                                    // makes it a single widget to delete if it
+                                    // ever stops earning its place.
+                                    add_css_class: "balance-mark",
                                     set_label: "₿",
                                     set_halign: gtk::Align::Start,
                                     set_valign: gtk::Align::End,
@@ -1902,6 +1892,19 @@ impl Component for WalletPage {
                                 set_wrap: true,
                                 set_wrap_mode: gtk::pango::WrapMode::WordChar,
                                 set_selectable: true,
+                                // A selectable label selects its *whole* text
+                                // the moment it takes focus, so the address sat
+                                // there looking as though somebody had dragged
+                                // across it. On a screen whose job is to show
+                                // one address clearly, a selection nobody made
+                                // reads as a state and invites wondering what
+                                // it means. Dragging across it still works —
+                                // this only undoes the automatic one.
+                                connect_has_focus_notify => move |label| {
+                                    if label.has_focus() {
+                                        label.select_region(0, 0);
+                                    }
+                                },
                                 set_justify: gtk::Justification::Center,
                                 set_valign: gtk::Align::Center,
                                 // A taproot address is 62 characters where a
@@ -1988,6 +1991,7 @@ impl Component for WalletPage {
                                     set_title: "Label (optional)",
                                     set_show_apply_button: true,
                                     set_visible: false,
+
                                     connect_apply[sender] => move |row| {
                                         sender.input(WalletPageMsg::NameAddress(
                                             row.text().to_string(),
@@ -2458,6 +2462,20 @@ impl Component for WalletPage {
             widgets
                 .address_label_shown
                 .connect_activated(move |_| open());
+
+            crate::ui::cancellable_edit(
+                &widgets.address_label_row,
+                Some("Stop naming this address"),
+                {
+                    let sender = sender.clone();
+                    // Always something to do: the field is only on screen
+                    // because it was opened, so Escape has a row to shut.
+                    move || {
+                        sender.input(WalletPageMsg::CancelAddressLabel);
+                        true
+                    }
+                },
+            );
         }
         widgets.send_slot.append(model.send.widget());
 
@@ -2652,6 +2670,10 @@ impl Component for WalletPage {
                     text,
                 });
             }
+            // Reads the saved name back out, so leaving the field also undoes
+            // whatever was typed into it — which is what cancelling means.
+            WalletPageMsg::CancelAddressLabel => self.refresh_address_label(),
+
             WalletPageMsg::SetFrozen { outpoint, frozen } => {
                 let _ = sender.output(WalletPageOutput::SetFrozen { outpoint, frozen });
             }
@@ -3798,6 +3820,20 @@ impl WalletPage {
         });
         shown.connect_activated(move |_| open());
 
+        crate::ui::cancellable_edit(&editing, Some("Stop editing this label"), {
+            let editing = editing.clone();
+            let shown = shown.clone();
+            let existing = existing.clone();
+            move || {
+                // The saved label, not what was typed: closing the row without
+                // putting it back would show the abandoned text next time.
+                editing.set_text(&existing);
+                editing.set_visible(false);
+                shown.set_visible(true);
+                true
+            }
+        });
+
         editing.connect_apply({
             let sender = sender.clone();
             let txid = txid.to_owned();
@@ -4023,40 +4059,6 @@ mod tests {
 
         // Past the estimate, hold short of full rather than claiming done.
         assert_eq!(header_fraction(1_000_000, 0, 900_000), Some(0.99));
-    }
-
-    /// The tint is how you tell at a glance which chain the money is on, so
-    /// mainnet must never wear a test network's colour or the reverse.
-    #[test]
-    fn every_network_gets_its_own_tint() {
-        use super::mark_classes;
-
-        assert_eq!(
-            mark_classes(Some("bitcoin")),
-            ["balance-mark", "mark-bitcoin"]
-        );
-        assert_eq!(
-            mark_classes(Some("signet")),
-            ["balance-mark", "mark-signet"]
-        );
-        assert_eq!(
-            mark_classes(Some("testnet")),
-            ["balance-mark", "mark-testnet"]
-        );
-        assert_eq!(
-            mark_classes(Some("testnet4")),
-            ["balance-mark", "mark-testnet"]
-        );
-
-        // A chain on this machine, anything unrecognised, and a wallet that
-        // has not synced yet all stay plain rather than borrowing a colour
-        // that means something else.
-        assert_eq!(mark_classes(Some("regtest")), ["balance-mark"]);
-        assert_eq!(mark_classes(Some("something-new")), ["balance-mark"]);
-        assert_eq!(mark_classes(None), ["balance-mark"]);
-
-        // Mainnet must never wear a test network's colour, or the reverse.
-        assert_ne!(mark_classes(Some("bitcoin")), mark_classes(Some("signet")));
     }
 
     #[test]

@@ -399,6 +399,7 @@ const ICONS: &[&str] = &[
     "sieve-send-symbolic",
     "view-refresh-symbolic",
     "web-browser-symbolic",
+    "window-close-symbolic",
 ];
 
 #[derive(Debug)]
@@ -3645,6 +3646,17 @@ impl App {
                     sender.input(AppMsg::SetTorProxy(row.text().to_string()));
                 });
             }
+            crate::ui::cancellable_edit(&address, None, {
+                let saved = address.text().to_string();
+                let address = address.clone();
+                move || {
+                    if address.text() == saved {
+                        return false;
+                    }
+                    address.set_text(&saved);
+                    true
+                }
+            });
             connection.add(&address);
         }
 
@@ -3818,6 +3830,19 @@ impl App {
                 });
             }
             name.set_show_apply_button(true);
+            crate::ui::cancellable_edit(&name, None, {
+                let name = name.clone();
+                let current = current.clone();
+                // Nothing typed means nothing to undo, and Escape belongs to
+                // the dialog then.
+                move || {
+                    if name.text() == current {
+                        return false;
+                    }
+                    name.set_text(&current);
+                    true
+                }
+            });
             this.add(&name);
         }
 
@@ -3826,7 +3851,7 @@ impl App {
         {
             let chain = adw::ActionRow::new();
             chain.set_title("Chain");
-            chain.set_subtitle(&meta.network);
+            chain.set_subtitle(wallet::network_label_of(&meta.network));
             this.add(&chain);
 
             let watched = adw::ActionRow::new();

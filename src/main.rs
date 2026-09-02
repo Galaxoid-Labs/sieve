@@ -139,14 +139,11 @@ const GLOBAL_CSS: &str = ".qr-ground { background-color: #ffffff; border-radius:
      .balance-mark { \
        font-size: 190px; \
        font-weight: 800; \
-       color: alpha(currentColor, 0.06); \
+       color: alpha(@accent_bg_color, 0.20); \
        margin-left: -34px; \
        margin-bottom: -76px; \
        transform: rotate(-14deg); \
      } \
-     .mark-bitcoin { color: alpha(@accent_bg_color, 0.20); } \
-     .mark-signet { color: alpha(#6f1d5d, 0.20); } \
-     .mark-testnet { color: alpha(#0aab2f, 0.20); } \
      /* The logo carries its own tilt and its own colour; all this \
         adds is the room around it. */ \
      .welcome-mark { margin-bottom: 10px; } \
@@ -197,19 +194,17 @@ fn main() {
     // The radius has to be matched by clipping the picture to it, or the
     // code's own white square fills the corners it cuts away.
     //
-    // The balance mark is tinted by network, so that a glance at the card
-    // says which chain this wallet is on — the mistake worth making
-    // impossible. Mainnet takes the desktop's accent, the same colour as the
-    // primary buttons, which makes the card part of the theme rather than a
-    // sticker on it. The test networks keep colours of their own, written
-    // down: they are the half of this that has to stay recognisable, and a
-    // theme whose accent happened to be green would otherwise make a mainnet
-    // wallet look like a testnet one.
+    // The balance mark takes the desktop's accent on every chain, which makes
+    // the card part of the theme rather than a sticker on it.
     //
-    // The two test colours are mempool.space's, which is where anybody using
-    // these chains already looks: signet purple and testnet4 green mean the
-    // same thing in both places, so the association is borrowed rather than
-    // invented. Kept at a fifth of an alpha so the hue
+    // It used to be tinted per network, to answer "which chain is this?" at a
+    // glance. That turned out to be solving a problem the screen does not have
+    // — the header names the chain in words directly above the card — while
+    // creating one it did: a fixed colour has to work against a light card and
+    // a dark one at a fifth of an alpha, and a dark signet purple simply
+    // disappeared. A redundant signal is not worth a colour that cannot be
+    // chosen well, and this leaves the QR code's white ground as the only
+    // hardcoded colour in the program. Kept at a fifth of an alpha so the hue
     // reads the same against a light or a dark card.
     relm4::set_global_css(GLOBAL_CSS);
 

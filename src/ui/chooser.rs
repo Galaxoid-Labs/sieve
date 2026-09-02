@@ -36,7 +36,7 @@ impl FactoryComponent for WalletRow {
     view! {
         adw::ActionRow {
             set_title: &self.name,
-            set_subtitle: &self.network,
+            set_subtitle: crate::wallet::network_label_of(&self.network),
             set_activatable: true,
 
             add_suffix = &gtk::Image {

@@ -38,3 +38,59 @@ pub fn toast(message: &str) -> relm4::adw::Toast {
     toast.set_timeout(TOAST_SECONDS);
     toast
 }
+
+/// Give an `adw::EntryRow` a way out.
+///
+/// Adwaita's apply button commits an edit and there is no counterpart to
+/// abandon one, so every field in Sieve that edits something already saved was
+/// a one-way door: the exits were saving something or leaving the screen. That
+/// is worst on the rows that *replace* a display line while they are open,
+/// where leaving the screen is the only exit at all — but it is wrong
+/// everywhere, because a field holding a half-typed name has no way back to the
+/// name it started with.
+///
+/// `cancel` is what "back" means for that row, and every caller does the same
+/// two things in it: put the saved value back, and close the field if it opens.
+/// Restoring is not optional — a cancel that closed the row and kept the typing
+/// would put the abandoned text back on screen the next time it opened.
+///
+/// `close_tooltip` adds a visible button for the rows that open and shut. A
+/// settings row that is always on screen gets Escape alone: there is nothing to
+/// close, and a permanent ✕ beside a preference reads as "remove this setting".
+///
+/// **`cancel` returns whether it had anything to cancel**, and that answer
+/// decides whether Escape is swallowed. A row that swaps a display line for a
+/// field always has something to do — shut the field — and must swallow it, or
+/// the same keypress would also close the dialog the row is sitting in. A
+/// settings row with nothing typed into it has nothing to undo, and swallowing
+/// there would break the one thing Escape is for in a preferences window.
+pub fn cancellable_edit(
+    row: &relm4::adw::EntryRow,
+    close_tooltip: Option<&str>,
+    cancel: impl Fn() -> bool + Clone + 'static,
+) {
+    use relm4::adw::prelude::*;
+    use relm4::gtk;
+
+    if let Some(tooltip) = close_tooltip {
+        let button = gtk::Button::from_icon_name("window-close-symbolic");
+        button.set_tooltip_text(Some(tooltip));
+        button.set_valign(gtk::Align::Center);
+        button.add_css_class("flat");
+        let cancel = cancel.clone();
+        button.connect_clicked(move |_| {
+            cancel();
+        });
+        row.add_prefix(&button);
+    }
+
+    let escape = gtk::EventControllerKey::new();
+    escape.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape && cancel() {
+            gtk::glib::Propagation::Stop
+        } else {
+            gtk::glib::Propagation::Proceed
+        }
+    });
+    row.add_controller(escape);
+}

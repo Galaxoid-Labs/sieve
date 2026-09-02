@@ -65,13 +65,21 @@ These are not preferences. Violating one is a bug, not a style difference.
 
    There is now an Appearance preference — Follow the system, Light, Dark — defaulting to
    following the system. "Follow the system" still reads the desktop directly. The QR code is
-   one of only two places a colour is hardcoded: it needs dark modules on a light ground to scan, so it
-   carries its own white ground in both themes via the `.qr-ground` class rather than sitting
-   on a card, which is dark exactly when the code needs light. The other is the balance card's
-   ₿ mark, tinted by network — the desktop accent for mainnet, and mempool.space's own purple
-   for signet and green for the testnets, so the association is borrowed rather than invented — which
-   is identity rather than decoration: a glance at the card should say which chain the money is
-   on. Kept at a fifth of an alpha so the hue reads on a light or a dark card. Otherwise: no
+   the only place a colour is hardcoded, and everything hardcoded is there: it needs dark modules
+   on a light ground to scan, so it carries its own white ground in both themes via the
+   `.qr-ground` class rather than sitting on a card, which is dark exactly when the code needs
+   light — and the Bitcoin mark drawn in its middle is coloured by chain, bitcoin's own orange
+   with mempool.space's purple for signet and green for the testnets, so the association is
+   borrowed rather than invented.
+
+   **That surface is why those colours are allowed.** A QR code's ground is white whatever the
+   desktop is doing, so a colour drawn on it has a *known* background and can be chosen for
+   contrast once. The balance card's ₿ mark used to be tinted the same way and is not any more:
+   it sits on a card that is light or dark depending on the hour, a fixed colour had to work
+   against both at a fifth of an alpha, and a dark signet purple simply disappeared. It takes
+   the desktop accent on every chain now. The chain is named in words in the header directly
+   above the card, so the tint was answering a question the screen had already answered.
+   Otherwise: no
    hardcoded colors, ever. Use Adwaita style classes (`suggested-action`, `destructive-action`, `error`,
    `warning`, `dim-label`, `pill`, `card`) and Adwaita named colors in any custom CSS, since those
    recolor themselves. Anything drawn by hand into a `gtk::DrawingArea` must read
@@ -518,6 +526,31 @@ all three against `genesis_block` rather than trusting sixty-four hand-copied
 characters. Scanning testnet4 from the beginning costs minutes, which is why it
 needs no others and mainnet needs seven.
 
+## Every field that edits something saved has a way out
+
+`ui::cancellable_edit`. Adwaita's `EntryRow` gives an apply button and no
+counterpart, so every field in Sieve that edited something already saved was a
+one-way door — the exits were saving something or leaving the screen. On the
+rows that *replace* a display line while they are open, leaving the screen was
+the only exit at all.
+
+Three rules, and the second is the one that is easy to get wrong:
+
+- **Restoring is not optional.** Cancelling puts the saved value back. A cancel
+  that shut the row and kept the typing would show the abandoned text the next
+  time it opened, which looks like the app saved it.
+- **`cancel` returns whether it had anything to cancel, and that decides whether
+  Escape is swallowed.** A row that opens and shuts always has something to do,
+  and must swallow it — an Escape that also reached the window would close the
+  dialog the row is sitting in, which is a second, larger cancel nobody asked
+  for. A settings row with nothing typed has nothing to undo, and swallowing
+  there would break the one thing Escape is for in a preferences window.
+- **A visible ✕ only on the rows that open and shut.** A permanent one beside a
+  preference reads as "remove this setting".
+
+The coin-naming field is the exception that needs nothing: it lives in an
+`adw::AlertDialog`, which already has a cancel response.
+
 ## The name
 
 **Sieve**, one word, and it stays that way. The GNOME naming guidance asks for
@@ -587,11 +620,21 @@ all ask for `com.galaxoidlabs.Sieve`. `ICONS` in `app.rs` lists every icon name 
 warns at startup for any that does not resolve, which is how a missing one is caught before
 somebody sees a placeholder rather than after.
 
-The Bitcoin logo that used to stand in for it — public domain, from Wikimedia Commons — has
-been removed along with the last thing that referenced it.
+The Bitcoin logo — public domain, from Wikimedia Commons — is back, and not as the app icon:
+it is the mark in the middle of a receive QR code. It stopped being a stand-in for Sieve's own
+icon and became a picture of what the code contains, which is the one thing it is actually
+qualified to say.
 
-The balance card's watermark is still the glyph, deliberately — that one is tinted by network,
-and tinting a logo that is already orange would say nothing.
+**It is a PNG of the glyph, not the SVG.** `gdk::Texture::from_bytes` decodes PNG, JPEG and
+TIFF itself and hands SVG to a gdk-pixbuf loader — librsvg's, and absent on plenty of machines
+including the one this was written on. The load returned `None`, the code drew a blank where
+the mark should be, and nothing said why. `bitcoin-logo.svg` stays beside the PNG as the source
+it was rendered from, with the command in the doc comment. Only the glyph is an asset, because
+only the glyph has a fixed colour; the circle under it is drawn in `qr::stamp` so the chain's
+colour stays an argument rather than three more files.
+
+The balance card's watermark is still the glyph in the app's own font, and it now takes the
+desktop accent on every chain — see the colour rule above for why it stopped being tinted.
 
 ## Layout
 
@@ -668,7 +711,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 207 tests; no network, no display
+cargo test                       # 209 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging
@@ -676,6 +719,7 @@ GTK_DEBUG=interactive cargo run  # widget inspector
 
 # Slow ones, opted into by name:
 cargo test -- --ignored --nocapture filter_peers
+cargo test -- --ignored --nocapture qr_samples   # writes codes to look at
 cargo test --release -- --ignored --nocapture kdf_cost
 cargo test --release -- --ignored --nocapture repeated_words
 ```

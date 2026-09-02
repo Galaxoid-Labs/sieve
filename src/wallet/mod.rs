@@ -191,6 +191,19 @@ pub fn network_label(network: Network) -> &'static str {
     }
 }
 
+/// What a chain is called on screen, from the string a wallet records.
+///
+/// `Network`'s own `Display` is lowercase — "bitcoin", "signet", "testnet4" —
+/// because it is a protocol identifier, and that is right for a seed hostname
+/// and wrong under a wallet's name. Anything unrecognised is handed back
+/// unchanged rather than guessed at or blanked.
+pub fn network_label_of(recorded: &str) -> &str {
+    recorded
+        .parse::<Network>()
+        .map(network_label)
+        .unwrap_or(recorded)
+}
+
 /// The chain a picker index means.
 ///
 /// Out of range cannot happen — the picker's model is built from `NETWORKS` —
@@ -1717,6 +1730,33 @@ mod tests {
         // Once adopted it never moves again — the wallet has real history now.
         meta.birthday_pending = false;
         assert_eq!(meta.tip_birthday(400_000, now), None);
+    }
+
+    /// A chain is named for a person, not for the protocol.
+    ///
+    /// `Network`'s `Display` is lowercase because it is an identifier — it is
+    /// what `x49.seed.testnet4.…` is built from — and the same string was
+    /// being shown under the wallet's name, in the wallet list, and in
+    /// preferences. Three places, one mapping.
+    #[test]
+    fn a_chain_is_named_for_a_person_not_for_the_protocol() {
+        for network in super::NETWORKS {
+            let recorded = network.to_string();
+            let shown = super::network_label_of(&recorded);
+            assert_eq!(shown, super::network_label(network));
+            assert!(
+                shown.starts_with(|c: char| c.is_uppercase()),
+                "{shown} is what a wallet's subtitle would say"
+            );
+        }
+        assert_eq!(super::network_label_of("bitcoin"), "Bitcoin");
+        assert_eq!(super::network_label_of("signet"), "Signet");
+        assert_eq!(super::network_label_of("testnet4"), "Testnet4");
+        // Not ours to rename: a string that is not a chain is handed back as
+        // it came, so a wallet written by a later version still says something
+        // rather than nothing.
+        assert_eq!(super::network_label_of("something-new"), "something-new");
+        assert_eq!(super::network_label_of(""), "");
     }
 
     /// Preferences and wallets must not share a directory.
