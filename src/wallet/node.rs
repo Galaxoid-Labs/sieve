@@ -423,7 +423,7 @@ impl Session {
         let (client, node) = client.managed_start();
         relm4::spawn(async move { node.run().await });
 
-        Ok(Session {
+        let session = Session {
             portfolio: Arc::new(AsyncMutex::new(portfolio)),
             updates: Arc::new(AsyncMutex::new(updates)),
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
@@ -441,7 +441,72 @@ impl Session {
             filters_done: Arc::new(AtomicBool::new(false)),
             blocks_read: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             network,
-        })
+        };
+
+        // A wallet made on this machine has no history, so scanning for one is
+        // wasted work — but "start at the tip" needs the tip's *hash*, and a
+        // hash only comes from the chain. So creation records a floor and this
+        // moves it, once, as soon as a node can answer.
+        session.adopt_tip_birthday(paths).await;
+
+        Ok(session)
+    }
+
+    /// Move a newly made wallet's birthday up to the chain tip.
+    ///
+    /// Only for a wallet Sieve created: it cannot hold a payment older than
+    /// itself, which is the fact that makes this safe. An imported wallet's
+    /// seed may have been spending for years, and moving its birthday forward
+    /// would skip the blocks holding its coins.
+    ///
+    /// Best effort throughout. Every failure here leaves the wallet exactly as
+    /// it was — starting from the compiled-in floor, which is slower and always
+    /// correct — so none of them is worth failing a session over.
+    async fn adopt_tip_birthday(&self, paths: &Paths) {
+        let Some(mut meta) = Meta::load(paths) else {
+            return;
+        };
+        if !meta.birthday_pending {
+            return;
+        }
+        let Ok(tip) = self.requester.chain_tip().await else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let Some(height) = meta.tip_birthday(tip.height, now) else {
+            return;
+        };
+        // The hash has to be the one at that exact height. Asking the node
+        // rather than assuming the tip's own hash is the whole point: a
+        // checkpoint whose height and hash disagree is refused, and one taken
+        // from the wrong block is worse than refused.
+        let Ok(Some(header)) = self.requester.get_header(height).await else {
+            tracing::debug!(height, "no header yet for the new wallet's birthday");
+            return;
+        };
+
+        meta.birthday_height = height;
+        meta.birthday_hash = header.block_hash().to_string();
+        meta.birthday_pending = false;
+        if let Err(e) = meta.save(paths) {
+            tracing::warn!(%e, "could not record the birthday");
+            return;
+        }
+        tracing::info!(
+            height,
+            tip = tip.height,
+            "new wallet starts watching near the tip rather than from a checkpoint"
+        );
+
+        // Narrow the scan already under way. Without this the birthday would
+        // only take effect on the next launch, and the first run — the one
+        // somebody is watching — would still walk the whole chain.
+        if let Err(e) = self.requester.rescan_from(height) {
+            tracing::warn!(%e, "could not narrow the scan; it will start correctly next time");
+        }
     }
 
     /// Await the next round of wallet updates, apply them, and persist.
@@ -1213,6 +1278,63 @@ impl std::fmt::Debug for Session {
 mod tests {
     use super::*;
 
+    /// Every chain the interface offers can be seeded.
+    ///
+    /// The port lived in a `match` with a catch-all that returned no
+    /// addresses, so offering a new chain without adding its port produced a
+    /// wallet that connected to nobody and reported nothing — which looks
+    /// exactly like a slow network rather than a missing line of code.
+    #[test]
+    fn every_offered_chain_has_a_port() {
+        for network in crate::wallet::NETWORKS {
+            assert!(
+                p2p_port(network).is_some(),
+                "{network} is offered in the interface with no p2p port"
+            );
+        }
+        // The ports are the chains' own, and no two share one.
+        assert_eq!(p2p_port(bdk_wallet::bitcoin::Network::Bitcoin), Some(8333));
+        assert_eq!(p2p_port(bdk_wallet::bitcoin::Network::Signet), Some(38333));
+        assert_eq!(
+            p2p_port(bdk_wallet::bitcoin::Network::Testnet4),
+            Some(48333)
+        );
+        assert_eq!(p2p_port(bdk_wallet::bitcoin::Network::Regtest), None);
+    }
+
+    /// Does a chain actually have filter-serving peers to find?
+    ///
+    /// Opted into by name because it goes to the network, which the rest of
+    /// the suite never does. It is the check that answers the question
+    /// testnet4 was added on: the DNS seeders are asked for
+    /// `NODE_NETWORK | NODE_COMPACT_FILTERS` nodes with the `x49` prefix, and
+    /// this reports how many each chain gives back.
+    ///
+    /// A seeder's answer is a crawler's record of what a node *advertised*,
+    /// not proof it will serve a filter when dialled — so this is a floor, and
+    /// the only real test is a scan that gets past the filter-header quarter.
+    /// What it does prove is the plumbing: a chain with no port or no seed
+    /// list returns zero here, silently, which is the bug it was written for.
+    ///
+    /// `cargo test --release -- --ignored --nocapture filter_peers`
+    #[test]
+    #[ignore = "asks DNS seeders on the real network"]
+    fn filter_peers_can_be_found_for_every_offered_chain() {
+        let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+        for network in crate::wallet::NETWORKS {
+            let found = runtime.block_on(resolve_seeds_directly(network, 64));
+            println!(
+                "{network}: {} filter-serving addresses, need {REQUIRED_PEERS}",
+                found.len()
+            );
+            assert!(
+                !found.is_empty(),
+                "{network} is offered and no seeder answered — check its port \
+                 and its seed list before believing the network is empty"
+            );
+        }
+    }
+
     /// A checkpoint the resume can start from, or refuse to.
     fn meta_scanned(to: Option<u32>, hash: Option<&str>) -> Meta {
         let mut meta = Meta::new(
@@ -1392,6 +1514,24 @@ fn resume_point(meta: &Meta) -> Option<(u32, bdk_wallet::bitcoin::BlockHash)> {
     Some((scanned_to, hash))
 }
 
+/// The port peers listen on for a chain.
+///
+/// `None` for a chain with no public network to seed from. Worth being its own
+/// function rather than a `match` inside the resolver: a missing arm there
+/// returned *no addresses at all*, so a newly offered chain would have started
+/// with nothing to connect to and simply sat there — no error, no peers, a
+/// progress bar at zero. `every_offered_chain_has_a_port` is the guard.
+fn p2p_port(network: bdk_wallet::bitcoin::Network) -> Option<u16> {
+    match network {
+        bdk_wallet::bitcoin::Network::Bitcoin => Some(8333),
+        bdk_wallet::bitcoin::Network::Signet => Some(38333),
+        bdk_wallet::bitcoin::Network::Testnet => Some(18333),
+        bdk_wallet::bitcoin::Network::Testnet4 => Some(48333),
+        // A chain on this machine is not seeded over DNS.
+        _ => None,
+    }
+}
+
 /// Ask the ordinary resolver for peers that serve compact filters.
 ///
 /// The same hostnames and service-bit prefixes the Tor path uses — `x49` is
@@ -1402,11 +1542,8 @@ async fn resolve_seeds_directly(
     network: bdk_wallet::bitcoin::Network,
     wanted: usize,
 ) -> Vec<std::net::IpAddr> {
-    let port = match network {
-        bdk_wallet::bitcoin::Network::Bitcoin => 8333,
-        bdk_wallet::bitcoin::Network::Signet => 38333,
-        bdk_wallet::bitcoin::Network::Testnet => 18333,
-        _ => return Vec::new(),
+    let Some(port) = p2p_port(network) else {
+        return Vec::new();
     };
 
     let mut found: Vec<std::net::IpAddr> = Vec::new();

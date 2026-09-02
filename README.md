@@ -154,6 +154,10 @@ Stated plainly, because a wallet that overstates itself is dangerous:
   against a real one. PSBT *export* works; *import*, which would let a payment
   signed elsewhere come back to be broadcast, is designed (`PSBT.md`) and not
   written.
+- **Silent payments (BIP-352).** Paying one is designed and not written —
+  `SILENT_PAYMENTS.md` has the plan. *Receiving* one is blocked on something a
+  compact-filter wallet structurally cannot compute, and the same file explains
+  why that is not a matter of effort.
 - **Multisig.** Single-signature only.
 - **Storing anything the node downloads.** The version of kyoto Sieve uses
   discards the data directory it is given — `data_path: _` in its own
@@ -221,7 +225,7 @@ Then unplug the device and plug it in again.
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh
-cargo test          # 202 tests, needing no network and no display
+cargo test          # 207 tests, needing no network and no display
 cargo fmt --check
 cargo clippy -- -D warnings
 ```
@@ -250,8 +254,23 @@ back to the coins.
 
 ## Networks
 
-Mainnet and signet. Signet is the one to learn on: real block times, real
-peers, coins worth nothing.
+Mainnet, signet and testnet4.
+
+Signet is the one to learn on: real block times, real peers, coins worth
+nothing. Testnet4 is there for development against the chain your own software
+targets, and it works because it has the peers for it — Sieve needs peers
+serving compact filters, not merely peers, and testnet4 answers with enough of
+them:
+
+```
+cargo test -- --ignored --nocapture filter_peers
+bitcoin:  64 filter-serving addresses, need 8
+signet:   35 filter-serving addresses, need 8
+testnet4: 23 filter-serving addresses, need 8
+```
+
+That test asks the DNS seeders directly, so it reports what is reachable today
+rather than what was true when this was written.
 
 ## Verifying a release
 

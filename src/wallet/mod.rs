@@ -143,6 +143,63 @@ pub const SIGNET_CHECKPOINTS: &[Checkpoint] = &[
     },
 ];
 
+/// Testnet4 checkpoints, newest first.
+///
+/// Genesis only, and that is deliberate rather than unfinished. A checkpoint is
+/// a height *and* a hash, and the hash has to come from the chain — there is no
+/// way to derive one here, and a wrong hash is a node that will not start. The
+/// genesis hash can be computed locally, which is why it is the one that is
+/// written down; `the_floor_checkpoints_are_the_real_genesis_blocks` checks all
+/// three against `genesis_block` rather than trusting that they were typed
+/// correctly.
+///
+/// It costs little. Testnet4 is a young chain and scanning it from the
+/// beginning is minutes, not the hours a mainnet rescan takes — which is the
+/// whole reason mainnet needs seven checkpoints and this needs none.
+pub const TESTNET4_CHECKPOINTS: &[Checkpoint] = &[Checkpoint {
+    height: 0,
+    hash: "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043",
+    when: "The beginning of testnet4",
+}];
+
+/// The chains the interface offers, in the order the pickers show them.
+///
+/// **One table, and the pickers are built from it.** Both screens used to hold
+/// their own list of two and then index it with `.min(1)`, which is only
+/// correct while the list is exactly two long: adding a third network would
+/// have clamped it to the second, so choosing testnet4 would have silently
+/// made a signet wallet. The clamp is gone, the labels come from
+/// `network_label`, and a test pins the picker and the table to the same
+/// length so they cannot drift apart again.
+pub const NETWORKS: [Network; 3] = [Network::Bitcoin, Network::Signet, Network::Testnet4];
+
+/// What a chain is called on screen.
+///
+/// Bare names. "Bitcoin (real coins)" and "Signet (test coins)" said the same
+/// thing twice — the acknowledgement switch below the picker is what carries
+/// the warning, and it appears on exactly the chain that needs it.
+pub fn network_label(network: Network) -> &'static str {
+    match network {
+        Network::Bitcoin => "Bitcoin",
+        Network::Signet => "Signet",
+        Network::Testnet4 => "Testnet4",
+        Network::Testnet => "Testnet3",
+        Network::Regtest => "Regtest",
+        // Deliberately no catch-all: a chain added upstream should stop the
+        // build here and be given a name, rather than reaching a picker as
+        // "Unknown chain".
+    }
+}
+
+/// The chain a picker index means.
+///
+/// Out of range cannot happen — the picker's model is built from `NETWORKS` —
+/// and if it somehow did, the first entry is the chain the picker opens on
+/// rather than whichever one happened to be last.
+pub fn network_at(index: usize) -> Network {
+    NETWORKS.get(index).copied().unwrap_or(NETWORKS[0])
+}
+
 /// A block whose height and time are both known, for estimating where the
 /// chain has got to since.
 ///
@@ -173,6 +230,11 @@ pub fn estimated_tip(network: Network) -> Option<u32> {
 pub fn checkpoints(network: Network) -> &'static [Checkpoint] {
     match network {
         Network::Bitcoin => MAINNET_CHECKPOINTS,
+        Network::Testnet4 => TESTNET4_CHECKPOINTS,
+        // Signet's table is the fallback because signet is the only other
+        // chain with checkpoints worth having. A regtest chain starts at its
+        // own genesis, and its floor is wrong here — which is why the test
+        // below pins the three chains that are offered rather than all five.
         _ => SIGNET_CHECKPOINTS,
     }
 }
@@ -378,6 +440,23 @@ pub struct Meta {
     /// The earliest block this wallet could hold a transaction in.
     pub birthday_height: u32,
     pub birthday_hash: String,
+    /// When this wallet was made here, in unix seconds. Absent on an import.
+    ///
+    /// A wallet Sieve created cannot hold a payment older than itself, so this
+    /// is what lets its birthday be moved forward to the chain tip the first
+    /// time it connects. An imported wallet has no such guarantee — its seed
+    /// may have been in use for years — which is why only `create` sets it.
+    #[serde(default)]
+    pub created_at: Option<u64>,
+    /// The birthday is a placeholder waiting for a real chain tip.
+    ///
+    /// A checkpoint is a height *and* a hash, and a hash can only come from
+    /// the chain — so a wallet made offline has to start at the newest
+    /// checkpoint compiled into the binary, which on a chain with only a
+    /// genesis checkpoint means scanning everything. This says "that figure is
+    /// a floor, not a birthday", and the node replaces it once it has a tip.
+    #[serde(default)]
+    pub birthday_pending: bool,
     /// Which derivation paths this wallet watches. Recorded so a later build
     /// that supports more paths does not silently start scanning for coins
     /// that were never derived.
@@ -484,7 +563,41 @@ fn default_primary() -> accounts::ScriptType {
     accounts::ScriptType::Taproot
 }
 
+/// How far back of the tip a freshly made wallet starts watching.
+///
+/// Not zero, and the reason is the gap between making a wallet and first
+/// connecting it. Somebody can create a wallet, hand out a receiving address
+/// and be paid before Sieve is ever online — so the birthday is walked back by
+/// the time that has passed since creation, plus this. `SCAN_MARGIN`'s
+/// argument applies unchanged: rounding earlier costs seconds of filters, and
+/// rounding later loses a payment.
+pub const BIRTHDAY_MARGIN: u32 = 2_016;
+
 impl Meta {
+    /// Where a newly made wallet should start watching, given the chain tip.
+    ///
+    /// `now` and the recorded creation time are both wall-clock, so this is an
+    /// estimate — but it is an estimate that can only err early: ten minutes a
+    /// block is the *average*, blocks come faster than that as often as slower,
+    /// and `BIRTHDAY_MARGIN` covers a fortnight of drift on top.
+    ///
+    /// `None` when there is nothing to move: an imported wallet, a wallet whose
+    /// birthday is already real, or a tip below where it would land anyway.
+    pub fn tip_birthday(&self, tip_height: u32, now: u64) -> Option<u32> {
+        if !self.birthday_pending {
+            return None;
+        }
+        let created = self.created_at?;
+        let elapsed = now.saturating_sub(created);
+        let blocks = (elapsed / 600).min(u64::from(u32::MAX)) as u32;
+        let candidate = tip_height
+            .saturating_sub(blocks)
+            .saturating_sub(BIRTHDAY_MARGIN);
+        // Never earlier than where it would have started anyway — that would
+        // be a longer scan, which is the thing this exists to avoid.
+        (candidate > self.birthday_height).then_some(candidate)
+    }
+
     pub fn new(
         network: Network,
         birthday: Checkpoint,
@@ -499,6 +612,8 @@ impl Meta {
             network: network.to_string(),
             birthday_height: birthday.height,
             birthday_hash: birthday.hash.to_owned(),
+            created_at: None,
+            birthday_pending: false,
             script_types,
             primary,
             scanned_to: None,
@@ -606,6 +721,8 @@ impl Meta {
             network: Network::Signet.to_string(),
             birthday_height: legacy.height,
             birthday_hash: legacy.hash,
+            created_at: None,
+            birthday_pending: false,
             script_types: default_script_types(),
             primary: default_primary(),
             scanned_to: None,
@@ -1218,15 +1335,25 @@ pub fn create(
     // The passphrase is recorded as a fact, never as a value: signing has to
     // know to ask for it, and a wallet that forgot would refuse to spend with
     // no way for anybody to work out why.
-    Meta::new(
+    let mut meta = Meta::new(
         network,
         birthday,
         script_types.to_vec(),
         primary,
         name,
         bip39_passphrase.is_some(),
-    )
-    .save(paths)?;
+    );
+    // Made here, so it cannot hold a payment older than this moment — which is
+    // what lets the node move its birthday up to the tip on the first connect
+    // instead of scanning from a checkpoint compiled into the binary. The
+    // birthday above stays as the floor until that happens, so a wallet that
+    // is never online still starts somewhere sane.
+    meta.created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs());
+    meta.birthday_pending = meta.created_at.is_some();
+    meta.save(paths)?;
 
     let sealed = vault::seal(mnemonic.as_bytes(), password, &network.to_string(), kdf)?;
     vault::write_atomic(&paths.vault, &sealed)?;
@@ -1454,6 +1581,142 @@ mod tests {
             "wallets live in a directory named for the app, not the vendor: {}",
             root.display()
         );
+    }
+
+    /// Every floor checkpoint is the chain's real genesis block.
+    ///
+    /// A checkpoint is a height and a hash, and the node will not take one
+    /// half. A mistyped hash is not a subtle bug — it is a chain that refuses
+    /// to start — and these are sixty-four characters copied by hand. The
+    /// `bitcoin` crate can compute a genesis hash without a network, so the
+    /// floors are checked rather than trusted.
+    #[test]
+    fn the_floor_checkpoints_are_the_real_genesis_blocks() {
+        use bdk_wallet::bitcoin::blockdata::constants::genesis_block;
+        for network in super::NETWORKS {
+            let floor = super::checkpoints(network)
+                .last()
+                .expect("every offered chain has a floor checkpoint");
+            assert_eq!(floor.height, 0, "{network:?} floor is not genesis");
+            assert_eq!(
+                floor.hash,
+                genesis_block(network).block_hash().to_string(),
+                "{network:?} genesis hash does not match the chain"
+            );
+        }
+    }
+
+    /// Every offered chain has its own checkpoints.
+    ///
+    /// `checkpoints` falls through to signet for anything it does not name, so
+    /// a chain added to `NETWORKS` and forgotten here would start at signet's
+    /// genesis — a node that cannot sync, for a reason nothing on screen would
+    /// explain. The genesis test above would catch it; this one says why.
+    #[test]
+    fn no_offered_chain_borrows_another_chains_checkpoints() {
+        for network in super::NETWORKS {
+            for other in super::NETWORKS {
+                if network == other {
+                    continue;
+                }
+                assert_ne!(
+                    super::checkpoints(network).as_ptr(),
+                    super::checkpoints(other).as_ptr(),
+                    "{network:?} and {other:?} share a checkpoint table"
+                );
+            }
+        }
+    }
+
+    /// A picker index means the chain at that index, and nothing else.
+    ///
+    /// This is the test for the bug that was there before testnet4 existed:
+    /// both pickers clamped their index with `.min(1)` against a list of two,
+    /// so a third chain would have quietly become the second. Somebody would
+    /// have chosen testnet4 and been given a signet wallet, with every screen
+    /// agreeing it was signet.
+    #[test]
+    fn a_picker_index_is_the_chain_at_that_index() {
+        use bdk_wallet::bitcoin::Network;
+        assert_eq!(super::network_at(0), Network::Bitcoin);
+        assert_eq!(super::network_at(1), Network::Signet);
+        assert_eq!(super::network_at(2), Network::Testnet4);
+        // Past the end is the default, not the last entry.
+        assert_eq!(super::network_at(3), Network::Bitcoin);
+        assert_eq!(super::network_at(usize::MAX), Network::Bitcoin);
+
+        // Every offered chain is labelled — the match is exhaustive, so that
+        // much is the compiler's job — and no two share a label, which is not.
+        let labels: Vec<&str> = super::NETWORKS
+            .iter()
+            .copied()
+            .map(super::network_label)
+            .collect();
+        let mut unique = labels.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len(), "two chains share a label");
+    }
+
+    /// A new wallet's birthday moves to the tip, and only ever errs early.
+    ///
+    /// This is the one piece of arithmetic here that can lose money: a
+    /// birthday past where a payment landed skips the block holding it, and
+    /// nothing afterwards reports a coin that was never looked for. So the
+    /// cases below are all about *not* moving it far enough rather than about
+    /// moving it accurately.
+    #[test]
+    fn a_new_wallets_birthday_moves_toward_the_tip_but_never_past_a_payment() {
+        let mut meta = Meta::new(
+            Network::Signet,
+            SIGNET_CHECKPOINTS[0],
+            vec![accounts::ScriptType::Taproot],
+            accounts::ScriptType::Taproot,
+            None,
+            false,
+        );
+
+        // An import never moves: its seed may have been spending for years.
+        assert_eq!(meta.tip_birthday(400_000, 1_800_000_000), None);
+
+        meta.birthday_pending = true;
+        meta.created_at = Some(1_800_000_000);
+
+        // Made a moment ago: back by the margin and no further.
+        let now = 1_800_000_000;
+        assert_eq!(
+            meta.tip_birthday(400_000, now),
+            Some(400_000 - BIRTHDAY_MARGIN)
+        );
+
+        // Made a fortnight ago and only now opened. Somebody can hand out an
+        // address the day they make a wallet and be paid before Sieve is ever
+        // online, so the gap has to be walked back as well as the margin.
+        let fortnight = 14 * 24 * 60 * 60;
+        let expected = 400_000 - (fortnight / 600) - BIRTHDAY_MARGIN;
+        assert_eq!(
+            meta.tip_birthday(400_000, now + u64::from(fortnight)),
+            Some(expected)
+        );
+        assert!(
+            expected < 400_000 - BIRTHDAY_MARGIN,
+            "a longer gap must start earlier, not later"
+        );
+
+        // Long enough offline that the walk-back lands below the floor: the
+        // floor wins, because moving the birthday *earlier* than where it
+        // already was is a longer scan, which is what this exists to avoid.
+        assert_eq!(
+            meta.tip_birthday(400_000, now + 60 * 60 * 24 * 365 * 20),
+            None
+        );
+
+        // A tip below the floor cannot move anything either.
+        assert_eq!(meta.tip_birthday(1_000, now), None);
+
+        // Once adopted it never moves again — the wallet has real history now.
+        meta.birthday_pending = false;
+        assert_eq!(meta.tip_birthday(400_000, now), None);
     }
 
     /// Preferences and wallets must not share a directory.

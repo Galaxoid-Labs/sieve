@@ -145,8 +145,8 @@ const GLOBAL_CSS: &str = ".qr-ground { background-color: #ffffff; border-radius:
        transform: rotate(-14deg); \
      } \
      .mark-bitcoin { color: alpha(@accent_bg_color, 0.20); } \
-     .mark-signet { color: alpha(#e01b24, 0.20); } \
-     .mark-testnet { color: alpha(#33d17a, 0.20); } \
+     .mark-signet { color: alpha(#6f1d5d, 0.20); } \
+     .mark-testnet { color: alpha(#0aab2f, 0.20); } \
      /* The logo carries its own tilt and its own colour; all this \
         adds is the room around it. */ \
      .welcome-mark { margin-bottom: 10px; } \
@@ -204,7 +204,12 @@ fn main() {
     // sticker on it. The test networks keep colours of their own, written
     // down: they are the half of this that has to stay recognisable, and a
     // theme whose accent happened to be green would otherwise make a mainnet
-    // wallet look like a testnet one. Kept at a fifth of an alpha so the hue
+    // wallet look like a testnet one.
+    //
+    // The two test colours are mempool.space's, which is where anybody using
+    // these chains already looks: signet purple and testnet4 green mean the
+    // same thing in both places, so the association is borrowed rather than
+    // invented. Kept at a fifth of an alpha so the hue
     // reads the same against a light or a dark card.
     relm4::set_global_css(GLOBAL_CSS);
 

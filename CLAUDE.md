@@ -68,7 +68,8 @@ These are not preferences. Violating one is a bug, not a style difference.
    one of only two places a colour is hardcoded: it needs dark modules on a light ground to scan, so it
    carries its own white ground in both themes via the `.qr-ground` class rather than sitting
    on a card, which is dark exactly when the code needs light. The other is the balance card's
-   ₿ mark, tinted by network — orange for mainnet, red for signet, green for the testnets — which
+   ₿ mark, tinted by network — the desktop accent for mainnet, and mempool.space's own purple
+   for signet and green for the testnets, so the association is borrowed rather than invented — which
    is identity rather than decoration: a glance at the card should say which chain the money is
    on. Kept at a fifth of an alpha so the hue reads on a light or a dark card. Otherwise: no
    hardcoded colors, ever. Use Adwaita style classes (`suggested-action`, `destructive-action`, `error`,
@@ -298,6 +299,7 @@ opt-in, disclosed, and justified in the row that enables it.
 | Scan completed | A few blocks below the tip — BDK's checkpoint is at the tip, so `ScanType::Sync` and `walk_back_max_reorg` |
 | Scan interrupted | `Meta::scanned_to`, the recorded resume point |
 | Never scanned | The birthday |
+| Made here, never connected | The tip, walked back — see below |
 
 The middle row is the one that needed building. `bdk_kyoto` matches each filter as it arrives but
 only produces a wallet update on `Event::FiltersSynced` — the end of the *whole* sync — so BDK's
@@ -308,6 +310,27 @@ the node will not take one half. The height is derived from kyoto's progress fra
 float rather than a height, and then pulled back by `SCAN_MARGIN` (2,016 blocks) — a resume point
 past where the scan truly reached would skip blocks, and skipped blocks are missing money.
 Rescanning a difficulty period costs seconds.
+
+**A wallet made here starts near the tip, and could not before.** A checkpoint is a height
+*and* a hash, and a hash only comes from the chain — so creation, which happens offline, could
+only fall back to the newest checkpoint compiled into the binary. On a chain whose only
+checkpoint is genesis that meant scanning everything, for a wallet that by construction has no
+history at all.
+
+`create` records `Meta::created_at` and sets `birthday_pending`, keeping the compiled
+checkpoint as a floor. `Session::adopt_tip_birthday` then asks the node for its tip, computes
+`Meta::tip_birthday`, and asks for the header at that *exact* height for its hash — not the
+tip's own hash, because a checkpoint whose height and hash disagree is refused and one taken
+from the wrong block is worse than refused. It persists, clears the flag, and calls
+`rescan_from` so the first run benefits rather than only the second. Every failure leaves the
+wallet on the floor: slower, always correct.
+
+**Only `create` sets it, and the arithmetic errs early.** An imported seed may have been
+spending for years, so moving *its* birthday forward would skip the blocks holding its coins.
+And a wallet made here can still be paid before it is ever online — hand out an address, get
+paid, open Sieve a fortnight later — so the birthday is walked back by the time since creation
+*plus* `BIRTHDAY_MARGIN` (2,016 blocks). This is the one piece of arithmetic here that can lose
+money, which is why its test is about not moving far enough rather than about accuracy.
 
 **Do not try to hand the node a stored header chain.** `bdk_kyoto::build_with_wallets` sets
 `self.chain_state(ChainState::Checkpoint(cp_min))` one line before it builds, so any snapshot is
@@ -459,6 +482,42 @@ preferences, and `PACKAGING.md` tells a packager not to add a cleanup hook to
 be helpful. Deleting one wallet from inside Sieve already exists and is the
 right route — **Remove this wallet**, confirmed and `destructive-action`.
 
+## Three chains, and the two traps in adding one
+
+Mainnet, signet and testnet4. Testnet4 is for somebody developing against the
+chain their own software targets, and it was worth adding because it has the
+peers for it — `cargo test -- --ignored --nocapture filter_peers` asks the
+seeders and reports 23 filter-serving addresses against a `REQUIRED_PEERS` of
+8, next to signet's 35. That number is the question: a chain with peers but no
+*filter-serving* peers cannot be scanned at all, because `REQUIRED_PEERS` is
+also kyoto's `FilterHeaderAgreements` threshold — see the Tor note above for
+what that failure looks like, which is a scan frozen at exactly 25%.
+
+`wallet::NETWORKS` is the one table. Both pickers build their model from it and
+read their index back through `wallet::network_at`, so the list and the meaning
+of an index cannot drift apart.
+
+**Two things were silently wrong for a third chain, and both are now tests.**
+
+1. **`.min(1)`.** Both screens clamped the picker index against a list of two,
+   so a third chain became the second: choosing testnet4 would have made a
+   *signet* wallet, with every screen then agreeing it was signet.
+   `a_picker_index_is_the_chain_at_that_index`.
+2. **A missing port.** `resolve_seeds_directly` matched the p2p port with a
+   catch-all returning *no addresses*, so an unnamed chain seeded nothing at
+   all — no error, no peers, a progress bar at zero, indistinguishable from a
+   slow network. It is `p2p_port` now, and `every_offered_chain_has_a_port`
+   guards it, with `every_network_asks_its_own_seeds_and_prefers_filter_nodes`
+   doing the same for the seed list.
+
+Checkpoints are genesis-only for testnet4, deliberately: a checkpoint needs a
+real block hash, which cannot be derived here, and a wrong one is a node that
+will not start. A genesis hash *can* be computed locally, so it is the one
+written down, and `the_floor_checkpoints_are_the_real_genesis_blocks` checks
+all three against `genesis_block` rather than trusting sixty-four hand-copied
+characters. Scanning testnet4 from the beginning costs minutes, which is why it
+needs no others and mainnet needs seven.
+
 ## The name
 
 **Sieve**, one word, and it stays that way. The GNOME naming guidance asks for
@@ -609,13 +668,14 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 202 tests; no network, no display
+cargo test                       # 207 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging
 GTK_DEBUG=interactive cargo run  # widget inspector
 
 # Slow ones, opted into by name:
+cargo test -- --ignored --nocapture filter_peers
 cargo test --release -- --ignored --nocapture kdf_cost
 cargo test --release -- --ignored --nocapture repeated_words
 ```

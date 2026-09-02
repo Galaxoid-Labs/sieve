@@ -599,10 +599,7 @@ fn entropy_note(words: usize) -> String {
 ///
 /// Order matters twice: it is what the picker shows, and it is what an index
 /// out of the picker means.
-const NETWORKS: [bdk_wallet::bitcoin::Network; 2] = [
-    bdk_wallet::bitcoin::Network::Bitcoin,
-    bdk_wallet::bitcoin::Network::Signet,
-];
+const NETWORKS: [bdk_wallet::bitcoin::Network; 3] = wallet::NETWORKS;
 
 /// Three distinct 1-based positions in a phrase of `words` words.
 fn pick_challenge(words: usize) -> [usize; 3] {
@@ -797,10 +794,11 @@ impl Component for Onboarding {
                                     // somebody change this to reach the chain
                                     // their money is on taught nothing; the
                                     // warning below is what carries the point.
-                                    set_model: Some(&gtk::StringList::new(&[
-                                        "Bitcoin (real coins)",
-                                        "Signet (test coins)",
-                                    ])),
+                                    // From the same table the index is read
+                                    // against, so they cannot disagree.
+                                    set_model: Some(&gtk::StringList::new(
+                                        &NETWORKS.map(wallet::network_label)
+                                    )),
                                     connect_selected_notify[sender] => move |row| {
                                         sender.input(OnboardingMsg::NetworkChanged(row.selected()));
                                     },
@@ -947,8 +945,9 @@ impl Component for Onboarding {
                                         } else {
                                             wallet::PhraseLength::Twelve
                                         },
-                                        network: NETWORKS
-                                            [(network_row.selected() as usize).min(1)],
+                                        network: wallet::network_at(
+                                            network_row.selected() as usize
+                                        ),
                                         acknowledged: acknowledge_row.is_active(),
                                         dice_sides: dice_expander
                                             .enables_expansion()
@@ -1248,7 +1247,7 @@ impl Component for Onboarding {
                 let missing = what_is_missing(FormState {
                     password_long_enough: pass.text().len() >= MIN_PASSWORD,
                     passwords_match: pass.text() == confirm.text(),
-                    mainnet: NETWORKS[(network.selected() as usize).min(1)]
+                    mainnet: wallet::network_at(network.selected() as usize)
                         == bdk_wallet::bitcoin::Network::Bitcoin,
                     acknowledged: acknowledge.is_active(),
                     passphrase_wanted: wanted,
@@ -1391,7 +1390,7 @@ impl Component for Onboarding {
             },
 
             OnboardingMsg::NetworkChanged(index) => {
-                self.network = NETWORKS[(index as usize).min(1)];
+                self.network = wallet::network_at(index as usize);
                 self.mainnet = self.network == bdk_wallet::bitcoin::Network::Bitcoin;
             }
 

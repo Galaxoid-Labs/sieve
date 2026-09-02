@@ -2942,9 +2942,11 @@ impl App {
 
     /// Fetch a price, if the person asked for one and it would mean anything.
     ///
-    /// Never on a test network: signet coins have no price, so a number there
-    /// would be fiction, and the request would be a disclosure bought for
-    /// nothing.
+    /// Never on a test network: signet and testnet4 coins have no price, so a
+    /// number there would be fiction, and the request would be a disclosure
+    /// bought for nothing. The test is `== Bitcoin` rather than a list of test
+    /// chains, so a chain added later is off by default rather than leaking
+    /// until somebody remembers.
     fn fetch_price(&self, sender: &ComponentSender<Self>) {
         if !self.settings.show_fiat {
             return;

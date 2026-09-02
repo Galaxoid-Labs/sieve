@@ -223,7 +223,14 @@ pub fn seeds(network: &str) -> Vec<String> {
             "seed.tbtc.petertodd.org",
             "seed.testnet.bitcoin.sprovoost.nl",
         ],
+        // achownodes is first because it is the only one of the three that
+        // answers the `x49` prefix — measured, not assumed: wiz.biz returns
+        // ordinary nodes for the plain name and nothing for any service-bit
+        // prefix, so seeding through it cannot ask for filter-serving peers at
+        // all. kyoto's own list is the other two, which is why a testnet4 scan
+        // would otherwise be filling its connection slots at random.
         "testnet4" => &[
+            "seed.testnet4.achownodes.xyz",
             "seed.testnet4.bitcoin.sprovoost.nl",
             "seed.testnet4.wiz.biz",
         ],
@@ -331,6 +338,18 @@ mod tests {
         );
         assert!(!seeds("signet").is_empty());
         assert!(seeds("regtest").is_empty(), "a local chain has no seeds");
+
+        // Every chain the interface offers has to have somewhere to look.
+        // `seeds` falls through to an empty list for anything it does not
+        // name, so a chain added to the pickers and forgotten here would start
+        // with no peers at all and simply never sync — with nothing on screen
+        // to say why.
+        for network in crate::wallet::NETWORKS {
+            assert!(
+                !seeds(&network.to_string()).is_empty(),
+                "{network} is offered in the interface with no DNS seeds"
+            );
+        }
         // Signet seeds on mainnet would be a slow way to find nothing.
         assert!(!seeds("bitcoin").iter().any(|h| h.contains("signet")));
     }

@@ -138,13 +138,6 @@ pub struct Restore {
 /// chain their money is on was a step that taught nothing. The
 /// acknowledgement below is what carries the warning now, and it is a
 /// sentence rather than a wrong default.
-fn networks() -> [bdk_wallet::bitcoin::Network; 2] {
-    [
-        bdk_wallet::bitcoin::Network::Bitcoin,
-        bdk_wallet::bitcoin::Network::Signet,
-    ]
-}
-
 impl Restore {
     fn chosen_device(&self) -> Option<&crate::hardware::Found> {
         self.devices.get(self.device_index as usize)
@@ -506,7 +499,11 @@ impl Component for Restore {
                     #[name(network_row)]
                     adw::ComboRow {
                         set_title: "Chain",
-                        set_model: Some(&gtk::StringList::new(&["Bitcoin (real coins)", "Signet (test coins)"])),
+                        // Built from the table the index is read against, so
+                        // the two cannot disagree about what row 2 means.
+                        set_model: Some(&gtk::StringList::new(
+                            &wallet::NETWORKS.map(wallet::network_label)
+                        )),
                         connect_selected_notify[sender] => move |row| {
                             sender.input(RestoreMsg::NetworkChanged(row.selected()));
                         },
@@ -704,7 +701,7 @@ impl Component for Restore {
                 // Networks have different checkpoints, so the choices change
                 // with them — and an index into the old list means nothing in
                 // the new one.
-                self.network = networks()[(index as usize).min(1)];
+                self.network = wallet::network_at(index as usize);
                 self.fill_birthdays();
                 // The chosen index may not exist in the new list — signet has
                 // two checkpoints where mainnet has seven — and an index past
@@ -775,7 +772,7 @@ impl Component for Restore {
                 if submission.kind == CredentialKind::Mnemonic {
                     submission.credential = Secret(self.phrase());
                 }
-                let network = networks()[(submission.network_index as usize).min(1)];
+                let network = wallet::network_at(submission.network_index as usize);
 
                 if network == bdk_wallet::bitcoin::Network::Bitcoin && !submission.acknowledged {
                     self.error =
@@ -1035,10 +1032,7 @@ mod tests {
     /// found nothing — with the screen reporting exactly what was asked for.
     #[test]
     fn every_choice_selects_the_checkpoint_it_names() {
-        for network in [
-            bdk_wallet::bitcoin::Network::Bitcoin,
-            bdk_wallet::bitcoin::Network::Signet,
-        ] {
+        for network in wallet::NETWORKS {
             let choices = birthday_choices(network);
             let checkpoints = wallet::checkpoints(network);
             assert_eq!(

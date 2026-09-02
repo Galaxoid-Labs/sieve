@@ -399,9 +399,17 @@ mainnet as well, from a cold start and from an interrupted one.
       thing the field must not do. The warning changes with the form, since the two cases are
       not equally bad and the worse one looks safer — a transaction that pays nobody proves
       which outputs are yours, where a payment only lets somebody guess.
-- [ ] Pay a silent payment address (BIP-352). Contained, needs no server, and the ordering
-      falls out of coin control — see `SILENT_PAYMENTS.md`, which also records why *receiving*
-      is blocked on tweak data a filter wallet cannot compute.
+- [ ] Pay a silent payment address (BIP-352). **Designed, not built** — `SILENT_PAYMENTS.md`
+      has the implementation plan. The ordering does *not* simply fall out of coin control,
+      which is what an earlier draft of this line assumed: the output script needs the input
+      *private* keys, and `node::plan` is watch-only by rule, so a silent payment is the first
+      payment type whose script is filled in between building and signing. The plan is a
+      correctly-sized placeholder P2TR output at plan time and a swap at signing, with the
+      derivation reading the PSBT rather than the draft — a wrong `P_k` is not a failed
+      payment but a valid output nobody holds the key for. Hardware wallets are refused up
+      front: a device cannot sum the input private keys, and `async-hwi` has no BIP-376. The
+      same file records why *receiving* is blocked on tweak data a filter wallet cannot
+      compute.
 - [x] More than one recipient in a transaction. The first keeps its own row — it carries a
       pasted BIP-21 request and Max, which only means something with one person to send
       everything to — and the rest are "Also pay" rows that can be taken away again. Adding one
@@ -410,6 +418,25 @@ mainnet as well, from a cold start and from an interrupted one.
 
 Exercised end to end on signet: built, signed, broadcast, shown as pending, and confirmed on
 its own through ordinary filter sync — no explorer, no server told which transaction to watch.
+
+**Testnet4 is offered alongside mainnet and signet**, for developing against the chain your
+own software targets. It was worth adding because it has the peers for it, which is the only
+question that matters for a filter wallet: `cargo test -- --ignored --nocapture filter_peers`
+asks the seeders and reports 23 filter-serving addresses against a `REQUIRED_PEERS` of 8, next
+to signet's 35 — and a scan on it completes rather than stalling at the filter-header quarter.
+Two things were silently wrong for any third chain and are now tests: both pickers clamped
+their index with `.min(1)`, so choosing testnet4 would have made a *signet* wallet; and the
+p2p port was matched with a catch-all returning no addresses, so an unnamed chain seeded
+nothing at all — no error, no peers, a progress bar at zero.
+
+**A newly made wallet now starts watching near the tip** rather than at whatever checkpoint was
+compiled into the binary. It could not before, and the reason is that a checkpoint is a height
+*and* a hash: a hash only comes from the chain, so creation could not know one. `create` records
+when the wallet was made, and the first session asks the node for a tip, walks back by the time
+since creation plus a margin, takes the header at that exact height for its hash, and narrows
+the scan already running. It errs early by construction — somebody can make a wallet, hand out
+an address and be paid before Sieve is ever online. This also cures mainnet quietly starting
+four months back on a wallet with no history at all.
 
 ### M4a — Hardware signers — BUILT, UNTESTED AGAINST HARDWARE
 *Done when: a payment can be built in Sieve, confirmed on a device screen, and broadcast, with
