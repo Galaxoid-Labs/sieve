@@ -111,6 +111,14 @@ jobs:
           test -f /usr/lib/udev/rules.d/51-sieve-hardware.rules
           desktop-file-validate /usr/share/applications/com.galaxoidlabs.Sieve.desktop
           udevadm verify /usr/lib/udev/rules.d/51-sieve-hardware.rules
+          # The package has to carry its install script, and that script has to
+          # say where the wallets are without touching them. A missing
+          # `install=` is silent: the package builds, installs and runs, and the
+          # only sign is somebody removing Sieve and being told nothing.
+          bsdtar -xOf packaging/aur/*.pkg.tar.zst .INSTALL > /tmp/install.sh
+          grep -q 'Your wallets have not been removed' /tmp/install.sh
+          # And it must stay a message rather than becoming a cleanup hook.
+          ! grep -qE '\brm\b|rmdir|unlink|-delete' /tmp/install.sh
       - name: What a reviewer would say about it
         run: namcap packaging/aur/*.pkg.tar.zst || true
       - uses: actions/upload-artifact@v7

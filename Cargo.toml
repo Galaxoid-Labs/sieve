@@ -21,7 +21,13 @@ priority = "optional"
 extended-description = """
 Sieve syncs by downloading BIP157/158 compact block filters and matching them
 locally, so no server is told which addresses belong to you. Every outbound
-connection can be routed through Tor."""
+connection can be routed through Tor.
+
+Removing this package does not remove your wallets. They are in
+~/.local/share/sieve, and preferences are in ~/.config/sieve. Delete those
+directories only if you can restore the wallet without them: your recovery
+phrase written down, or the hardware device it was imported from. That is the
+only other way back to the coins."""
 # dpkg-shlibdeps reads the binary, which is the only list that cannot drift
 # from what it actually links — as a hand-written one already had.
 depends = "$auto"
@@ -45,6 +51,21 @@ assets = [
 [package.metadata.generate-rpm]
 # rpm's own find-requires reads the binary, as dpkg-shlibdeps does above.
 auto-req = "auto"
+summary = "A privacy-focused Bitcoin wallet that syncs with compact block filters"
+# The same words the .deb carries. Said in both because this is where somebody
+# reads about the package before removing it, and no package manager on Linux
+# removes anything from a home directory — see PACKAGING.md, which also tells a
+# packager not to add a hook that does.
+description = """
+Sieve syncs by downloading BIP157/158 compact block filters and matching them
+locally, so no server is told which addresses belong to you. Every outbound
+connection can be routed through Tor.
+
+Removing this package does not remove your wallets. They are in
+~/.local/share/sieve, and preferences are in ~/.config/sieve. Delete those
+directories only if you can restore the wallet without them: your recovery
+phrase written down, or the hardware device it was imported from. That is the
+only other way back to the coins."""
 assets = [
     { source = "target/release/sieve", dest = "/usr/bin/sieve", mode = "755" },
     { source = "data/com.galaxoidlabs.Sieve.desktop", dest = "/usr/share/applications/com.galaxoidlabs.Sieve.desktop", mode = "644" },

@@ -1,0 +1,30 @@
+# Said at the one moment it is useful, and it says nothing else.
+#
+# No package manager on Linux removes files from a home directory — pacman's
+# hooks run as root against system paths, as dpkg's and rpm's do — so removing
+# Sieve leaves every wallet exactly where it was. That is the right behaviour
+# for a wallet rather than an oversight: a reinstall, a repository change or a
+# distribution upgrade must never be able to take a sealed seed with it.
+#
+# Which leaves one problem, and this fixes it: the only person who can clear
+# this up is the one reading their terminal after `pacman -R sieve`, and they
+# cannot do it without being told where to look.
+#
+# **This must never delete anything.** PACKAGING.md says so at greater length,
+# to the packager who will eventually be tempted to be helpful here. A hook
+# that removed ~/.local/share/sieve would destroy coins for anybody who had not
+# written their recovery phrase down, during an operation that looks routine.
+post_remove() {
+	cat <<'EOF'
+
+Your wallets have not been removed.
+
+  wallets      ~/.local/share/sieve
+  preferences  ~/.config/sieve
+
+Delete those directories only if you can restore the wallet without them —
+your recovery phrase written down, or the hardware device it was imported
+from. That is the only other way back to the coins.
+
+EOF
+}

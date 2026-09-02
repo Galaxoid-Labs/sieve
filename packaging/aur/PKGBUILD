@@ -7,6 +7,10 @@ pkgdesc="A privacy-focused Bitcoin wallet that syncs with compact block filters"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Galaxoid-Labs/sieve"
 license=('MIT')
+# Printed after `pacman -R sieve`, and it prints rather than deletes: removing
+# the package leaves every wallet where it is, which is correct for a wallet
+# and useless if nobody is told where that is. See sieve.install.
+install=sieve.install
 # GTK 4 and libadwaita are the interface; sqlite holds public descriptors and
 # transaction history; openssl is used by the HTTP client for prices and fees.
 # systemd-libs is libudev, which the hardware-signer support links through

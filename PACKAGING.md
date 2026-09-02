@@ -552,9 +552,19 @@ So the handling is documentation, in the two places somebody looks:
   copy button and a button that opens each one, under a description saying that
   removing Sieve leaves them in place and that the wallet directory should be
   deleted only by somebody holding the recovery phrase.
-- **In the package.** The `.deb`, `.rpm` and AUR descriptions, and the release
-  notes, say the same sentence. A packager reading this file should not add a
-  cleanup hook to be helpful.
+- **In the package.** The `.deb`'s `extended-description` and the `.rpm`'s
+  `description` both carry it, and the AUR package prints it from
+  `post_remove` — which is the one moment it is useful, right after
+  `pacman -R sieve`. A packager reading this file should not add a cleanup hook
+  to be helpful.
+
+  **`packaging/aur/sieve.install` prints and must never delete.** It is the
+  obvious place to be helpful and the worst one: a hook that removed
+  `~/.local/share/sieve` would destroy coins for anybody who had not written
+  their recovery phrase down, during an operation — a repository change, a
+  distribution upgrade — that looks entirely routine. The release workflow
+  extracts the `.INSTALL` from the built package and fails if the message is
+  missing or if anything resembling a removal has appeared in it.
 
 Deleting a wallet from inside Sieve is a separate thing and already exists —
 **Remove this wallet** in preferences, `destructive-action` styled and behind a
