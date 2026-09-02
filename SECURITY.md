@@ -26,6 +26,12 @@ replace the binary. `PR_SET_DUMPABLE(0)` raises the cost of the first, and
 that is all it does. No user-space wallet defends against this; a wallet that
 claims otherwise is lying.
 
+**A hardware signer moves that last line**, which is the only thing in this
+model that does. The keys are never in this process, so reading its memory
+yields nothing to spend with, and the device's own screen and button are what
+an attacker on this machine has to get past. See "Keys that are not on this
+machine" below for what that does and does not cover.
+
 ## Key material
 
 **Where it comes from** — `src/wallet/mod.rs`
@@ -150,6 +156,60 @@ rather than anything Sieve can do. On the machine this was written on, swap is
 a file on a LUKS volume and a zram device with no disk backing, so both are
 covered — but that is this machine, not a guarantee.
 
+## Keys that are not on this machine — `src/hardware.rs`
+
+A wallet imported from a hardware signer has **no vault**, because there is no
+seed to seal. Everything above about Argon2, XChaCha20-Poly1305 and decrypting
+at the point of use describes a wallet Sieve holds keys for, and none of it
+applies here: `Meta::watch_only` records that there is nothing sealed, and the
+descriptors on disk are public. The private keys never exist in this process,
+which removes the whole class of memory disclosure the previous section is
+careful about — swap, reallocated `String`s, GTK's widget buffers. It is the
+strongest position Sieve can be in and it is worth saying plainly.
+
+**Untested against real hardware.** Everything checkable without a device on
+the desk is checked; nothing that needs one is. Treat this section as
+describing what the code does rather than what has been observed to work.
+
+Every exchange with a device, and what each one is:
+
+| | |
+|---|---|
+| `enumerate`, `get_version` | which devices are attached, and what they are |
+| `get_master_fingerprint` | four bytes identifying the seed on the device |
+| `get_extended_pubkey` | a public account key at `m/purpose'/coin'/0'` |
+| `display_address` | asks the device to show an address on its own screen |
+| `sign_tx` | a PSBT out, partial signatures back |
+
+**What comes back from a device is checked rather than believed.** Signatures
+arrive as a PSBT, and turning them into witnesses is done from the wallet's own
+descriptors — `finalize_psbt`, which fails rather than broadcasting when an
+input is not properly signed. Nothing a device returns is broadcast on its
+word.
+
+**The device is identified before it is asked to sign.** Its master fingerprint
+is compared against the one already written into this wallet's descriptors, and
+a mismatch refuses with a reason. Signing with the wrong device otherwise
+produces signatures that fail to finalise much later, with nothing to explain
+why.
+
+**Verifying an address on the device is the one check this program cannot make
+for itself.** Sieve derives the address on this machine and draws it on this
+machine's screen; code that has got onto the machine can do both differently
+and the money goes elsewhere with nothing looking wrong. A device deriving its
+own copy and showing it on its own screen is outside that. **Sieve never
+reports "verified"** — it cannot see the device's screen, so a tick drawn by
+this program would be precisely the reassurance an attacker needs.
+
+**udev rules are the reason a device is invisible on Linux**, and they are
+shipped by the package rather than by the application. A build from source
+installs none, which is why an empty device list says so instead of leaving a
+blank. What they grant is ordinary: the logged-in user's access to the device
+node. Any process running as that user can then also talk to the signer, which
+is the same boundary as everything else in this file — an attacker already
+running as you can ask the device to sign, and the device's own screen and
+button are what stand in the way. That is the reason a device has them.
+
 ## What leaves the machine
 
 Every outbound connection, and what it discloses:
@@ -165,6 +225,12 @@ Every outbound connection, and what it discloses:
 
 The last three are off by default, and each says what it costs at the switch
 that turns it on. The first two are inherent to being a wallet.
+
+Not in that table because it is not a network connection: a **hardware signer
+on the USB cable** receives an account derivation path, an address index and a
+PSBT — which together describe this wallet's addresses and one payment. It goes
+to a device somebody plugged in on purpose and nowhere else, and Tor is not
+involved and could not be.
 
 **Tor** — `src/tor/`
 
@@ -240,7 +306,7 @@ more people can read than the wallet file.
 
 310 crates, audited with `cargo-audit` and governed by `deny.toml`.
 
-**`cargo audit`: no vulnerabilities.** 310 crates against 1,235 RustSec
+**`cargo audit`: no vulnerabilities.** 310 crates against 1,239 RustSec
 advisories, no warnings, nothing yanked. Re-run when this file was last
 revised, not quoted from the pass that first produced it.
 
@@ -278,19 +344,46 @@ for somebody to remember this file.
   running it on every release rather than reading this paragraph.
 - **No review by anybody else.** The vault format and the signing path are the
   two places where that matters most.
+- **The hardware signing path has never been run against a device.** It is
+  written, it is tested everywhere a test can reach without hardware on the
+  desk, and that is not the same thing. `ROADMAP.md` M4a says which order to
+  try it in.
 - **`unsafe`** appears in two files: `main.rs` (three libc calls for
-  hardening) and `tor/daemon.rs` (process control). Both are small, both are
-  syscalls rather than pointer arithmetic, and neither has been reviewed by
-  anyone but their author.
+  hardening) and `tor/daemon.rs` (three for process control, plus `set_var` in
+  its own tests, which Rust 2024 made unsafe and which runs in no shipped
+  code). All of them are syscalls rather than pointer arithmetic, all are
+  small, and none has been reviewed by anyone but their author. Nothing
+  elsewhere in `src/` contains an `unsafe` block — the word appears in two doc
+  comments and nowhere else, which is worth knowing before grep is believed.
 - **Swap** is out of Sieve's hands, as above.
 
 ## If you find something
 
-The repository is public — <https://github.com/Galaxoid-Labs/sieve> — and there
-is **still no security contact**, which is now a gap rather than a consequence.
-Until this section names one, a report has nowhere private to go: an issue is
-public the moment it is filed, and a vulnerability in a wallet should not be
-disclosed that way.
+**Email <jacob@galaxoidlabs.com>.** That is the security contact. It reaches
+one person, because Sieve is written by one — there is no team behind the
+address and no rota, so treat the timeline as best effort rather than as a
+commitment this file is in a position to make.
 
-Enabling GitHub's private vulnerability reporting on the repository is the
-smallest fix, and this section should then say so and give a key.
+**Please do not open a public issue for a vulnerability.** The repository is
+public — <https://github.com/Galaxoid-Labs/sieve> — so an issue is readable by
+everybody from the moment it is filed, which for a wallet means the people who
+would use the finding learn it at the same time as the person who can fix it.
+Anything that is not a vulnerability is welcome as an issue and easier to
+track there.
+
+**There is no PGP key yet**, so mail to that address is unencrypted in transit
+and sits in plaintext on a mail provider's disk. Send enough for the report to
+be understood and acted on, and hold back anything you would rather that
+provider did not keep — a working proof of concept can wait for a channel
+agreed in the reply. The key belongs with the release signing key that
+`PACKAGING.md` describes and that does not exist either; when it is made, this
+section names its fingerprint.
+
+GitHub's private vulnerability reporting is worth enabling on the repository as
+a second route, and this section should say so once it is on.
+
+**What is most worth looking at**, given what the rest of this file admits: the
+vault format and the code that opens it, the signing path — including what a
+hardware device hands back — and any way to make Sieve reveal which addresses
+belong to a wallet, since that last one is the claim the whole program is built
+on.
