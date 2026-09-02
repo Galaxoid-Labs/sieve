@@ -221,7 +221,7 @@ Every outbound connection, and what it discloses:
 | DNS seeds | at startup | to a resolver, that you are looking for Bitcoin peers |
 | Bitfinex | only if dollars are on | your IP, and when you opened a wallet. No wallet data |
 | mempool.space fees | only if switched on | your IP, and that a payment is about to be sent |
-| mempool.space explorer | only when you click | that you looked at one specific transaction |
+| mempool.space explorer | only when you confirm | that you looked at one specific transaction |
 
 The last three are off by default, and each says what it costs at the switch
 that turns it on. The first two are inherent to being a wallet.
@@ -240,6 +240,38 @@ through it: a plain SOCKS5 proxy pretending to be Tor is rejected rather than
 trusted. The node's own DNS seeding, which would have leaked around the proxy,
 is replaced by seeds resolved through Tor. If Tor is on and unreachable, Sieve
 refuses to connect rather than falling back to the clear.
+
+## Findings from the privacy pass
+
+Three, all fixed in the commit that adds this section. The first is the one
+that mattered.
+
+**The opt-in services went out over the clear while Tor was coming up.** The
+proxy was read as `settings.tor.then_some(tor_active).flatten()`, which
+answered `None` for two different situations — Tor switched off, and Tor
+switched on but not yet running — and every caller read `None` as "connect
+directly". It was not a narrow window: the price lookup runs immediately
+*before* the code that starts Tor, so with both switches on, opening the first
+wallet after launch announced to a price service that a Bitcoin wallet at this
+address had just been opened. `start_session` had its own guard and was
+correct; these two did not. The proxy is a three-state `Route` now — `Direct`,
+`Through`, `Refuse` — so there is no value meaning "no proxy" that a
+wanted-but-absent Tor can be mistaken for. A fee lookup in that state falls
+through to the node's own estimate, which needs no third party at all.
+
+**The explorer link asks first.** Opening a transaction on mempool.space is the
+only outbound request Tor cannot cover, because it leaves the process for the
+system browser — carrying this machine's real address and whatever the browser
+discloses, alongside a transaction that belongs to the person clicking. That
+pairing is the most identifying thing available here, and it was one click away
+in a screen people open to read a fee. It is a confirmation now, worded
+differently when Tor is on, because "Tor is on and this still goes in the
+clear" is the part that would otherwise surprise somebody.
+
+**Copying a descriptor says where the copy goes.** A descriptor names every
+address the wallet will ever have, and the dialog already said so; what it did
+not say is that most desktops keep a clipboard history on disk. The file export
+sitting beside it is the tidier route and now reads that way.
 
 ## On disk
 

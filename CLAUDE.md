@@ -255,6 +255,18 @@ through the proxy and hands the results to the builder as configured peers. The 
 asks a seeder for nodes that serve compact filters. If nothing resolves and there are no
 remembered peers, `Session::start` fails rather than letting kyoto fall back to the resolver.
 
+**One `Route`, three states, and never two.** `App::route` answers `Direct`,
+`Through(proxy)` or `Refuse`, and the third is why the type exists. It used to
+be an `Option<Proxy>` computed as `settings.tor.then_some(tor_active).flatten()`,
+which gave `None` both for "Tor is off" and for "Tor is on and not up yet" — so
+every caller treated a missing Tor as a request to connect directly. The price
+lookup runs immediately *before* the call that starts Tor, so with both switches
+on it went out over the clear on the first wallet open of every launch.
+`start_session` was fine because it had its own guard; the two HTTP services had
+none. Do not reintroduce a proxy accessor returning a bare `Option` for deciding
+*whether* to connect — `proxy_once_routed` exists only for callers that have
+already routed.
+
 **Fail closed, and only fail closed.** If Tor is on and cannot be brought up, nothing connects:
 no session starts, and the wallet shows a banner saying so with a Try again button. Going out
 over the clear because Tor was unavailable is the one thing this must never do quietly. The
@@ -735,7 +747,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 213 tests; no network, no display
+cargo test                       # 214 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging

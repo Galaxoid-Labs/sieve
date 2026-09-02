@@ -3382,11 +3382,54 @@ impl WalletPage {
 
             let launcher_parent = root.clone();
             let sender = sender.clone();
+            // The page already knows, because the network view describes it.
+            let tor_on = self.tor.is_some();
             explorer.connect_activated(move |_| {
-                let sender = sender.clone();
-                crate::ui::browser::open(&url, &launcher_parent, move |message| {
-                    sender.input(WalletPageMsg::Toast(message));
+                // Asked before it happens, not described after. This is the
+                // only outbound request in Sieve that Tor cannot cover — it
+                // leaves the process entirely for the system browser, carrying
+                // this machine's real address and whatever the browser says
+                // about it, alongside a transaction that is *yours*. That
+                // pairing is the strongest thing anybody could learn here, and
+                // it is one click away in a screen people open to read a fee.
+                //
+                // The subtitle above says the same thing, and a subtitle is
+                // read once while the row stays clickable forever.
+                let dialog =
+                    adw::AlertDialog::new(Some("Open this transaction on mempool.space?"), None);
+                dialog.set_body_use_markup(false);
+                dialog.set_body(if tor_on {
+                    "This opens your web browser, which is outside Sieve — so it does not \
+                     go through Tor even though Tor is on. mempool.space will learn your \
+                     IP address and that you looked up this particular transaction, which \
+                     is one of yours.\n\nYour wallet's own sync does not tell anyone that."
+                } else {
+                    "This opens your web browser. mempool.space will learn your IP address \
+                     and that you looked up this particular transaction, which is one of \
+                     yours.\n\nYour wallet's own sync does not tell anyone that."
                 });
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("open", "Open browser");
+                // Not destructive — nothing is lost — but not suggested
+                // either: the safe answer is the one that stays here.
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                {
+                    let url = url.clone();
+                    let launcher_parent = launcher_parent.clone();
+                    let sender = sender.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response != "open" {
+                            return;
+                        }
+                        let sender = sender.clone();
+                        crate::ui::browser::open(&url, &launcher_parent, move |message| {
+                            sender.input(WalletPageMsg::Toast(message));
+                        });
+                    });
+                }
+                dialog.present(Some(&launcher_parent));
             });
 
             elsewhere.add(&explorer);

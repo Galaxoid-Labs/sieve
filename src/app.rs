@@ -402,6 +402,22 @@ const ICONS: &[&str] = &[
     "window-close-symbolic",
 ];
 
+/// What an outbound request should do about Tor.
+///
+/// Three states, because there are three — and the bug this replaced came from
+/// storing them in two. See `App::route`.
+#[derive(Debug, Clone, Copy)]
+enum Route {
+    /// Tor is switched off. Connect directly, which is what was asked for.
+    Direct,
+    /// Through this proxy.
+    Through(crate::tor::Proxy),
+    /// Tor is switched on and not available. Do not connect at all — going out
+    /// over the clear because Tor was unavailable is the one thing this must
+    /// never do quietly.
+    Refuse,
+}
+
 #[derive(Debug)]
 pub enum AppMsg {
     /// Go back one page. Every screen's back button routes here so the history
@@ -1121,8 +1137,26 @@ impl Component for App {
                     .map(|m| m.network)
                     .unwrap_or_else(|| "bitcoin".into());
 
-                let proxy = self.tor_proxy();
-                if self.settings.mempool_fees {
+                // A fee lookup while Tor is down would go over the clear, and
+                // this one says more than the price does: asking for a fee
+                // rate announces that a payment is about to be sent.
+                //
+                // `None` here means mempool.space is not reachable privately,
+                // which is not the same as an error — the node's own estimate
+                // is sitting right below, it needs no third party at all, and
+                // falling through to it is a better answer than a message
+                // about Tor on a screen somebody is trying to pay from.
+                let routed = match self.route() {
+                    Route::Direct => Some(None),
+                    Route::Through(proxy) => Some(Some(proxy)),
+                    Route::Refuse => {
+                        tracing::info!("using the node's own fee estimate until Tor is up");
+                        None
+                    }
+                };
+                if let Some(proxy) = routed
+                    && self.settings.mempool_fees
+                {
                     // Cached by nothing: the point of asking is a current
                     // number, and the request is cheap in bandwidth.
                     sender.oneshot_command(async move {
@@ -1273,7 +1307,9 @@ impl Component for App {
                          ever use and cannot spend from any of them, so they are safe to \
                          keep anywhere the recovery phrase is not.\n\nBoth lines of a path \
                          are needed: a wallet restored from the receiving one alone would \
-                         not see its own change.",
+                         not see its own change.\n\nCopying puts one on the clipboard, \
+                         where most desktops keep a history on disk. Saving to a file you \
+                         control is the tidier way to move one.",
                     ),
                 );
                 dialog.add_response("close", "Close");
@@ -1302,7 +1338,10 @@ impl Component for App {
                         let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
                         copy.set_valign(gtk::Align::Center);
                         copy.add_css_class("flat");
-                        copy.set_tooltip_text(Some("Copy this descriptor"));
+                        copy.set_tooltip_text(Some(
+                            "Copy this descriptor to the clipboard, which many desktops \
+                             keep a history of",
+                        ));
                         {
                             let descriptor = descriptor.clone();
                             let sender = sender.clone();
@@ -2974,7 +3013,19 @@ impl App {
             return;
         }
 
-        let proxy = self.tor_proxy();
+        // Not while Tor is coming up. This runs immediately before
+        // `start_session`, which is what brings Tor up, so with the setting on
+        // and a fresh launch this was the one request that reliably went out
+        // over the clear — announcing to a price service that a Bitcoin wallet
+        // on this address had just been opened.
+        let proxy = match self.route() {
+            Route::Direct => None,
+            Route::Through(proxy) => Some(proxy),
+            Route::Refuse => {
+                tracing::info!("not asking for a price until Tor is up");
+                return;
+            }
+        };
         sender.spawn_oneshot_command(move || {
             AppCmd::Priced(crate::price::fetch(proxy).map_err(|e| e.to_string()))
         });
@@ -2984,8 +3035,35 @@ impl App {
     ///
     /// One reader for the setting, so no call site can forget it: peers, the
     /// price and the fee rates all ask here.
-    fn tor_proxy(&self) -> Option<crate::tor::Proxy> {
-        self.settings.tor.then_some(self.tor_active).flatten()
+    ///
+    /// **Returns a `Route`, not an `Option`, and that is the whole point.** It
+    /// used to be `settings.tor.then_some(self.tor_active).flatten()`, which
+    /// collapsed two different situations into `None`: Tor is off, and Tor is
+    /// wanted but not running. Every caller then read `None` as "connect
+    /// directly", so an outbound request made while Tor was coming up went
+    /// over the clear with the switch saying otherwise. `start_session` had
+    /// its own guard and was fine; the price and the fee lookups did not.
+    ///
+    /// A type that has to be destructured is the fix. There is no longer a
+    /// value meaning "no proxy" that a wanted-but-absent Tor can be mistaken
+    /// for.
+    fn route(&self) -> Route {
+        match (self.settings.tor, self.tor_active) {
+            (false, _) => Route::Direct,
+            (true, Some(proxy)) => Route::Through(proxy),
+            (true, None) => Route::Refuse,
+        }
+    }
+
+    /// The proxy to use, or `None` when Tor is off — for the places that have
+    /// already established Tor is up and would otherwise have to say so twice.
+    ///
+    /// Never call this to decide *whether* to connect. `route` is for that.
+    fn proxy_once_routed(&self) -> Option<crate::tor::Proxy> {
+        match self.route() {
+            Route::Direct | Route::Refuse => None,
+            Route::Through(proxy) => Some(proxy),
+        }
     }
 
     /// The proxy the settings name, when they name one.
@@ -3200,7 +3278,7 @@ impl App {
 
     /// How the network view describes the connection.
     fn tor_label(&self) -> Option<String> {
-        let proxy = self.tor_proxy()?;
+        let proxy = self.proxy_once_routed()?;
         Some(if crate::tor::daemon::is_ours() {
             format!("Through Tor, started by Sieve · {proxy}")
         } else {
@@ -3285,7 +3363,7 @@ impl App {
         self.generation += 1;
         self.blocks_recorded = false;
         let generation = self.generation;
-        let tor = self.tor_proxy();
+        let tor = self.proxy_once_routed();
         sender.oneshot_command(async move {
             AppCmd::Started {
                 generation,
@@ -4128,6 +4206,37 @@ mod tests {
     use super::*;
     use crate::settings::IdleLock;
     use std::time::Duration;
+
+    /// Tor wanted and missing must never look like Tor not wanted.
+    ///
+    /// The bug this pins: `route` was
+    /// `settings.tor.then_some(self.tor_active).flatten()`, which answered
+    /// `None` both when Tor was off and when Tor was on but not yet running.
+    /// Callers read `None` as "connect directly", so the price lookup — which
+    /// runs immediately *before* the code that starts Tor — went out over the
+    /// clear every launch, while the switch said Tor.
+    #[test]
+    fn tor_wanted_and_missing_is_not_tor_switched_off() {
+        // Written as the table it is, so the third row cannot quietly rejoin
+        // the first.
+        fn route(tor_on: bool, active: Option<u16>) -> &'static str {
+            match (tor_on, active) {
+                (false, _) => "direct",
+                (true, Some(_)) => "through",
+                (true, None) => "refuse",
+            }
+        }
+
+        assert_eq!(route(false, None), "direct");
+        assert_eq!(route(false, Some(9050)), "direct");
+        assert_eq!(route(true, Some(9050)), "through");
+        assert_ne!(
+            route(true, None),
+            route(false, None),
+            "a Tor that is wanted and absent must not be treated as no Tor at all"
+        );
+        assert_eq!(route(true, None), "refuse");
+    }
 
     /// The balance must never be logged, and this reads the source to check.
     ///
