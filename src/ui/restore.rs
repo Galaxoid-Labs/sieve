@@ -253,16 +253,28 @@ impl Restore {
             );
         }
 
-        match Mnemonic::parse_in(Language::English, self.phrase().as_str()) {
+        let phrase = self.phrase();
+        match Mnemonic::parse_in(Language::English, phrase.as_str()) {
             Ok(_) => "This is a valid recovery phrase.".into(),
-            // Every word is real and the phrase is still wrong, which means the
-            // checksum failed: a word is in the wrong place, or one right word
-            // stands where another right word belongs. Neither is visible per
-            // box, so this is the only place it can be said.
-            Err(_) => format!(
-                "These {total} words are all real words, but they are not a valid recovery \
-                 phrase — one is out of order or in place of another."
-            ),
+            Err(_) => {
+                // Before blaming the person: Electrum uses these same 2,048
+                // words with a different rule, so a perfectly good Electrum
+                // seed lands here looking like a typo. Saying "one is out of
+                // order" to somebody holding a correct backup sends them to
+                // re-check paper that is already right, and the likely
+                // conclusion is that the backup is ruined.
+                if let Some(other) = crate::ui::phrase::electrum_seed(phrase.as_str()) {
+                    return other.explain().to_string();
+                }
+                // Every word is real and the phrase is still wrong, which means
+                // the checksum failed: a word is in the wrong place, or one
+                // right word stands where another right word belongs. Neither
+                // is visible per box, so this is the only place it can be said.
+                format!(
+                    "These {total} words are all real words, but they are not a valid \
+                     recovery phrase — one is out of order or in place of another."
+                )
+            }
         }
     }
 
@@ -771,6 +783,14 @@ impl Component for Restore {
                 // model is what they all report to.
                 if submission.kind == CredentialKind::Mnemonic {
                     submission.credential = Secret(self.phrase());
+                    // The status line says this already, and a paste followed
+                    // straight by Import never gives anybody time to read it.
+                    if let Some(other) =
+                        crate::ui::phrase::electrum_seed(submission.credential.0.as_str())
+                    {
+                        self.error = Some(other.explain().to_string());
+                        return;
+                    }
                 }
                 let network = wallet::network_at(submission.network_index as usize);
 

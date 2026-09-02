@@ -78,6 +78,87 @@ pub fn completion(prefix: &str) -> Option<&'static str> {
     }
 }
 
+/// An Electrum seed: a phrase that is valid, and not valid *here*.
+///
+/// Electrum does not use BIP-39. It uses the same 2,048 English words — which
+/// is exactly what makes this worth detecting — but validates by a version
+/// number rather than a checksum, and derives at `m/0'` rather than at a BIP
+/// purpose. So an Electrum seed is twelve real words that fail Sieve's
+/// checksum, which is indistinguishable from a mistyped BIP-39 phrase unless
+/// somebody looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Electrum {
+    /// Electrum's `01`: P2PKH and multisig P2SH.
+    Standard,
+    /// Electrum's `100`: P2WPKH and P2WSH.
+    Segwit,
+    /// Electrum's `101` and `102`: two-factor wallets, which are 2-of-3 with a
+    /// service holding a key. Nothing recovers one of these from words alone.
+    TwoFactor,
+}
+
+impl Electrum {
+    /// What to tell somebody holding it.
+    ///
+    /// Names the wallet it came from, because "this is not a valid recovery
+    /// phrase" sends a person to check a piece of paper that is perfectly
+    /// correct.
+    pub fn explain(self) -> &'static str {
+        match self {
+            Electrum::Standard | Electrum::Segwit => {
+                "This is an Electrum seed phrase. Electrum uses the same words as \
+                 BIP-39 but a different format, and Sieve cannot import one yet. \
+                 Your phrase is fine — it is this wallet that does not read it."
+            }
+            Electrum::TwoFactor => {
+                "This is an Electrum two-factor seed phrase. Those wallets need \
+                 Electrum and its co-signing service, so the words alone do not \
+                 recover one anywhere."
+            }
+        }
+    }
+}
+
+/// Is this a seed some other wallet would accept?
+///
+/// Electrum's rule, and it is a version number rather than a checksum:
+/// `HMAC-SHA512("Seed version", phrase)` in hex must *start with* the version.
+///
+/// Normalisation here is the English case only — lowercase, single spaces.
+/// Electrum's own `normalize_text` also strips combining characters and closes
+/// gaps between CJK, which matters for the wordlists Sieve does not offer. A
+/// phrase that needs more than this will simply not be recognised, which is
+/// the safe direction: the message goes back to the ordinary one.
+pub fn electrum_seed(phrase: &str) -> Option<Electrum> {
+    use bdk_wallet::bitcoin::hashes::{Hash, HashEngine, Hmac, HmacEngine, sha512};
+
+    let normalized = phrase
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let mut engine = HmacEngine::<sha512::Hash>::new(b"Seed version");
+    engine.input(normalized.as_bytes());
+    let digest = Hmac::<sha512::Hash>::from_engine(engine);
+    let hex = format!("{digest:x}");
+
+    // Longest first would matter if any were a prefix of another; none are, and
+    // the order is Electrum's own.
+    if hex.starts_with("01") {
+        Some(Electrum::Standard)
+    } else if hex.starts_with("100") {
+        Some(Electrum::Segwit)
+    } else if hex.starts_with("101") || hex.starts_with("102") {
+        Some(Electrum::TwoFactor)
+    } else {
+        None
+    }
+}
+
 /// One numbered box.
 pub struct PhraseWord {
     /// 1-based, and shown. The number is half of what makes a phrase
@@ -316,6 +397,71 @@ mod tests {
                 assert!(known(done), "completed to something unknown: {done}");
             }
         }
+    }
+
+    /// A real Electrum seed is recognised as one.
+    ///
+    /// Generated for this test by searching for a phrase whose
+    /// `HMAC-SHA512("Seed version", …)` starts with `100`, which is what
+    /// Electrum itself does when it makes a segwit seed. It holds nothing and
+    /// never has.
+    #[test]
+    fn an_electrum_seed_is_named_rather_than_called_a_typo() {
+        let electrum = "rapid phone kid day save forward gasp cereal nasty fat absorb load";
+
+        // The trap in one assertion: every word is a real BIP-39 word, and the
+        // phrase is not a BIP-39 phrase. Without the check below, this is
+        // indistinguishable from somebody mistyping.
+        assert!(electrum.split_whitespace().all(known));
+        assert!(
+            bdk_wallet::keys::bip39::Mnemonic::parse_in(
+                bdk_wallet::keys::bip39::Language::English,
+                electrum
+            )
+            .is_err(),
+            "an Electrum seed must not pass BIP-39 validation"
+        );
+
+        assert_eq!(electrum_seed(electrum), Some(Electrum::Segwit));
+        assert!(
+            electrum_seed(electrum)
+                .unwrap()
+                .explain()
+                .contains("Electrum")
+        );
+
+        // Case and spacing are normalised the way Electrum normalises them, so
+        // a phrase pasted out of a document still matches.
+        assert_eq!(
+            electrum_seed("  RAPID  phone kid day save forward gasp cereal nasty fat absorb LOAD "),
+            Some(Electrum::Segwit)
+        );
+    }
+
+    /// An ordinary BIP-39 phrase must never be called an Electrum one.
+    ///
+    /// This is the direction that would do damage: telling somebody with a
+    /// valid BIP-39 phrase that Sieve cannot import it would turn a working
+    /// import into a refusal.
+    #[test]
+    fn a_valid_bip39_phrase_is_not_mistaken_for_another_wallets() {
+        let bip39 = "abandon abandon abandon abandon abandon abandon \
+                     abandon abandon abandon abandon abandon about";
+        let bip39 = bip39.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            bdk_wallet::keys::bip39::Mnemonic::parse_in(
+                bdk_wallet::keys::bip39::Language::English,
+                &bip39
+            )
+            .is_ok(),
+            "the fixture must be a valid BIP-39 phrase"
+        );
+        assert_eq!(electrum_seed(&bip39), None);
+
+        // Nothing, and rubbish, are not other wallets' seeds either.
+        assert_eq!(electrum_seed(""), None);
+        assert_eq!(electrum_seed("   "), None);
+        assert_eq!(electrum_seed("not a seed at all"), None);
     }
 
     #[test]

@@ -158,6 +158,11 @@ Stated plainly, because a wallet that overstates itself is dangerous:
   `SILENT_PAYMENTS.md` has the plan. *Receiving* one is blocked on something a
   compact-filter wallet structurally cannot compute, and the same file explains
   why that is not a matter of effort.
+- **Electrum seed phrases.** Electrum does not use BIP-39 — same words,
+  different format, and a derivation path outside the BIP standards. Sieve
+  recognises one and says so rather than calling it a typo, but cannot import
+  it. Wallets that use BIP-39 and standard paths, Sparrow among them, import by
+  phrase today.
 - **Multisig.** Single-signature only.
 - **Packages.** There is no `.deb`, `.rpm` or AUR package yet — see
   `PACKAGING.md` for the plan.
@@ -218,7 +223,7 @@ Then unplug the device and plug it in again.
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh
-cargo test          # 214 tests, needing no network and no display
+cargo test          # 216 tests, needing no network and no display
 cargo fmt --check
 cargo clippy -- -D warnings
 ```

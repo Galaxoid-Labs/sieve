@@ -157,6 +157,28 @@ lowest checkpoint of any wallet it is given.
 Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
 one `bdk_kyoto` node drives them all via `build_with_wallets`.
 
+## A phrase that is valid, and not valid here
+
+`phrase::electrum_seed`. **Electrum does not use BIP-39, and uses the same 2,048 English
+words** — which is what makes it worth detecting rather than shrugging at. It validates by a
+version number instead of a checksum: `HMAC-SHA512("Seed version", phrase)` in hex must start
+with `01` (standard), `100` (segwit) or `101`/`102` (two-factor).
+
+So an Electrum seed reaching the import screen is twelve real words that fail the checksum, and
+the status line said *"one is out of order or in place of another."* That is false and
+confidently so — the phrase is correct, in another format — and it sends somebody with a good
+backup to re-check paper that is already right. **A person concluding their backup is ruined,
+because of a message this program chose, is worse than any import that merely fails.**
+
+Detection only. Importing one would need Electrum's key derivation *and* a path at `m/0'`,
+which is not a BIP purpose — and `ScriptType` is four variants referenced in ten files on the
+assumption that a path *is* a purpose number. That is a design change, not a feature.
+
+Two directions, and the second is the dangerous one: failing to recognise an Electrum seed
+returns the ordinary message, which is merely unhelpful; calling a valid BIP-39 phrase an
+Electrum one would refuse an import that works. Normalisation is deliberately the English case
+only, so anything unusual falls back to the ordinary message rather than guessing.
+
 ## Typing a phrase back in
 
 `src/ui/phrase.rs`. A box per word rather than one line of space-separated text, because
@@ -747,7 +769,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 214 tests; no network, no display
+cargo test                       # 216 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging
