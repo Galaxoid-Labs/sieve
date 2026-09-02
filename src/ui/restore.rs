@@ -33,6 +33,7 @@ const KINDS: [CredentialKind; 4] = [
 
 /// Secret with a redacted `Debug`, so relm4's message tracing cannot print a
 /// seed phrase, a key, or a password.
+#[derive(Clone)]
 pub struct Secret(Zeroizing<String>);
 
 impl std::fmt::Debug for Secret {
@@ -108,6 +109,9 @@ struct PendingImport {
     network: bdk_wallet::bitcoin::Network,
     birthday: crate::wallet::Checkpoint,
     name: Option<String>,
+    /// Empty when the wallet is to open without asking. Redacted in `Debug`
+    /// by `Secret`, which is why this struct can still derive it.
+    password: Secret,
 }
 
 pub struct Restore {
@@ -195,9 +199,8 @@ impl Restore {
             CredentialKind::Mnemonic => "The 12 or 24 words, separated by spaces",
             CredentialKind::Wif => "A single private key in Wallet Import Format",
             CredentialKind::Descriptor => {
-                "Paste an exported descriptor or extended \
-                                            public key. Watch-only: no password, and Sieve \
-                                            cannot sign"
+                "Paste an exported descriptor or extended public key. Watch-only: \
+                 Sieve can see this wallet but never sign for it"
             }
             CredentialKind::Hardware => {
                 "Plug the device in and unlock it. On a Ledger, open \
@@ -556,10 +559,35 @@ impl Component for Restore {
                     #[watch]
                     set_description: Some(model.credential_hint()),
 
-                    #[name(credential_row)]
-                    adw::EntryRow {
-                        #[watch]
-                        set_title: model.credential_title(),
+                    // A text view rather than an `EntryRow`: a descriptor is
+                    // hundreds of characters and a bundle is two lines of
+                    // them, and a single-line field shows about forty at a
+                    // time. Checking a paste against the wallet that produced
+                    // it is the one thing somebody needs to do here, and a
+                    // field they cannot read defeats it.
+                    //
+                    // Below the group's rows rather than in them, which is
+                    // where libadwaita puts anything that is not a row.
+                    gtk::ScrolledWindow {
+                        add_css_class: "card",
+                        set_margin_top: 12,
+                        set_min_content_height: 120,
+                        set_max_content_height: 220,
+                        set_propagate_natural_height: true,
+
+                        #[wrap(Some)]
+                        #[name(credential_view)]
+                        set_child = &gtk::TextView {
+                            add_css_class: "monospace",
+                            add_css_class: "paste-box",
+                            set_wrap_mode: gtk::WrapMode::WordChar,
+                            set_top_margin: 10,
+                            set_bottom_margin: 10,
+                            set_left_margin: 10,
+                            set_right_margin: 10,
+                            // The background comes from the card around it.
+                            set_hexpand: true,
+                        },
                     },
 
                 },
@@ -652,16 +680,29 @@ impl Component for Restore {
                 },
 
                 adw::PreferencesGroup {
-                    // A watch-only wallet holds no secret, so a password would
-                    // lock a door with nothing behind it.
                     #[watch]
-                    set_visible: model.kind.carries_keys(),
-                    set_title: "Choose a password for this wallet",
-                    set_description: Some(
+                    set_title: if model.kind.carries_keys() {
+                        "Choose a password for this wallet"
+                    } else {
+                        "Password (optional)"
+                    },
+                    // Two different things wear the same field, and the
+                    // description is where they are told apart. With keys, the
+                    // password *encrypts* them and is required. Without, there
+                    // is nothing on disk to encrypt — it shuts the wallet
+                    // inside Sieve and no further — so it is offered rather
+                    // than demanded, and says plainly what it does not do.
+                    #[watch]
+                    set_description: Some(if model.kind.carries_keys() {
                         "New — you are choosing it now. It locks this wallet on this \
                          computer and has nothing to do with your recovery phrase or \
                          your old wallet. Forgetting it costs this copy, not your coins."
-                    ),
+                    } else {
+                        "Optional. This wallet holds no keys, so a password does not \
+                         encrypt anything — the files on disk stay readable. It shuts \
+                         the balance, the history and the addresses to somebody at this \
+                         machine. Leave it empty to open without asking."
+                    }),
 
                     #[name(password_row)]
                     adw::PasswordEntryRow {
@@ -683,15 +724,18 @@ impl Component for Restore {
                         #[watch]
                         set_label: if model.busy { "Importing…" } else { "Import wallet" },
                         connect_clicked[
-                            sender, kind_row, credential_row, bip39_row, bip39_expander,
+                            sender, kind_row, credential_view, bip39_row, bip39_expander,
                             network_row, password_row, confirm_row,
                             acknowledge_row, name_row
                         ] => move |_| {
                             sender.input(RestoreMsg::Submit(Box::new(Submission {
                                 kind: KINDS[kind_row.selected() as usize],
-                                credential: Secret(Zeroizing::new(
-                                    credential_row.text().to_string()
-                                )),
+                                credential: Secret(Zeroizing::new({
+                                    let buffer = credential_view.buffer();
+                                    buffer
+                                        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                                        .to_string()
+                                })),
                                 // Only when the switch is on: an empty field
                                 // and "no passphrase" must mean the same thing.
                                 bip39_passphrase: Secret(Zeroizing::new(
@@ -786,8 +830,13 @@ impl Component for Restore {
         root: &Self::Root,
     ) {
         if matches!(msg, RestoreMsg::Clear) {
+            // The model goes back to KINDS[0]; without this the picker still
+            // said whatever was last chosen, so the screen showed a phrase
+            // grid under a heading that said Descriptor, and the only way out
+            // was to pick another type and pick this one again.
+            widgets.kind_row.set_selected(0);
             widgets.name_row.set_text("");
-            widgets.credential_row.set_text("");
+            widgets.credential_view.buffer().set_text("");
             widgets.bip39_row.set_text("");
             widgets.bip39_expander.set_enable_expansion(false);
             widgets.password_row.set_text("");
@@ -960,7 +1009,14 @@ impl Component for Restore {
                     });
                     return;
                 }
-                if submission.kind.carries_keys() {
+                // A wallet with keys must have one. A watch-only wallet may,
+                // and if somebody typed one they meant it — so it is held to
+                // the same length and the same confirmation rather than being
+                // quietly accepted at four characters because it protects
+                // less.
+                let wants_password =
+                    submission.kind.carries_keys() || !submission.password.0.is_empty();
+                if wants_password {
                     if submission.password.0.len() < 8 {
                         self.error = Some("Use a password of at least 8 characters.".into());
                         return;
@@ -997,6 +1053,7 @@ impl Component for Restore {
                     self.pending = Some(PendingImport {
                         network,
                         birthday,
+                        password: submission.password.clone(),
                         name: {
                             let trimmed = submission.name.trim();
                             (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -1060,8 +1117,10 @@ impl Component for Restore {
                             ScriptType::NativeSegwit,
                             name.clone(),
                         ),
-                        // No password, no vault: the keys are somewhere
-                        // else, which is the point.
+                        // No vault: the keys are somewhere else, which is
+                        // the point. A password here is applied afterwards,
+                        // below, because it locks the wallet rather than
+                        // sealing anything.
                         CredentialKind::Descriptor => wallet::import_descriptor(
                             &credential,
                             &paths,
@@ -1073,6 +1132,18 @@ impl Component for Restore {
                             unreachable!("a device is asked before this point")
                         }
                     };
+
+                    // Set on the way out, and only on a wallet with no vault:
+                    // one that carries keys already has a password, and it is
+                    // the vault's. Inside the command, because this is Argon2
+                    // and a blocked frame clock is a visible stall.
+                    let result = result.and_then(|summary| {
+                        if !kind.carries_keys() && !password.is_empty() {
+                            wallet::set_watch_only_password(&paths, password.as_bytes())?;
+                        }
+                        Ok(summary)
+                    });
+
                     RestoreCmd::Finished(
                         result
                             .map(|summary| (created_paths, summary))
@@ -1117,6 +1188,17 @@ impl Component for Restore {
                             pending.name,
                             Some((kind, fingerprint)),
                         )
+                        .and_then(|summary| {
+                            // A device wallet has no vault either, so the same
+                            // optional lock applies.
+                            if !pending.password.0.is_empty() {
+                                wallet::set_watch_only_password(
+                                    &paths,
+                                    pending.password.0.as_bytes(),
+                                )?;
+                            }
+                            Ok(summary)
+                        })
                         .map(|summary| (created, summary))
                         .map_err(|e| e.to_string()),
                     )
