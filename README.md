@@ -159,13 +159,6 @@ Stated plainly, because a wallet that overstates itself is dangerous:
   compact-filter wallet structurally cannot compute, and the same file explains
   why that is not a matter of effort.
 - **Multisig.** Single-signature only.
-- **Storing anything the node downloads.** The version of kyoto Sieve uses
-  discards the data directory it is given — `data_path: _` in its own
-  `node.rs`. A synced wallet still starts from its own checkpoint, so an
-  ordinary start costs seconds rather than re-reading the chain; what it costs
-  is a **rescan** and **importing a wallet with history**, both of which fetch
-  filters from the birthday again, and a second wallet on a network gaining
-  nothing from the first.
 - **Packages.** There is no `.deb`, `.rpm` or AUR package yet — see
   `PACKAGING.md` for the plan.
 
