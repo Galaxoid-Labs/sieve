@@ -259,6 +259,17 @@ impl Restore {
     /// somebody to press Import and find out, and the checksum exists precisely
     /// so that a mistyped word can be caught before it becomes an empty wallet
     /// that looks exactly like a correct one.
+    /// Whether Import should be pressable at all.
+    ///
+    /// A phrase Electrum made is a phrase Sieve cannot use, and the button was
+    /// still live — so the only way to find out was to press it and read an
+    /// error, on a screen that had already said the answer above. Refusing at
+    /// the button is the same refusal made a second earlier.
+    fn import_blocked(&self) -> bool {
+        self.kind == CredentialKind::Mnemonic
+            && crate::ui::phrase::electrum_seed(self.phrase().as_str()).is_some()
+    }
+
     /// The colour that sentence should be wearing.
     ///
     /// Adwaita's own classes, so they follow the theme. Four states rather than
@@ -304,7 +315,12 @@ impl Restore {
 
         let phrase = self.phrase();
         match Mnemonic::parse_in(Language::English, phrase.as_str()) {
-            Ok(_) => "This is a valid recovery phrase.".into(),
+            // Named, because the entire confusion this screen deals with is
+            // that "recovery phrase" is not one format. Somebody whose phrase
+            // Electrum made should be able to tell from this line that Sieve
+            // is checking against a different standard, not judging their
+            // handwriting.
+            Ok(_) => "This is a valid BIP-39 recovery phrase.".into(),
             Err(_) => {
                 // Before blaming the person: Electrum uses these same 2,048
                 // words with a different rule, so a perfectly good Electrum
@@ -663,7 +679,7 @@ impl Component for Restore {
                         add_css_class: "pill",
                         set_halign: gtk::Align::Center,
                         #[watch]
-                        set_sensitive: !model.busy,
+                        set_sensitive: !model.busy && !model.import_blocked(),
                         #[watch]
                         set_label: if model.busy { "Importing…" } else { "Import wallet" },
                         connect_clicked[
@@ -1162,6 +1178,29 @@ mod tests {
     /// table. Adding a checkpoint shifted every choice below it, so "I don't
     /// know" silently became taproot activation and a wallet older than that
     /// found nothing — with the screen reporting exactly what was asked for.
+    /// Import is refused at the button, not at the end of the attempt.
+    ///
+    /// The screen already says the phrase is Electrum's. A live button after
+    /// that invites somebody to press it and be told the same thing again,
+    /// which reads as the program not having noticed.
+    #[test]
+    fn a_phrase_from_another_wallet_cannot_be_submitted() {
+        use crate::ui::phrase::electrum_seed;
+
+        let electrum = "rapid phone kid day save forward gasp cereal nasty fat absorb load";
+        let valid = "abandon abandon abandon abandon abandon abandon \
+                     abandon abandon abandon abandon abandon about";
+        let valid: String = valid.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // The condition the button is wired to, on a phrase import.
+        assert!(electrum_seed(electrum).is_some(), "must be blocked");
+        assert!(electrum_seed(&valid).is_none(), "must stay pressable");
+
+        // Half-typed is not blocked either — it is refused for being
+        // incomplete, which is a different message and a different moment.
+        assert!(electrum_seed("rapid phone kid").is_none());
+    }
+
     /// A phrase from another wallet is a warning, not an error.
     ///
     /// The colours carry meaning here: red says "you got this wrong", and

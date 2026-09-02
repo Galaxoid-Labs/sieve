@@ -181,9 +181,15 @@ confidently so — the phrase is correct, in another format — and it sends som
 backup to re-check paper that is already right. **A person concluding their backup is ruined,
 because of a message this program chose, is worse than any import that merely fails.**
 
-Detection only. Importing one would need Electrum's key derivation *and* a path at `m/0'`,
-which is not a BIP purpose — and `ScriptType` is four variants referenced in ten files on the
-assumption that a path *is* a purpose number. That is a design change, not a feature.
+Detection only, and **Import is not pressable** while a phrase is Electrum's — the screen has
+already said the answer, and a live button invites pressing it to be told the same thing again.
+The valid case names its standard too: "a valid BIP-39 recovery phrase", because the confusion
+this screen exists for is that *recovery phrase* is not one format.
+
+`ELECTRUM.md` has what importing one would take, and why it is refused rather than
+half-supported. The short version: a path at `m/0'` is not a BIP purpose, the same path carries
+two different scripts, and `ScriptType` is four variants referenced across ten files on the
+assumption that a path *is* a purpose number.
 
 Two directions, and the second is the dangerous one: failing to recognise an Electrum seed
 returns the ordinary message, which is merely unhelpful; calling a valid BIP-39 phrase an
@@ -794,7 +800,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 217 tests; no network, no display
+cargo test                       # 218 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging
