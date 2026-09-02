@@ -138,6 +138,23 @@ pub struct Restore {
 /// chain their money is on was a step that taught nothing. The
 /// acknowledgement below is what carries the warning now, and it is a
 /// sentence rather than a wrong default.
+/// Take the `GtkFlowBoxChild`s out of the tab chain.
+///
+/// A factory in a `gtk::FlowBox` gets each item wrapped in a `FlowBoxChild` —
+/// that is relm4's `ReturnedWidget` for this container — and the wrapper is
+/// focusable in its own right. So Tab went wrapper, entry, wrapper, entry, and
+/// every second press appeared to do nothing: focus really had moved, just to
+/// something with nothing to type into.
+///
+/// Called after every resize, because the wrappers are made with the items.
+fn skip_the_wrappers(flow: &gtk::FlowBox) {
+    let mut index = 0;
+    while let Some(child) = flow.child_at_index(index) {
+        child.set_focusable(false);
+        index += 1;
+    }
+}
+
 impl Restore {
     fn chosen_device(&self) -> Option<&crate::hardware::Found> {
         self.devices.get(self.device_index as usize)
@@ -197,14 +214,19 @@ impl Restore {
 
     /// Grow or shrink the boxes, keeping what has already been typed.
     fn set_word_count(&mut self, count: usize) {
-        let mut guard = self.words.guard();
-        while guard.len() > count {
-            guard.pop_back();
+        {
+            let mut guard = self.words.guard();
+            while guard.len() > count {
+                guard.pop_back();
+            }
+            while guard.len() < count {
+                let position = guard.len() + 1;
+                guard.push_back((position, Word::default()));
+            }
         }
-        while guard.len() < count {
-            let position = guard.len() + 1;
-            guard.push_back((position, Word::default()));
-        }
+        // The guard has to be dropped first: the widgets do not exist until it
+        // is, and this reaches for them.
+        skip_the_wrappers(self.words.widget());
     }
 
     /// The phrase as one string, assembled only where it is needed.
@@ -235,6 +257,31 @@ impl Restore {
     /// somebody to press Import and find out, and the checksum exists precisely
     /// so that a mistyped word can be caught before it becomes an empty wallet
     /// that looks exactly like a correct one.
+    /// The colour that sentence should be wearing.
+    ///
+    /// Adwaita's own classes, so they follow the theme. Four states rather than
+    /// two, because "not a BIP-39 phrase" is not one thing: a phrase from
+    /// another wallet is somebody holding a *correct* backup, and colouring
+    /// that the same red as a mistyped word tells them their paper is wrong.
+    fn phrase_status_classes(&self) -> &'static [&'static str] {
+        if self.words.iter().any(|w| w.state() == State::Bad) {
+            return &["error"];
+        }
+        if self.words.iter().any(|w| w.word().is_empty()) {
+            return &["dim-label"];
+        }
+        let phrase = self.phrase();
+        if Mnemonic::parse_in(Language::English, phrase.as_str()).is_ok() {
+            return &["success"];
+        }
+        if crate::ui::phrase::electrum_seed(phrase.as_str()).is_some() {
+            // A warning, not an error. Nothing is wrong with what they have.
+            &["warning"]
+        } else {
+            &["error"]
+        }
+    }
+
     fn phrase_status(&self) -> String {
         let total = self.words.len();
         if let Some(bad) = self.words.iter().position(|w| w.state() == State::Bad) {
@@ -430,8 +477,9 @@ impl Component for Restore {
                     #[watch]
                     set_visible: model.kind == CredentialKind::Mnemonic,
                     set_title: "Recovery phrase",
-                    #[watch]
-                    set_description: Some(&model.phrase_status()),
+                    set_description: Some(
+                        "Type the words in order, or paste the whole phrase into any box."
+                    ),
 
                     #[name(length_row)]
                     adw::ComboRow {
@@ -460,6 +508,22 @@ impl Component for Restore {
                         set_row_spacing: 6,
                         set_column_spacing: 6,
                         set_margin_top: 12,
+                    },
+
+                    // Below the grid rather than in the group's description,
+                    // because a description cannot carry a colour and this
+                    // sentence changes meaning: counting up is neutral, a
+                    // phrase from another wallet is a warning, a phrase that
+                    // will not import is an error, and a phrase that is right
+                    // deserves to say so.
+                    gtk::Label {
+                        set_wrap: true,
+                        set_xalign: 0.0,
+                        set_margin_top: 12,
+                        #[watch]
+                        set_label: &model.phrase_status(),
+                        #[watch]
+                        set_css_classes: model.phrase_status_classes(),
                     },
                 },
 
@@ -662,6 +726,7 @@ impl Component for Restore {
                 guard.push_back((position, Word::default()));
             }
         }
+        skip_the_wrappers(words.widget());
 
         let model = Restore {
             // A recovery phrase is first in the list, so it is what the form
@@ -1050,6 +1115,44 @@ mod tests {
     /// table. Adding a checkpoint shifted every choice below it, so "I don't
     /// know" silently became taproot activation and a wallet older than that
     /// found nothing — with the screen reporting exactly what was asked for.
+    /// A phrase from another wallet is a warning, not an error.
+    ///
+    /// The colours carry meaning here: red says "you got this wrong", and
+    /// somebody holding a correct Electrum backup has got nothing wrong. The
+    /// four states are the four different things the sentence can mean.
+    #[test]
+    fn the_status_colour_matches_what_the_sentence_means() {
+        use crate::ui::phrase::electrum_seed;
+
+        let valid = "abandon abandon abandon abandon abandon abandon \
+                     abandon abandon abandon abandon abandon about";
+        let valid: String = valid.split_whitespace().collect::<Vec<_>>().join(" ");
+        let electrum = "rapid phone kid day save forward gasp cereal nasty fat absorb load";
+        let mistyped = "abandon abandon abandon abandon abandon abandon \
+                        abandon abandon abandon abandon abandon abandon";
+        let mistyped: String = mistyped.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // The classifier the view uses, in the same order.
+        fn class(phrase: &str) -> &'static str {
+            if Mnemonic::parse_in(Language::English, phrase).is_ok() {
+                "success"
+            } else if electrum_seed(phrase).is_some() {
+                "warning"
+            } else {
+                "error"
+            }
+        }
+
+        assert_eq!(class(&valid), "success");
+        assert_eq!(class(electrum), "warning");
+        assert_eq!(class(&mistyped), "error");
+        assert_ne!(
+            class(electrum),
+            class(&mistyped),
+            "a correct phrase from another wallet must not look like a typo"
+        );
+    }
+
     #[test]
     fn every_choice_selects_the_checkpoint_it_names() {
         for network in wallet::NETWORKS {

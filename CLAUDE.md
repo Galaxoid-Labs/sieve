@@ -204,6 +204,20 @@ Four rules, each of which is the reason a line of that file exists:
   `set_text` on every keystroke and move the caret to the end, making the middle of a word
   uneditable. Hence `apply`, and hence `update_with_view` rather than `update`.
 
+**Tab reaches the next box, because the wrappers are taken out of the chain.** relm4's
+`FactoryView for gtk::FlowBox` sets `ReturnedWidget = gtk::FlowBoxChild`, so every item is
+wrapped in a child that is focusable in its own right — Tab went wrapper, entry, wrapper,
+entry, and every second press looked like it did nothing. Focus had moved; it had moved to
+something with nothing to type into. `skip_the_wrappers` clears `focusable` on each, after
+init and after every resize, since the wrappers are made with the items.
+
+**The status line's colour carries meaning, and `warning` is not `error`.** Counting up is
+`dim-label`, a valid phrase is `success`, a word off the list or a genuine mistype is `error`
+— and a phrase from another wallet is `warning`. That last distinction is the point of
+detecting Electrum at all: red says "you got this wrong" to somebody whose backup is correct.
+It lives in a label under the grid rather than the group's description, because a description
+cannot carry a class.
+
 Pasting works into *any* box: whitespace means a boundary, the rest spills into the boxes
 after it, and a 24-word phrase pasted into a 12-box grid grows the grid.
 
@@ -769,7 +783,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 216 tests; no network, no display
+cargo test                       # 217 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging
