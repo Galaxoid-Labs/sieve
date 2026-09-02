@@ -6,6 +6,7 @@
 pub mod browser;
 pub mod chooser;
 pub mod onboarding;
+pub mod phrase;
 pub mod qr;
 pub mod restore;
 pub mod reveal;

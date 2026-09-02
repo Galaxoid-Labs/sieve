@@ -10,17 +10,26 @@ use relm4::prelude::*;
 use relm4::{adw, gtk};
 use zeroize::Zeroizing;
 
+use bdk_wallet::keys::bip39::{Language, Mnemonic};
+
+use crate::ui::phrase::{PhraseWord, PhraseWordMsg, PhraseWordOutput, State, Word};
 use crate::wallet::accounts::{CredentialKind, ScriptType};
 use crate::wallet::{self, Paths, Summary};
 
 /// Hardware first: it is the one people arrive here holding, and the one
 /// that needs the most help.
+/// Order is the default: the form opens on `KINDS[0]`.
+///
+/// A recovery phrase leads because it is what most people arrive holding —
+/// twelve or twenty-four words on paper is what "I have a wallet elsewhere"
+/// usually means, and a device is the second answer rather than the first. The
+/// rest descend by how often anybody reaches for them.
 const KINDS: [CredentialKind; 5] = [
-    CredentialKind::Hardware,
     CredentialKind::Mnemonic,
+    CredentialKind::Hardware,
+    CredentialKind::Descriptor,
     CredentialKind::ExtendedKey,
     CredentialKind::Wif,
-    CredentialKind::Descriptor,
 ];
 
 /// Secret with a redacted `Debug`, so relm4's message tracing cannot print a
@@ -53,6 +62,12 @@ pub enum RestoreMsg {
     DeviceChosen(u32),
     BirthdayChanged(u32),
     NetworkChanged(u32),
+    /// A box settled on a word; the status line is recomputed.
+    PhraseChanged,
+    /// 12 or 24, by index.
+    PhraseLength(u32),
+    /// Words that arrived at box `after` and belong to the boxes past it.
+    PhraseSpill(usize, Vec<Word>),
     Submit(Box<Submission>),
     Cancel,
 }
@@ -109,6 +124,12 @@ pub struct Restore {
     /// Backing model for the birthday picker, mutated in place when the
     /// network changes. Rebuilding it would reset the selection.
     birthday_model: gtk::StringList,
+    /// One box per word of a recovery phrase.
+    ///
+    /// The model rather than the widgets is where the phrase lives, because
+    /// these boxes hand words to each other — a paste into any of them fills
+    /// the rest — and that is a conversation the parent has to hold.
+    words: FactoryVecDeque<PhraseWord>,
 }
 
 /// Networks offered, bitcoin first because importing a seed almost always
@@ -176,6 +197,82 @@ impl Restore {
     }
 
     /// What the import will actually watch.
+    /// How many words the phrase is being typed at.
+    fn word_count(&self) -> usize {
+        self.words.len()
+    }
+
+    /// Grow or shrink the boxes, keeping what has already been typed.
+    fn set_word_count(&mut self, count: usize) {
+        let mut guard = self.words.guard();
+        while guard.len() > count {
+            guard.pop_back();
+        }
+        while guard.len() < count {
+            let position = guard.len() + 1;
+            guard.push_back((position, Word::default()));
+        }
+    }
+
+    /// The phrase as one string, assembled only where it is needed.
+    ///
+    /// `Zeroizing` from the first byte rather than built and then wrapped: a
+    /// `String` that grows leaves its old buffer behind for the allocator, and
+    /// there is no reason to add to that when the length is known here.
+    fn phrase(&self) -> Zeroizing<String> {
+        let mut joined = Zeroizing::new(String::with_capacity(self.words.len() * 9));
+        for word in self.words.iter() {
+            if !joined.is_empty() {
+                joined.push(' ');
+            }
+            joined.push_str(word.word().as_str());
+        }
+        joined
+    }
+
+    /// What the description under the boxes says, which is the whole of the
+    /// feedback this screen gives while a phrase is being typed.
+    ///
+    /// Ordered by what is most useful to hear. A word that is not on the list
+    /// is named before anything else, because it is the one mistake that can be
+    /// pointed at; the count comes next, because it is the answer to "am I
+    /// nearly there"; and only a complete phrase gets judged as a phrase.
+    ///
+    /// **A valid phrase is worth saying out loud.** Every other wallet leaves
+    /// somebody to press Import and find out, and the checksum exists precisely
+    /// so that a mistyped word can be caught before it becomes an empty wallet
+    /// that looks exactly like a correct one.
+    fn phrase_status(&self) -> String {
+        let total = self.words.len();
+        if let Some(bad) = self.words.iter().position(|w| w.state() == State::Bad) {
+            return format!(
+                "Word {} is not one of the 2,048 recovery-phrase words. Check it against \
+                 your paper.",
+                bad + 1
+            );
+        }
+
+        let filled = self.words.iter().filter(|w| !w.word().is_empty()).count();
+        if filled < total {
+            return format!(
+                "{filled} of {total} words. Type them in order, or paste the whole phrase \
+                 into any box."
+            );
+        }
+
+        match Mnemonic::parse_in(Language::English, self.phrase().as_str()) {
+            Ok(_) => "This is a valid recovery phrase.".into(),
+            // Every word is real and the phrase is still wrong, which means the
+            // checksum failed: a word is in the wrong place, or one right word
+            // stands where another right word belongs. Neither is visible per
+            // box, so this is the only place it can be said.
+            Err(_) => format!(
+                "These {total} words are all real words, but they are not a valid recovery \
+                 phrase — one is out of order or in place of another."
+            ),
+        }
+    }
+
     fn paths_summary(&self) -> String {
         match self.kind {
             CredentialKind::Descriptor => "As described by the descriptor".into(),
@@ -321,9 +418,52 @@ impl Component for Restore {
                     },
                 },
 
+                // A phrase gets a box per word; everything else is one string
+                // and gets one line. Two groups rather than one that changes
+                // shape, because they share nothing but a position on screen.
                 adw::PreferencesGroup {
                     #[watch]
-                    set_visible: model.kind != CredentialKind::Hardware,
+                    set_visible: model.kind == CredentialKind::Mnemonic,
+                    set_title: "Recovery phrase",
+                    #[watch]
+                    set_description: Some(&model.phrase_status()),
+
+                    #[name(length_row)]
+                    adw::ComboRow {
+                        set_title: "Length",
+                        set_subtitle: "How many words are on your paper",
+                        set_model: Some(&gtk::StringList::new(&["12 words", "24 words"])),
+                        // Follows the model, because pasting a 24-word phrase
+                        // grows the boxes and this row has to agree with what
+                        // is on screen. Setting it to the value it already has
+                        // emits nothing, so this cannot loop.
+                        #[watch]
+                        set_selected: u32::from(model.word_count() > 12),
+                        connect_selected_notify[sender] => move |row| {
+                            sender.input(RestoreMsg::PhraseLength(row.selected()));
+                        },
+                    },
+
+                    // Not a row, so libadwaita puts it under the list rather
+                    // than in it — which is where a grid belongs.
+                    #[local_ref]
+                    phrase_box -> gtk::FlowBox {
+                        set_selection_mode: gtk::SelectionMode::None,
+                        set_homogeneous: true,
+                        set_min_children_per_line: 2,
+                        set_max_children_per_line: 3,
+                        set_row_spacing: 6,
+                        set_column_spacing: 6,
+                        set_margin_top: 12,
+                    },
+                },
+
+                adw::PreferencesGroup {
+                    #[watch]
+                    set_visible: !matches!(
+                        model.kind,
+                        CredentialKind::Hardware | CredentialKind::Mnemonic
+                    ),
                     #[watch]
                     set_title: model.credential_title(),
                     #[watch]
@@ -335,16 +475,23 @@ impl Component for Restore {
                         set_title: model.credential_title(),
                     },
 
+                },
+
+                // Its own group now that a phrase and an extended key are drawn
+                // by different ones: it belongs to both, and living inside
+                // either would hide it from the other.
+                adw::PreferencesGroup {
+                    // Only meaningful for a seed, and dangerous to confuse with
+                    // the wallet password, so it is hidden otherwise.
+                    #[watch]
+                    set_visible: model.kind.is_hd(),
+
                     #[name(bip39_expander)]
                     adw::ExpanderRow {
                         set_title: "My seed has a passphrase",
                         set_subtitle: "Sometimes called a 25th word. Most seeds do not have one — leave this off if you were never asked to choose one.",
                         set_show_enable_switch: true,
                         set_enable_expansion: false,
-                        // Only meaningful for a seed, and dangerous to confuse
-                        // with the wallet password, so it is hidden otherwise.
-                        #[watch]
-                        set_visible: model.kind.is_hd(),
 
                         #[name(bip39_row)]
                         add_row = &adw::PasswordEntryRow {
@@ -492,9 +639,26 @@ impl Component for Restore {
         root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let mut words = FactoryVecDeque::builder()
+            .launch(gtk::FlowBox::default())
+            .forward(sender.input_sender(), |out| match out {
+                PhraseWordOutput::Changed => RestoreMsg::PhraseChanged,
+                PhraseWordOutput::Spill(after, rest) => RestoreMsg::PhraseSpill(after, rest),
+            });
+        {
+            // Twelve to begin with: it is the commoner phrase, and pasting a
+            // longer one grows the grid on its own.
+            let mut guard = words.guard();
+            for position in 1..=12 {
+                guard.push_back((position, Word::default()));
+            }
+        }
+
         let model = Restore {
-            // Hardware is first in the list, so it is what the form opens on.
+            // A recovery phrase is first in the list, so it is what the form
+            // opens on. See KINDS.
             kind: KINDS[0],
+            words,
             network: bdk_wallet::bitcoin::Network::Bitcoin,
             birthday_index: 1,
             busy: false,
@@ -507,6 +671,7 @@ impl Component for Restore {
             birthday_model: gtk::StringList::new(&[]),
         };
         model.fill_birthdays();
+        let phrase_box = model.words.widget();
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
@@ -550,12 +715,65 @@ impl Component for Restore {
                 }
                 self.error = None;
             }
+            RestoreMsg::PhraseChanged => {
+                // The status line reads the model, so there is nothing to do
+                // but let the view run again.
+                self.error = None;
+            }
+
+            RestoreMsg::PhraseLength(index) => {
+                let wanted = if index == 0 { 12 } else { 24 };
+                if self.words.len() == wanted {
+                    return;
+                }
+                self.set_word_count(wanted);
+                self.error = None;
+            }
+
+            RestoreMsg::PhraseSpill(after, rest) => {
+                if rest.is_empty() {
+                    return;
+                }
+                // A pasted 24-word phrase arriving in a 12-box grid is not an
+                // error to report — it is a phrase, and the grid should become
+                // the size of it. Only the two standard lengths, so a stray
+                // paste of prose cannot stretch the screen.
+                let needed = after + rest.len();
+                if needed > self.words.len() && needed <= 24 {
+                    self.set_word_count(24);
+                }
+
+                let mut last = after;
+                for (offset, word) in rest.into_iter().enumerate() {
+                    let index = after + offset;
+                    if index >= self.words.len() {
+                        break;
+                    }
+                    self.words.send(index, PhraseWordMsg::Set(word));
+                    last = index + 1;
+                }
+
+                // The caret goes to the box after the last one filled, which is
+                // where somebody typing a space meant to be, and where somebody
+                // who pasted a short phrase needs to look.
+                if last < self.words.len() {
+                    self.words.send(last, PhraseWordMsg::Focus);
+                }
+                self.error = None;
+            }
+
             RestoreMsg::Cancel => {
                 let _ = sender.output(RestoreOutput::Cancelled);
             }
-            RestoreMsg::Submit(submission) => {
+            RestoreMsg::Submit(mut submission) => {
                 if self.busy {
                     return;
+                }
+                // The one field the submission cannot carry from a widget:
+                // a phrase lives in twelve or twenty-four of them, and the
+                // model is what they all report to.
+                if submission.kind == CredentialKind::Mnemonic {
+                    submission.credential = Secret(self.phrase());
                 }
                 let network = networks()[(submission.network_index as usize).min(1)];
 

@@ -148,6 +148,34 @@ lowest checkpoint of any wallet it is given.
 Each path is its own BDK wallet with its own SQLite file (BDK's table names are fixed), and
 one `bdk_kyoto` node drives them all via `build_with_wallets`.
 
+## Typing a phrase back in
+
+`src/ui/phrase.rs`. A box per word rather than one line of space-separated text, because
+the two mistakes people actually make — a word in the wrong place, and a word that is not a
+BIP-39 word — are both invisible in running text. **Recovery phrase is `KINDS[0]`**, which is
+what the import form opens on; the order of that array is the default, so reordering it is how
+the default changes.
+
+Four rules, each of which is the reason a line of that file exists:
+
+- **A completion must never invent a word.** BIP-39's list is built so four characters
+  identify a word, so expanding a unique prefix on space is safe — but only when exactly one
+  word matches. A test walks all 2,048 and asserts every completion is itself a real word,
+  because a wrong one is submitted as part of a seed and derives a different, empty wallet.
+- **`Word` carries a redacted `Debug`**, for the reason `Face` does. These messages carry a
+  seed one word at a time, and relm4 traces every message.
+- **A valid phrase is said out loud.** The status line reads `N of 12 words`, then names a
+  word that is not on the list, then — when every word is real and the checksum still fails —
+  says one is out of order. A correct phrase gets told it is correct. That is the whole
+  point: the checksum exists so a mistyped word is caught here rather than becoming an empty
+  wallet that looks exactly like a correct one.
+- **The entry text is pushed only when it disagrees with the model.** A `#[watch]` would
+  `set_text` on every keystroke and move the caret to the end, making the middle of a word
+  uneditable. Hence `apply`, and hence `update_with_view` rather than `update`.
+
+Pasting works into *any* box: whitespace means a boundary, the rest spills into the boxes
+after it, and a 24-word phrase pasted into a 12-box grid grows the grid.
+
 ## Where a phrase's randomness comes from
 
 `getrandom::fill` — the `getrandom(2)` syscall — the same call the vault uses for its salt,
@@ -521,6 +549,7 @@ src/
   settings.rs        preferences on disk
   ui/
     onboarding.rs    make a wallet: password, phrase, dice, verification
+    phrase.rs        typing a recovery phrase, one numbered box per word
     restore.rs       import one: phrase, key, descriptor, device
     unlock.rs        the wallet *password*; Argon2 off-thread via spawn_oneshot_command
     wallet_page.rs   the unlocked wallet: activity, receive, send, preferences
@@ -580,7 +609,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 198 tests; no network, no display
+cargo test                       # 202 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging

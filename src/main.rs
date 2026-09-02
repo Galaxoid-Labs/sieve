@@ -117,6 +117,17 @@ const GLOBAL_CSS: &str = ".qr-ground { background-color: #ffffff; border-radius:
        padding: 10px 12px; \
      } \
      .seed-index { opacity: 0.5; font-size: 0.8em; } \
+     .seed-word entry { \
+       background: none; \
+       box-shadow: none; \
+       outline: none; \
+       min-height: 0; \
+       padding: 0; \
+     } \
+     .seed-word:focus-within { \
+       outline: 2px solid @accent_color; \
+       outline-offset: -1px; \
+     } \
      .die-face { \
        font-size: 1.05em; \
        font-weight: 700; \
