@@ -397,7 +397,9 @@ const ICONS: &[&str] = &[
     "preferences-system-symbolic",
     "sieve-receive-symbolic",
     "sieve-send-symbolic",
+    "view-conceal-symbolic",
     "view-refresh-symbolic",
+    "view-reveal-symbolic",
     "web-browser-symbolic",
     "window-close-symbolic",
 ];
@@ -1739,6 +1741,25 @@ impl Component for App {
             AppMsg::Lock(reason) => {
                 // Nothing to shut, or nothing to shut it against.
                 if !self.unlocked || self.active.is_none() {
+                    return;
+                }
+                // **And nothing to open it with.** A watch-only wallet that
+                // was never given a password has no vault and no `lock.sieve`,
+                // so there is nothing for the unlock screen to check — locking
+                // one shut it for good until the app was restarted. The idle
+                // timer did this on its own after five minutes.
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|paths| !paths.can_be_unlocked())
+                {
+                    if matches!(reason, LockReason::Asked) {
+                        self.wallet.emit(WalletPageMsg::Toast(
+                            "This wallet has no password to lock it with. Set one in \
+                             preferences."
+                                .into(),
+                        ));
+                    }
                     return;
                 }
                 tracing::info!(?reason, "locking the wallet");

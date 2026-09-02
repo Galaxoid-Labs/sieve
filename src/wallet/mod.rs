@@ -396,6 +396,17 @@ impl Paths {
     pub fn is_initialised(&self) -> bool {
         self.vault.exists() || self.meta.exists()
     }
+
+    /// Whether anything here can be unlocked again once it is shut.
+    ///
+    /// A wallet holding keys has a vault, and the vault's password is the
+    /// wallet's. A watch-only wallet has one only if somebody set one, which
+    /// puts `lock.sieve` beside it. A watch-only wallet with neither can be
+    /// *locked* perfectly well and then never opened — the unlock screen has
+    /// nothing to check a password against — so nothing should lock it.
+    pub fn can_be_unlocked(&self) -> bool {
+        self.vault.exists() || self.lock.exists()
+    }
 }
 
 /// A wallet as the chooser needs to show it: enough to pick one, and nothing
@@ -1835,6 +1846,42 @@ mod tests {
         // And a wallet made here still offers its first unused address.
         let created = super::next_address_to_offer(&mut account.wallet, false);
         assert!(created.index <= tip);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A wallet with no password must not be lockable.
+    ///
+    /// Locking is only ever half of a pair. A watch-only wallet that was never
+    /// given a password has no vault and no `lock.sieve`, so the unlock screen
+    /// has nothing to check against — and the idle timer was shutting one
+    /// after five minutes, leaving it closed until the app was restarted.
+    #[test]
+    fn a_wallet_with_no_password_cannot_be_locked() {
+        let dir = std::env::temp_dir().join(format!("sieve-lockable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = Paths {
+            vault: dir.join("vault.sieve"),
+            db: dir.join("wallet.sqlite"),
+            meta: dir.join("wallet.meta.json"),
+            lock: dir.join("lock.sieve"),
+            dir: dir.clone(),
+        };
+
+        // Watch-only, no password: nothing to unlock with.
+        std::fs::write(&paths.meta, "{}").unwrap();
+        assert!(!paths.can_be_unlocked());
+
+        // Given one, it becomes lockable.
+        std::fs::write(&paths.lock, b"sealed").unwrap();
+        assert!(paths.can_be_unlocked());
+
+        // And a wallet holding keys always was: the vault's password is its
+        // own, whether or not anything else exists beside it.
+        std::fs::remove_file(&paths.lock).unwrap();
+        std::fs::write(&paths.vault, b"sealed").unwrap();
+        assert!(paths.can_be_unlocked());
 
         std::fs::remove_dir_all(&dir).ok();
     }
