@@ -96,6 +96,21 @@ accepts metadata without a vault, and `open_watch_only` is the counterpart to `u
 wallet with no secret. **"Unlocked" and "holds keys" are now separate questions** — code that
 assumes the first implies the second is wrong.
 
+**`zpub`, `ypub`, `upub` and `vpub` are accepted, and a bare one is enough.** SLIP-132 keys are
+byte-identical to an `xpub` apart from four version bytes, so `normalise_slip132` swaps the
+prefix and hands BDK what it wants. The prefix is also *information an `xpub` does not carry*:
+`zpub` means BIP-84. So a bare `zpub` with no origin is accepted where a bare `xpub` is still
+refused — which is the existing rule applied to a key that answers the question, not an
+exception to it. Conversion happens after the private-key refusal, so a `zprv` is still turned
+away as a private key rather than quietly converted into anything.
+
+The reason to bother is not tidiness: a wallet configured for native segwit *shows* a `zpub`,
+and refusing it sends somebody to find a converter — which is a website they paste an extended
+public key into, the worst habit this program could encourage.
+`a_zpub_derives_the_address_bip84_says_it_should` checks the conversion against BIP-84's own
+published key and address rather than against itself, because a wrong version swap yields a key
+that parses perfectly and describes somebody else's wallet.
+
 `wallet::watch::parse` turns what a device exports into the pair of descriptors BDK wants. It
 takes a multipath descriptor (`…/<0;1>/*`), a single-path one ending `/0/*`, or a bare extended
 key with its origin, and infers the script type from the purpose in that origin — 84h is native
@@ -800,7 +815,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 218 tests; no network, no display
+cargo test                       # 222 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging

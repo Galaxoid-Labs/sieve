@@ -14,6 +14,98 @@ use anyhow::{Result, anyhow, bail};
 
 use super::accounts::ScriptType;
 
+/// SLIP-132 version bytes, and the BIP-32 ones they stand in for.
+///
+/// **These keys are byte-identical to an `xpub` apart from four bytes.**
+/// Everything after the version — depth, parent fingerprint, child number,
+/// chain code, key — is the same, so converting one is a prefix swap and
+/// nothing else. `bitcoin`'s `base58` does the check-encoding either way.
+///
+/// The reason to bother: people paste what their wallet shows them, and a
+/// wallet configured for native segwit shows a `zpub`. Refusing it sends
+/// somebody to find a converter, which is a website they paste an extended
+/// public key into — the single worst habit this program could encourage.
+const SLIP132: &[(&str, [u8; 4], [u8; 4], ScriptType)] = &[
+    // prefix, its version bytes, the BIP-32 equivalent, what it describes
+    (
+        "ypub",
+        [0x04, 0x9D, 0x7C, 0xB2],
+        [0x04, 0x88, 0xB2, 0x1E],
+        ScriptType::NestedSegwit,
+    ),
+    (
+        "zpub",
+        [0x04, 0xB2, 0x47, 0x46],
+        [0x04, 0x88, 0xB2, 0x1E],
+        ScriptType::NativeSegwit,
+    ),
+    (
+        "upub",
+        [0x04, 0x4A, 0x52, 0x62],
+        [0x04, 0x35, 0x87, 0xCF],
+        ScriptType::NestedSegwit,
+    ),
+    (
+        "vpub",
+        [0x04, 0x5F, 0x1C, 0xF6],
+        [0x04, 0x35, 0x87, 0xCF],
+        ScriptType::NativeSegwit,
+    ),
+];
+
+/// An extended public key rewritten as an `xpub`/`tpub`, and what it said.
+///
+/// `None` when this is not a SLIP-132 key, which includes every `xpub` — those
+/// are already what BDK wants and are left exactly alone.
+fn from_slip132(token: &str) -> Option<(String, ScriptType)> {
+    let (_, version, standard, script_type) = SLIP132
+        .iter()
+        .find(|(prefix, ..)| token.starts_with(prefix))?;
+
+    let mut bytes = bdk_wallet::bitcoin::base58::decode_check(token).ok()?;
+    // A prefix match is not proof: base58 is not a prefix code, so check the
+    // bytes actually say what the four characters claimed before trusting them.
+    if bytes.len() < 4 || bytes[..4] != version[..] {
+        return None;
+    }
+    bytes[..4].copy_from_slice(standard);
+    Some((
+        bdk_wallet::bitcoin::base58::encode_check(&bytes),
+        *script_type,
+    ))
+}
+
+/// Rewrite every SLIP-132 key in `text`, and report what they described.
+///
+/// The script type comes back because it is information an `xpub` does not
+/// carry: `zpub` *means* BIP-84. See `script_type_of`.
+fn normalise_slip132(text: &str) -> (String, Option<ScriptType>) {
+    let mut found = None;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    // Split on the characters a key can be delimited by, keeping them, so a
+    // key inside `wpkh([origin]zpub…/0/*)` is rewritten in place.
+    while let Some(at) = rest.find(|c: char| c.is_ascii_alphanumeric()) {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(rest.len());
+        let (token, tail) = rest.split_at(end);
+        match from_slip132(token) {
+            Some((converted, script_type)) => {
+                out.push_str(&converted);
+                found = found.or(Some(script_type));
+            }
+            None => out.push_str(token),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    (out, found)
+}
+
 /// The receive and change descriptors a wallet is built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Descriptors {
@@ -54,7 +146,18 @@ pub fn parse(text: &str) -> Result<Descriptors> {
         );
     }
 
-    let script_type = script_type_of(text)?;
+    // After the private-key refusal, so a `zprv` is still turned away as a
+    // private key rather than quietly converted into something.
+    let (converted, from_prefix) = normalise_slip132(text);
+    let text = converted.as_str();
+
+    // A SLIP-132 prefix is itself an answer: `zpub` *means* BIP-84. An `xpub`
+    // says nothing, which is why a bare one is refused — so this is the rule
+    // applied to a key that carries the information, not an exception to it.
+    let script_type = match script_type_of(text) {
+        Ok(script_type) => script_type,
+        Err(e) => from_prefix.ok_or(e)?,
+    };
 
     // A descriptor is anything with a function around the key.
     if text.contains('(') {
@@ -200,6 +303,80 @@ mod tests {
     use super::*;
 
     const XPUB: &str = "xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSWGFNbi8Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj";
+
+    /// BIP-84's own zpub, and BIP-84's own first address.
+    ///
+    /// **Checked against something outside this program**, because a wrong
+    /// version-byte swap produces a key that parses perfectly and describes a
+    /// wallet somewhere else entirely: no error, no coins, an empty screen. A
+    /// round-trip test would agree with itself and prove none of that. These
+    /// two strings are from the BIP-84 specification, for the phrase
+    /// `abandon … about`.
+    #[test]
+    fn a_zpub_derives_the_address_bip84_says_it_should() {
+        use std::str::FromStr;
+
+        const ZPUB: &str = "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs";
+        const FIRST: &str = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu";
+
+        // Bare, with no origin — which is what a wallet's information screen
+        // shows, and what an xpub would rightly be refused for.
+        let parsed = parse(ZPUB).expect("a zpub says which addresses it makes");
+        assert_eq!(parsed.script_type, ScriptType::NativeSegwit);
+        assert!(parsed.external.starts_with("wpkh("), "{}", parsed.external);
+        assert!(
+            parsed.external.contains("xpub"),
+            "the key must be rewritten as an xpub: {}",
+            parsed.external
+        );
+
+        let descriptor = bdk_wallet::miniscript::Descriptor::<
+            bdk_wallet::miniscript::DescriptorPublicKey,
+        >::from_str(&parsed.external)
+        .expect("a descriptor BDK can read");
+        let address = descriptor
+            .at_derivation_index(0)
+            .unwrap()
+            .address(bdk_wallet::bitcoin::Network::Bitcoin)
+            .unwrap();
+        assert_eq!(
+            address.to_string(),
+            FIRST,
+            "the conversion moved the wallet"
+        );
+    }
+
+    /// An xpub is left exactly alone.
+    #[test]
+    fn an_ordinary_key_is_not_rewritten() {
+        let (text, prefix) = normalise_slip132(XPUB);
+        assert_eq!(text, XPUB);
+        assert_eq!(prefix, None);
+
+        // And a bare one is still refused, because it still says nothing.
+        assert!(parse(XPUB).is_err());
+    }
+
+    /// A key inside a descriptor is converted in place.
+    #[test]
+    fn a_slip132_key_inside_a_descriptor_is_rewritten_where_it_stands() {
+        const ZPUB: &str = "zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs";
+        let text = format!("wpkh([ab12cd34/84h/0h/0h]{ZPUB}/<0;1>/*)");
+        let parsed = parse(&text).unwrap();
+        assert!(parsed.external.contains("xpub"), "{}", parsed.external);
+        assert!(!parsed.external.contains("zpub"), "{}", parsed.external);
+        // The origin still wins for the script type; it agrees here anyway.
+        assert_eq!(parsed.script_type, ScriptType::NativeSegwit);
+        assert!(parsed.external.contains("[ab12cd34/84h/0h/0h]"));
+    }
+
+    /// The private halves stay refused, and are not converted on the way.
+    #[test]
+    fn a_slip132_private_key_is_still_a_private_key() {
+        const ZPRV: &str = "zprvAWgYBBk7JR8Gjrh4UJQ2uJdG1r3WNRRfURiABBE3RvMXYSrRJL62XuezvGdPvG6GFBZduosCc1YP5wixPox7zhZLfiUm8aunE96BBa4Kei5";
+        let err = parse(ZPRV).unwrap_err().to_string();
+        assert!(err.contains("private key"), "{err}");
+    }
 
     #[test]
     fn a_multipath_descriptor_splits_into_two_chains() {

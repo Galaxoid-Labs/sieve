@@ -120,10 +120,9 @@ history, receive, and a PSBT to sign in Electrum — and the only thing seed
 import adds is *spending from Sieve*. That is a much narrower reason to take on
 a competitor's proprietary format.
 
-The friction: Electrum shows a **zpub**, and SLIP-132 prefixes are not BIP-32,
-so it has to be converted to `xpub` first. Sieve could accept `zpub`/`ypub`/
-`vpub` and convert them, which is a version-byte swap and would help every
-descriptor import, not only Electrum's.
+The friction that used to exist here is gone: Electrum shows a **zpub**, and
+Sieve now accepts `zpub`/`ypub`/`upub`/`vpub` and rewrites them, so there is
+nothing to convert by hand.
 
 **This is untested.** It is reasoning from the code, and the same reasoning was
 wrong once already — an earlier reading of this file's own subject concluded
