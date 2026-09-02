@@ -1374,58 +1374,6 @@ pub fn create(
     Summary::from_portfolio(&mut portfolio)
 }
 
-/// Import an extended private key.
-///
-/// Derivation is identical to a recovery phrase — a phrase is only a way of
-/// writing one of these down — so this reuses the same path expansion.
-#[allow(clippy::too_many_arguments)]
-pub fn import_xprv(
-    xprv_text: &str,
-    password: &[u8],
-    paths: &Paths,
-    kdf: vault::KdfParams,
-    network: Network,
-    birthday: Checkpoint,
-    script_types: &[accounts::ScriptType],
-    primary: accounts::ScriptType,
-    name: Option<String>,
-) -> Result<Summary> {
-    let xprv: bdk_wallet::bitcoin::bip32::Xpriv = xprv_text
-        .trim()
-        .parse()
-        .map_err(|e| anyhow!("that is not a valid extended private key: {e}"))?;
-
-    let mut portfolio = accounts::Portfolio::create_from_xprv(
-        xprv,
-        data_dir(paths),
-        script_types,
-        primary,
-        network,
-        accounts::IMPORT_LOOKAHEAD,
-    )?;
-    // An extended key is already past the seed, so a BIP-39 passphrase has no
-    // meaning here: whatever one was used is baked into the key itself.
-    Meta::new(
-        network,
-        birthday,
-        script_types.to_vec(),
-        primary,
-        name,
-        false,
-    )
-    .save(paths)?;
-
-    let sealed = vault::seal(
-        xprv_text.trim().as_bytes(),
-        password,
-        &network.to_string(),
-        kdf,
-    )?;
-    vault::write_atomic(&paths.vault, &sealed)?;
-
-    Summary::from_portfolio(&mut portfolio)
-}
-
 /// Import a single WIF key, watched under every requested script type.
 // Everything a wallet is made of, and each of them is decided somewhere
 // different: the key by the person, the KDF by this build, the network and

@@ -24,11 +24,10 @@ use crate::wallet::{self, Paths, Summary};
 /// twelve or twenty-four words on paper is what "I have a wallet elsewhere"
 /// usually means, and a device is the second answer rather than the first. The
 /// rest descend by how often anybody reaches for them.
-const KINDS: [CredentialKind; 5] = [
+const KINDS: [CredentialKind; 4] = [
     CredentialKind::Mnemonic,
     CredentialKind::Hardware,
     CredentialKind::Descriptor,
-    CredentialKind::ExtendedKey,
     CredentialKind::Wif,
 ];
 
@@ -70,6 +69,11 @@ pub enum RestoreMsg {
     PhraseSpill(usize, Vec<Word>),
     Submit(Box<Submission>),
     Cancel,
+    /// Empty every field, including the ones holding secrets.
+    ///
+    /// Sent when this screen is opened *and* when it is left, so a phrase
+    /// cannot survive either direction. See `Restore::update_with_view`.
+    Clear,
 }
 
 #[derive(Debug)]
@@ -180,7 +184,6 @@ impl Restore {
     fn credential_title(&self) -> &'static str {
         match self.kind {
             CredentialKind::Mnemonic => "Recovery phrase",
-            CredentialKind::ExtendedKey => "Extended private key",
             CredentialKind::Wif => "Private key",
             CredentialKind::Descriptor => "Descriptor or xpub",
             CredentialKind::Hardware => "Hardware wallet",
@@ -190,7 +193,6 @@ impl Restore {
     fn credential_hint(&self) -> &'static str {
         match self.kind {
             CredentialKind::Mnemonic => "The 12 or 24 words, separated by spaces",
-            CredentialKind::ExtendedKey => "An xprv, tprv or vprv. No recovery phrase needed",
             CredentialKind::Wif => "A single private key in Wallet Import Format",
             CredentialKind::Descriptor => {
                 "Paste an exported descriptor or extended \
@@ -750,6 +752,60 @@ impl Component for Restore {
         ComponentParts { model, widgets }
     }
 
+    /// Clearing needs the widgets, so it happens here rather than in `update`.
+    ///
+    /// **The rule this keeps is the first one in CLAUDE.md**: a field that has
+    /// held a secret does not keep holding it. This screen takes a recovery
+    /// phrase and a new password, and the component is alive for the whole
+    /// session — so without this, backing out of an import left a seed sitting
+    /// in twelve boxes until the app closed.
+    ///
+    /// Overriding `update_with_view` means `update_view` is no longer called
+    /// for us, hence the calls at the end of both arms.
+    fn update_with_view(
+        &mut self,
+        widgets: &mut Self::Widgets,
+        msg: Self::Input,
+        sender: ComponentSender<Self>,
+        root: &Self::Root,
+    ) {
+        if matches!(msg, RestoreMsg::Clear) {
+            widgets.name_row.set_text("");
+            widgets.credential_row.set_text("");
+            widgets.bip39_row.set_text("");
+            widgets.bip39_expander.set_enable_expansion(false);
+            widgets.password_row.set_text("");
+            widgets.confirm_row.set_text("");
+            widgets.acknowledge_row.set_active(false);
+
+            // The phrase grid is the model's, and back to twelve empty boxes:
+            // a 24-word phrase leaves twelve more boxes than a fresh import
+            // should show.
+            {
+                let mut guard = self.words.guard();
+                guard.clear();
+                for position in 1..=12 {
+                    guard.push_back((position, Word::default()));
+                }
+            }
+            skip_the_wrappers(self.words.widget());
+
+            self.kind = KINDS[0];
+            self.error = None;
+            self.busy = false;
+            self.pending = None;
+            self.devices.clear();
+            self.device_index = 0;
+            self.looked = false;
+
+            self.update_view(widgets, sender);
+            return;
+        }
+
+        self.update(msg, sender.clone(), root);
+        self.update_view(widgets, sender);
+    }
+
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
             RestoreMsg::LookForDevices => {
@@ -836,6 +892,9 @@ impl Component for Restore {
                 self.error = None;
             }
 
+            // Handled in `update_with_view`, which has the widgets.
+            RestoreMsg::Clear => {}
+
             RestoreMsg::Cancel => {
                 let _ = sender.output(RestoreOutput::Cancelled);
             }
@@ -880,7 +939,6 @@ impl Component for Restore {
                     self.error = Some(match submission.kind {
                         CredentialKind::Mnemonic => "Enter your recovery phrase.".into(),
                         CredentialKind::Wif => "Enter the private key.".into(),
-                        CredentialKind::ExtendedKey => "Enter the extended key.".into(),
                         CredentialKind::Descriptor => "Enter the descriptor.".into(),
                         CredentialKind::Hardware => unreachable!("handled above"),
                     });
@@ -974,17 +1032,6 @@ impl Component for Restore {
                             // An imported wallet already has history, so the
                             // window has to be wide enough to find it.
                             crate::wallet::accounts::IMPORT_LOOKAHEAD,
-                        ),
-                        CredentialKind::ExtendedKey => wallet::import_xprv(
-                            &credential,
-                            password.as_bytes(),
-                            &paths,
-                            crate::vault::KdfParams::default(),
-                            network,
-                            birthday,
-                            &ScriptType::ALL,
-                            ScriptType::NativeSegwit,
-                            name.clone(),
                         ),
                         CredentialKind::Wif => wallet::import_wif(
                             &credential,

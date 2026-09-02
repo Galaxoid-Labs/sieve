@@ -131,8 +131,19 @@ Whatever a device hands back is untrusted and re-verified before broadcast.
 
 Two axes, kept separate:
 
-- **`CredentialKind`** — what the user pastes: a recovery phrase, a WIF key, or a descriptor.
-  `carries_keys()` distinguishes the imports that could lose money from the one that cannot.
+- **`CredentialKind`** — what the user pastes: a recovery phrase, a WIF key, a descriptor, or
+  a device. `carries_keys()` distinguishes the imports that could lose money from the ones
+  that cannot.
+
+  **There was a fifth, "extended private key", and it was removed rather than fixed.** It
+  applied BDK's BIP-44/49/84/86 templates *beneath* whatever key was pasted, which is right
+  for a true master key at `m` and wrong for everything wallets actually export — Electrum's
+  sits at `m/0'`, and plenty of tools hand out an account key at `m/84'/0'/0'`. Paste one of
+  those and Sieve watched `m/84'/0'/0'/84'/0'/0'`: no coins, no error, a wallet that looks
+  empty rather than misconfigured. That is the exact failure this file refuses elsewhere —
+  `watch::parse` will not guess a script type from a bare key — and the xprv row was guessing
+  a whole derivation path. A descriptor does the same job without guessing, because it carries
+  its own path and is used verbatim. Do not add the row back without an origin requirement.
 - **`ScriptType`** — where it is searched: BIP44/49/84/86. An import searches all of them,
   because one seed derives a different wallet on each path and guessing wrong finds nothing.
   Syncing all four costs no extra bandwidth: a filter covers a whole block regardless. A

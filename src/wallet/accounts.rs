@@ -167,9 +167,6 @@ pub enum CredentialKind {
     Mnemonic,
     /// A single private key in Wallet Import Format.
     Wif,
-    /// A BIP32 extended private key. Many wallets export one of these and
-    /// never show a recovery phrase at all.
-    ExtendedKey,
     /// An output descriptor or extended public key — watch-only, no keys.
     Descriptor,
     /// A device on the end of a USB cable. Watch-only here too: what comes
@@ -185,7 +182,6 @@ impl CredentialKind {
             // detail belongs in the group description underneath.
             CredentialKind::Mnemonic => "Recovery phrase",
             CredentialKind::Wif => "Private key",
-            CredentialKind::ExtendedKey => "Extended key",
             CredentialKind::Descriptor => "Descriptor or xpub",
             CredentialKind::Hardware => "Hardware wallet",
         }
@@ -201,7 +197,7 @@ impl CredentialKind {
 
     /// Whether this credential derives many addresses or holds exactly one.
     pub fn is_hd(self) -> bool {
-        matches!(self, CredentialKind::Mnemonic | CredentialKind::ExtendedKey)
+        matches!(self, CredentialKind::Mnemonic)
     }
 }
 

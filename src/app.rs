@@ -1003,6 +1003,9 @@ impl Component for App {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
         match msg {
             AppMsg::Back => {
+                // Whatever was being imported is not being imported any more,
+                // and the fields hold a recovery phrase and a password.
+                self.restore.emit(crate::ui::restore::RestoreMsg::Clear);
                 // Setup and import set can_pop false so they can own their
                 // back button, which also means pop does not move them. The
                 // destination is known anyway: the wallet, when there is one.
@@ -1027,6 +1030,12 @@ impl Component for App {
             }
             AppMsg::ShowRestore => {
                 self.close_prefs();
+                // Both ways: on the way in as well as on the way out. Leaving
+                // is where a phrase would be abandoned, and arriving is the
+                // moment somebody would see one that had been — so clearing
+                // here as well means a bug in the other path cannot show
+                // anybody the last person's seed.
+                self.restore.emit(crate::ui::restore::RestoreMsg::Clear);
                 self.nav.push_by_tag("restore");
             }
 
@@ -2319,6 +2328,9 @@ impl Component for App {
             }
 
             AppMsg::Ready { paths, summary } => {
+                // A successful import leaves the phrase in the boxes exactly
+                // as an abandoned one does, and this is the likelier route.
+                self.restore.emit(crate::ui::restore::RestoreMsg::Clear);
                 // Opening a different wallet must retire the running client.
                 // Otherwise the previous wallet's node keeps feeding this
                 // screen, and a freshly imported wallet shows the old one's
