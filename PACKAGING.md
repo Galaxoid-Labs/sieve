@@ -525,6 +525,47 @@ no server is told anything. Package managers exist so that applications do not
 do this. If a release ever carries a security fix, the channel is the release
 notes and the distribution, not a dialog that phones home.
 
+## What uninstalling does not remove
+
+**No package Sieve ships will ever delete a wallet, and none of them could.**
+Worth stating in the file about packaging, because it is the one question a
+packager is tempted to answer with a script.
+
+`dpkg`'s `postrm purge`, rpm's `%postun` and pacman's `post_remove` all run as
+root against system paths. None of them has a reliable notion of *which* users
+installed anything, and Debian policy forbids touching `$HOME` outright. There
+is no per-user uninstall hook on Linux to implement. The single exception in
+the ecosystem is Flatpak — `flatpak uninstall --delete-data`, which works only
+because the data is corralled inside `~/.var/app/<id>/` — and Sieve does not
+ship a Flatpak.
+
+**That is the right behaviour, and it should not be worked around.** For a
+wallet, uninstall-deletes-data is a money bug waiting for an ordinary event: a
+repository change, a reinstall, a distribution upgrade that removes and re-adds
+a package. Anybody who did not write their recovery phrase down would lose the
+coins, and the operation that did it would look routine. Data outliving the
+package is the property being defended.
+
+So the handling is documentation, in the two places somebody looks:
+
+- **In the app.** Preferences has a Files group naming both directories, with a
+  copy button and a button that opens each one, under a description saying that
+  removing Sieve leaves them in place and that the wallet directory should be
+  deleted only by somebody holding the recovery phrase.
+- **In the package.** The `.deb`, `.rpm` and AUR descriptions, and the release
+  notes, say the same sentence. A packager reading this file should not add a
+  cleanup hook to be helpful.
+
+Deleting a wallet from inside Sieve is a separate thing and already exists —
+**Remove this wallet** in preferences, `destructive-action` styled and behind a
+confirmation, which can warn about the phrase in a way a `postrm` script never
+could.
+
+Not attempted, and worth saying why: there is no secure erase. Overwriting a
+file guarantees nothing on an SSD or a copy-on-write filesystem, and the vault
+is encrypted, which is the protection that actually holds once the bytes are
+somewhere Sieve cannot reach.
+
 ## What is now dead
 
 `packaging/com.galaxoidlabs.Sieve.yml` and `scripts/fetch-tor.sh` exist to

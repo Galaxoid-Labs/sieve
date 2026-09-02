@@ -177,9 +177,10 @@ refuses to connect rather than falling back to the clear.
 
 ## On disk
 
-Everything Sieve writes lives under `~/.local/share/sieve`, mode 0700, with
-every file 0600 — verified against a real installation, not just the code
-that creates them.
+Sieve writes to two directories, both mode 0700 with every file 0600 —
+verified against a real installation, not just the code that creates them.
+
+Wallet data lives under `~/.local/share/sieve` (`XDG_DATA_HOME`):
 
 | | |
 |---|---|
@@ -188,7 +189,30 @@ that creates them.
 | `wallets/<id>/wallet.meta.json` | network, birthday, paths, scan progress |
 | `wallets/<id>/labels.jsonl` | **plaintext**, and the UI says so |
 | `peers/<network>.json` | peers that worked last time |
+| `chain/<network>/` | handed to the node as a data directory, which it ignores |
+| `tor/` | the data directory of a Tor that Sieve started |
+
+Preferences live under `~/.config/sieve` (`XDG_CONFIG_HOME`):
+
+| | |
+|---|---|
 | `settings.json` | preferences, including the last wallet opened |
+
+**The split is a safety property, not tidiness.** One of those directories is
+disposable and the other is not: every preference in it can be rebuilt by
+opening the preferences dialog again, and a sealed seed cannot be rebuilt by
+anything except the recovery phrase. Keeping them apart means somebody clearing
+up after Sieve can delete the whole of one without going near the other. A test
+(`preferences_do_not_live_among_the_wallets`) asserts the two roots differ and
+that neither contains the other, so a future change cannot quietly put a vault
+inside the directory this file calls safe to remove.
+
+Preferences moved out of the data directory rather than having always been
+there; `Settings::load` migrates a file from the old location once, by copy and
+then remove, and leaves the old one alone if the write fails.
+
+**Nothing removes any of this when the package is uninstalled**, deliberately —
+see `PACKAGING.md`.
 
 **Labels are not encrypted**, deliberately: a watch-only wallet has no password
 to encrypt them with, and the transaction history sitting beside them is

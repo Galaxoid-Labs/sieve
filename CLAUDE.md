@@ -399,6 +399,38 @@ own coins and a payment is built from one, so "all your coins" is false the mome
 holds anything — false in the direction that sends somebody hunting for money that is not
 missing. `coins_scope` says "in this wallet" or names the path, depending.
 
+## Two directories, and which one is safe to delete
+
+Wallets are in `wallet::data_root()` — `~/.local/share/sieve`. Preferences are
+in `wallet::config_root()` — `~/.config/sieve`. Both come from
+`directories::ProjectDirs`, which on Linux ignores the qualifier and the
+organisation and uses the lowercased application name alone.
+
+**The split is the point, and it is load-bearing.** One directory is
+disposable and the other is not: every preference in `settings.json` can be set
+again by opening the dialog, and a `vault.sieve` can be recovered only from the
+recovery phrase. Keeping them apart is what lets the UI and the docs tell
+somebody that one of them is safe to remove. `preferences_do_not_live_among_the_wallets`
+asserts the two roots differ and that neither contains the other, so a change
+that collapses them fails loudly rather than putting a vault inside the
+directory Sieve describes as disposable.
+
+Preferences moved there; they used to sit beside the wallets. `Settings::load`
+calls `migrate` once — copy, then remove, never `rename`, since the two can be
+on different filesystems, and the old file is left alone if the write fails.
+`settings::path` is the only reader of either location, which is why the move
+touched one function.
+
+**Nothing cleans this up on uninstall, and nothing should.** No Linux package
+manager removes files under `$HOME` — dpkg, rpm and pacman all run their
+scripts as root against system paths, and Debian policy forbids it — so there
+is no hook to implement even if it were wanted, and it is not: a repository
+change or a distribution upgrade that removed a vault would cost somebody their
+coins. So the app says where the files are instead, in a Files group in
+preferences, and `PACKAGING.md` tells a packager not to add a cleanup hook to
+be helpful. Deleting one wallet from inside Sieve already exists and is the
+right route — **Remove this wallet**, confirmed and `destructive-action`.
+
 ## The name
 
 **Sieve**, one word, and it stays that way. The GNOME naming guidance asks for
@@ -548,7 +580,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 186 tests; no network, no display
+cargo test                       # 198 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging

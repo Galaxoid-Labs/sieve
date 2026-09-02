@@ -672,6 +672,14 @@ and the order of work.
       with every development package in it, and emulation means hours. The Arch job stays
       x86_64: there is no official Arch aarch64 image, and that job exists to prove the
       PKGBUILD builds rather than to ship a binary.
+- [x] Say where the files are, and settle what uninstalling does to them. Preferences now
+      has a Files group naming both directories with a button that opens each, and
+      preferences moved from the data directory to `~/.config/sieve` so that one of the two
+      is genuinely safe to delete — a test asserts neither contains the other. Nothing is
+      removed on uninstall and nothing should be: no Linux package manager touches `$HOME`,
+      and a distribution upgrade that took a vault with it would cost somebody their coins.
+      `PACKAGING.md` says so where a packager would otherwise add a cleanup hook to be
+      helpful.
 - [ ] Built in containers of the oldest supported release of each family, which is what the
       version floor is checked against.
 - [ ] Verify the libadwaita 1.5 floor against real containers. Ubuntu 22.04 and Debian 12 are

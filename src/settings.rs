@@ -238,13 +238,45 @@ pub struct Settings {
 }
 
 fn path() -> PathBuf {
+    crate::wallet::config_root().join("settings.json")
+}
+
+/// Where preferences used to live, before they moved to `XDG_CONFIG_HOME`.
+///
+/// Kept only so `migrate` can find them once. Do not read it anywhere else.
+fn legacy_path() -> PathBuf {
     crate::wallet::data_root().join("settings.json")
+}
+
+/// Move a pre-move settings file to the config directory, once.
+///
+/// Copy-then-remove rather than `rename`, because the two directories can be
+/// on different filesystems. The old file is removed only after the new one is
+/// written, and a failure to remove it is ignored: a settings file read from
+/// the right place is the whole goal, and a leftover is untidy rather than
+/// wrong. Nothing here touches wallet data — this file holds preferences, and
+/// losing it costs a trip back to preferences.
+fn migrate() {
+    let (new, old) = (path(), legacy_path());
+    if new == old || new.exists() || !old.exists() {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(&old) else {
+        return;
+    };
+    if let Err(e) = crate::vault::write_atomic(&new, &bytes) {
+        tracing::warn!(%e, "could not move settings to the config directory");
+        return;
+    }
+    let _ = std::fs::remove_file(&old);
+    tracing::info!(from = %old.display(), to = %new.display(), "moved settings");
 }
 
 impl Settings {
     /// Missing or unreadable settings fall back to defaults rather than
     /// failing — a preferences file is never worth blocking startup over.
     pub fn load() -> Self {
+        migrate();
         std::fs::read(path())
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())

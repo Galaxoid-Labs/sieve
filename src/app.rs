@@ -362,6 +362,20 @@ const SCAN_MARGIN: u32 = 2_016;
 /// the list.
 const TICK: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// A path with the home directory written as `~`.
+///
+/// Only for display. Anything a person might paste elsewhere gets the real
+/// path, since `~` is expanded by a shell and means nothing to everything else.
+fn abbreviate_home(path: &std::path::Path) -> String {
+    let Some(home) = directories::BaseDirs::new() else {
+        return path.to_string_lossy().to_string();
+    };
+    match path.strip_prefix(home.home_dir()) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.to_string_lossy().to_string(),
+    }
+}
+
 const ICONS: &[&str] = &[
     crate::APP_ID,
     "changes-allow-symbolic",
@@ -371,6 +385,7 @@ const ICONS: &[&str] = &[
     "document-open-recent-symbolic",
     "document-save-symbolic",
     "edit-copy-symbolic",
+    "folder-open-symbolic",
     "go-next-symbolic",
     "go-previous-symbolic",
     "list-add-symbolic",
@@ -3657,6 +3672,85 @@ impl App {
         }
         sending.add(&mempool);
         page.add(&sending);
+
+        // Where everything is, said once and in the open.
+        //
+        // This is also the uninstall instructions. No Linux package manager
+        // removes anything under a home directory — dpkg, rpm and pacman all
+        // run their scripts as root against system paths, and Debian policy
+        // forbids touching `$HOME` outright — so removing the package leaves
+        // every one of these directories exactly where it is. That is the
+        // right behaviour for a wallet: a reinstall, a repository change or a
+        // distribution upgrade must never be able to eat a vault. It does mean
+        // the only person who can clear this up is the one reading this row,
+        // and they cannot do it without being told where to look.
+        let storage = adw::PreferencesGroup::new();
+        storage.set_title("Files");
+        storage.set_description(Some(
+            "Removing Sieve leaves all of this where it is. Delete the wallet directory \
+             only if you have the recovery phrase — it is the only other way back to the \
+             coins.",
+        ));
+
+        for (title, dir) in [
+            ("Wallets", wallet::wallets_root()),
+            ("Preferences", wallet::config_root()),
+        ] {
+            let row = adw::ActionRow::new();
+            row.set_title(title);
+            // Title and path, the way "Chain" and "Name" read further down: the
+            // row names a thing and the subtitle is its value. A sentence of
+            // explanation stacked above the path made every row three lines of
+            // two different kinds of information, which is what looked wrong.
+            row.set_use_markup(true);
+            // A path is read character by character, and the home directory is
+            // the part nobody needs to read.
+            row.set_subtitle(&format!(
+                "<tt>{}</tt>",
+                gtk::glib::markup_escape_text(&abbreviate_home(&dir))
+            ));
+            row.set_subtitle_lines(2);
+
+            let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+            copy.set_valign(gtk::Align::Center);
+            copy.add_css_class("flat");
+            copy.set_tooltip_text(Some("Copy this path"));
+            {
+                // The unabbreviated path, since this one gets pasted into a
+                // terminal where `~` is the shell's job and not always there.
+                let full = dir.to_string_lossy().to_string();
+                let sender = sender.clone();
+                copy.connect_clicked(move |button| {
+                    button.display().clipboard().set_text(&full);
+                    sender.input(AppMsg::PrefsToast("Path copied".into()));
+                });
+            }
+            row.add_suffix(&copy);
+
+            let open = gtk::Button::from_icon_name("folder-open-symbolic");
+            open.set_valign(gtk::Align::Center);
+            open.add_css_class("flat");
+            open.set_tooltip_text(Some("Open this folder"));
+            // A directory that has never been written has nothing to open, and
+            // a file manager given one shows an error rather than nothing.
+            open.set_sensitive(dir.is_dir());
+            {
+                let uri = gtk::glib::filename_to_uri(&dir, None)
+                    .map(|u| u.to_string())
+                    .unwrap_or_default();
+                let sender = sender.clone();
+                open.connect_clicked(move |button| {
+                    let sender = sender.clone();
+                    crate::ui::browser::open(&uri, button, move |message| {
+                        sender.input(AppMsg::PrefsToast(message));
+                    });
+                });
+            }
+            row.add_suffix(&open);
+
+            storage.add(&row);
+        }
+        page.add(&storage);
 
         let this = adw::PreferencesGroup::new();
         // Titled only when there is something under it. "This wallet" over a

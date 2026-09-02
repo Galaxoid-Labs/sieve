@@ -221,10 +221,32 @@ Then unplug the device and plug it in again.
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh
-cargo test          # 189 tests, needing no network and no display
+cargo test          # 198 tests, needing no network and no display
 cargo fmt --check
 cargo clippy -- -D warnings
 ```
+
+## Where your data lives
+
+Two directories, both listed in Preferences under **Files**, with a button that
+opens each one:
+
+| | |
+|---|---|
+| `~/.local/share/sieve` | wallets: sealed seeds, watch-only databases, labels |
+| `~/.config/sieve` | preferences, and nothing else |
+
+They are separate so that one of them is safe to delete. Every preference can
+be set again in a minute; a sealed seed can be recovered only from the recovery
+phrase.
+
+**Uninstalling Sieve leaves both of them where they are.** That is deliberate.
+No Linux package manager removes files from a home directory — and for a wallet
+it would be dangerous if one did, since a reinstall or a distribution upgrade
+would take the seed with it. To remove a single wallet, use **Remove this
+wallet** in Preferences. To remove everything, delete the directories above,
+and only if you have the recovery phrase written down: it is the only other way
+back to the coins.
 
 ## Networks
 

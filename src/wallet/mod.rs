@@ -220,6 +220,20 @@ pub fn data_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Where preferences live.
+///
+/// Separate from `data_root` because the XDG basedir spec separates them:
+/// `XDG_CONFIG_HOME` is for what a person chose, `XDG_DATA_HOME` for what the
+/// program accumulated. The distinction earns its keep at exactly the moment
+/// somebody is clearing up — preferences are trivially rebuilt from defaults
+/// and a vault is not, so the two must not sit in one directory anybody might
+/// delete wholesale.
+pub fn config_root() -> PathBuf {
+    directories::ProjectDirs::from("com", "galaxoidlabs", "Sieve")
+        .map(|d| d.config_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Where wallets live, one directory each.
 pub fn wallets_root() -> PathBuf {
     data_root().join("wallets")
@@ -1440,6 +1454,27 @@ mod tests {
             "wallets live in a directory named for the app, not the vendor: {}",
             root.display()
         );
+    }
+
+    /// Preferences and wallets must not share a directory.
+    ///
+    /// The point of the split is that one of them is disposable and the other
+    /// is not: somebody clearing up should be able to delete every preference
+    /// they ever set without going anywhere near a sealed seed. A future
+    /// change that quietly collapses the two would put a vault inside the
+    /// directory this app describes as safe to remove.
+    #[test]
+    fn preferences_do_not_live_among_the_wallets() {
+        let config = super::config_root();
+        let data = super::data_root();
+        assert_ne!(config, data, "config and data directories must differ");
+        assert!(
+            !config.starts_with(&data) && !data.starts_with(&config),
+            "neither may contain the other: {} vs {}",
+            config.display(),
+            data.display()
+        );
+        assert!(config.ends_with("sieve"), "{}", config.display());
     }
 
     use super::*;
