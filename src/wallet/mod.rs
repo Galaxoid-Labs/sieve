@@ -267,6 +267,50 @@ pub fn checkpoint_at_or_before(network: Network, height: u32) -> Checkpoint {
         .unwrap_or_else(|| *all.last().expect("every network has a floor checkpoint"))
 }
 
+/// The receive address to offer, which is not always the first unused one.
+///
+/// **`next_unused_address` is right for a wallet Sieve made and wrong for one
+/// it imported**, and the difference costs privacy rather than money.
+///
+/// For a wallet created here, Sieve is the only thing that has ever revealed an
+/// address, so "unused" really does mean "never given to anybody". For an
+/// imported one it does not. The revealed range comes from the *scan*, which
+/// reaches the highest index a payment was found at — and the wallet it came
+/// from may have handed out every index below that. Several do: a wallet that
+/// mints a fresh address each time its receive screen is opened will have given
+/// out dozens while being paid at two.
+///
+/// So offering the first unused index there hands a new payer an address
+/// somebody else already published, which is address reuse across two wallets —
+/// the precise link this program exists to avoid, made silently and with
+/// confidence.
+///
+/// Past the tip is the only index nothing else can have published.
+fn next_address_to_offer(
+    wallet: &mut bdk_wallet::Wallet,
+    imported: bool,
+) -> bdk_wallet::AddressInfo {
+    if !imported {
+        return wallet.next_unused_address(bdk_wallet::KeychainKind::External);
+    }
+    match wallet.derivation_index(bdk_wallet::KeychainKind::External) {
+        // Revealed to `tip` already, so everything up to it is spoken for.
+        //
+        // **Peeked, not revealed.** Revealing would move the tip, and this
+        // runs on every sync — so the index would climb by one each time and
+        // the wallet would walk away from its own addresses. Peeking is pure,
+        // so the same address is offered until somebody takes it.
+        //
+        // Not being revealed does not make it unwatched: `IMPORT_LOOKAHEAD`
+        // has the scan matching two hundred scripts past the tip, so a payment
+        // here is found. Pressing New address is what reveals it properly.
+        Some(tip) => wallet.peek_address(bdk_wallet::KeychainKind::External, tip + 1),
+        // Nothing revealed yet: no other wallet can have published anything
+        // from a chain this one has never derived.
+        None => wallet.next_unused_address(bdk_wallet::KeychainKind::External),
+    }
+}
+
 /// Where the files live. The vault holds the seed; the database holds only
 /// public descriptors and chain data.
 #[derive(Debug, Clone)]
@@ -470,6 +514,15 @@ pub struct Meta {
     /// a floor, not a birthday", and the node replaces it once it has a tip.
     #[serde(default)]
     pub birthday_pending: bool,
+    /// Whether somebody has said out loud that they will use an address from
+    /// this wallet without a device confirming it.
+    ///
+    /// Only asked on a wallet imported from a descriptor: its keys are
+    /// somewhere else and nothing here can check that an address belongs to
+    /// them, so the receive screen holds the address back until this is set.
+    /// A device-backed wallet is not asked, because the device *can* check.
+    #[serde(default)]
+    pub receive_acknowledged: bool,
     /// Which derivation paths this wallet watches. Recorded so a later build
     /// that supports more paths does not silently start scanning for coins
     /// that were never derived.
@@ -627,6 +680,7 @@ impl Meta {
             birthday_hash: birthday.hash.to_owned(),
             created_at: None,
             birthday_pending: false,
+            receive_acknowledged: false,
             script_types,
             primary,
             scanned_to: None,
@@ -736,6 +790,7 @@ impl Meta {
             birthday_hash: legacy.hash,
             created_at: None,
             birthday_pending: false,
+            receive_acknowledged: false,
             script_types: default_script_types(),
             primary: default_primary(),
             scanned_to: None,
@@ -954,6 +1009,7 @@ pub struct Summary {
 
 impl Summary {
     pub(crate) fn from_portfolio(portfolio: &mut accounts::Portfolio) -> Result<Self> {
+        let imported = portfolio.imported;
         let mut summary = Summary {
             ..Default::default()
         };
@@ -967,9 +1023,7 @@ impl Summary {
             std::collections::HashMap::new();
 
         for account in portfolio.accounts.iter_mut() {
-            let address = account
-                .wallet
-                .next_unused_address(bdk_wallet::KeychainKind::External);
+            let address = next_address_to_offer(&mut account.wallet, imported);
             let balance = account.wallet.balance();
             let entry = AccountSummary {
                 script_type: account.script_type,
@@ -1057,10 +1111,16 @@ impl Summary {
             }
         }
 
-        // Every address this wallet has actually handed out — the revealed
-        // range of each receive chain. Derived rather than remembered: the
-        // keychain's revealed index is the record of what was given out, and
-        // deriving from it cannot drift from what the wallet is watching.
+        // Every receive address this wallet is watching — the revealed range
+        // of each receive chain. Derived rather than remembered, so it cannot
+        // drift from what the wallet actually watches.
+        //
+        // **This is not "what was handed out", and on an imported wallet it
+        // cannot be.** The revealed index moves forward during a scan to reach
+        // the highest index a payment was found at, so a wallet paid at index
+        // 21 shows twenty-two addresses whatever happened in between. Which of
+        // them somebody was actually given is a fact about a conversation this
+        // program never saw.
         for account in portfolio.accounts.iter_mut() {
             let last = account
                 .wallet
@@ -1342,6 +1402,11 @@ pub fn create(
         network,
         lookahead,
     )?;
+    // Made here, so Sieve is the only thing that has ever revealed an address
+    // on these chains and the first unused one is genuinely unpublished. This
+    // is the *only* place that is true — `Portfolio` defaults to the cautious
+    // answer everywhere else.
+    portfolio.imported = false;
 
     // Recorded before the vault is written, so a wallet that exists at all has
     // a network and a birthday, and never falls back to scanning from genesis.
@@ -1490,7 +1555,8 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
         &meta.script_types,
         meta.primary,
         meta.network(),
-    )?;
+    )?
+    .imported(meta.created_at.is_none());
 
     // The databases hold no unrecoverable state, so losing them costs a rescan
     // rather than the wallet. Rebuild from the secret we just decrypted.
@@ -1512,6 +1578,7 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
         let phrase =
             std::str::from_utf8(&secret).context("the vault does not contain readable text")?;
         let xprv = xprv_from_mnemonic(phrase, None, meta.network())?;
+        let was_imported = portfolio.imported;
         portfolio = accounts::Portfolio::create_from_xprv(
             xprv,
             data_dir(paths),
@@ -1520,6 +1587,9 @@ pub fn unlock(password: &[u8], paths: &Paths) -> Result<Summary> {
             meta.network(),
             accounts::IMPORT_LOOKAHEAD,
         )?;
+        // A rebuild is the same wallet, so it keeps the same answer rather
+        // than taking the constructor's default.
+        portfolio.imported = was_imported;
     }
 
     Summary::from_portfolio(&mut portfolio)
@@ -1705,6 +1775,68 @@ mod tests {
         // rather than nothing.
         assert_eq!(super::network_label_of("something-new"), "something-new");
         assert_eq!(super::network_label_of(""), "");
+    }
+
+    /// An imported wallet never offers an address another wallet may hold.
+    ///
+    /// **The failure this prevents is silent and is address reuse across two
+    /// wallets.** Plenty of wallets mint a fresh receive address every time
+    /// their receive screen is opened, so one that was paid twice may have
+    /// handed out twenty. Those twenty are revealed here by the scan, and
+    /// nineteen of them are "unused" — so offering the first unused one hands
+    /// a new payer an address somebody else already published, which is
+    /// exactly the link this program exists to avoid.
+    ///
+    /// For a wallet made here the opposite holds: Sieve is the only thing that
+    /// has ever revealed an address, so the first unused one is genuinely
+    /// unpublished and offering it avoids burning addresses for nothing.
+    #[test]
+    fn an_imported_wallet_offers_an_address_past_the_revealed_tip() {
+        use bdk_wallet::KeychainKind::External;
+
+        let descriptor = "tr([ab12cd34/86h/0h/0h]xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSWGFNbi8Aw6ZRc1brxMyWMzG3DSSSSoekkudhUd9yLb6qx39T9nMdj/0/*)";
+        let internal = descriptor.replace("/0/*", "/1/*");
+        let dir = std::env::temp_dir().join(format!("sieve-offer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let db = dir.join("w.sqlite");
+        let mut account = accounts::Account::create_watching(
+            descriptor,
+            &internal,
+            accounts::ScriptType::Taproot,
+            &db,
+            Network::Bitcoin,
+        )
+        .unwrap();
+
+        // Stand in for what a scan does: reveal a run of addresses, as the
+        // wallet this was imported from would have handed them out.
+        for _ in 0..8 {
+            let _ = account.wallet.reveal_next_address(External);
+        }
+        let tip = account.wallet.derivation_index(External).unwrap();
+        account.persist().unwrap();
+
+        let offered = super::next_address_to_offer(&mut account.wallet, true);
+        assert!(
+            offered.index > tip,
+            "offered index {} is at or below the revealed tip {tip} — an address the \
+             other wallet may already have given somebody",
+            offered.index
+        );
+
+        // Pure: asking twice must not walk the wallet forward, or every sync
+        // would burn one and the wallet would leave its own addresses behind.
+        let again = super::next_address_to_offer(&mut account.wallet, true);
+        assert_eq!(again.index, offered.index);
+        assert_eq!(account.wallet.derivation_index(External), Some(tip));
+
+        // And a wallet made here still offers its first unused address.
+        let created = super::next_address_to_offer(&mut account.wallet, false);
+        assert!(created.index <= tip);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Preferences and wallets must not share a directory.
@@ -2193,9 +2325,13 @@ mod tests {
         assert_eq!(meta.scanned_hash, None);
         assert_eq!(after.wallet.latest_checkpoint().height(), 0);
 
+        // `.imported` the way `unlock` and `Session::start` set it, from the
+        // metadata — a wallet made here keeps offering its first unused
+        // address, where an imported one would move past the revealed tip.
         let mut portfolio =
             accounts::Portfolio::load(&dir, &meta.script_types, meta.primary, Network::Signet)
-                .unwrap();
+                .unwrap()
+                .imported(meta.created_at.is_none());
         let reopened = Summary::from_portfolio(&mut portfolio).unwrap();
         assert_eq!(reopened.next_address, before.next_address);
 
@@ -2935,7 +3071,13 @@ pub fn import_descriptors(
     }
     meta.save(paths)?;
 
-    let mut portfolio = accounts::Portfolio { accounts, primary };
+    // Imported: whatever exported these descriptors may have handed out
+    // addresses on them already.
+    let mut portfolio = accounts::Portfolio {
+        accounts,
+        primary,
+        imported: true,
+    };
     Summary::from_portfolio(&mut portfolio)
 }
 

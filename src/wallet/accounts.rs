@@ -541,9 +541,29 @@ mod tests {
 pub struct Portfolio {
     pub accounts: Vec<Account>,
     pub primary: ScriptType,
+    /// Whether some other wallet may already have handed out addresses on
+    /// these chains.
+    ///
+    /// True for anything imported — a descriptor, a device, or a seed that has
+    /// lived somewhere else — and false only for a wallet created here, where
+    /// Sieve is the one thing that has ever revealed an address. It decides
+    /// which address is safe to offer next; see `next_address_to_offer`.
+    ///
+    /// Defaults to the cautious answer, so a construction site that forgets to
+    /// set it burns an address rather than republishing somebody else's.
+    pub imported: bool,
 }
 
 impl Portfolio {
+    /// Say whether some other wallet may have published these addresses.
+    ///
+    /// Chained onto `load`, because the answer lives in the metadata beside the
+    /// databases and `load` has no business reading it.
+    pub fn imported(mut self, imported: bool) -> Self {
+        self.imported = imported;
+        self
+    }
+
     /// Open all the paths an HD credential could have used.
     ///
     /// A path whose database is missing is simply absent — a wallet created
@@ -561,7 +581,11 @@ impl Portfolio {
                 accounts.push(account);
             }
         }
-        Ok(Portfolio { accounts, primary })
+        Ok(Portfolio {
+            accounts,
+            primary,
+            imported: true,
+        })
     }
 
     pub fn create_from_xprv(
@@ -583,7 +607,11 @@ impl Portfolio {
                 lookahead,
             )?);
         }
-        Ok(Portfolio { accounts, primary })
+        Ok(Portfolio {
+            accounts,
+            primary,
+            imported: true,
+        })
     }
 
     pub fn create_from_wif(
@@ -598,7 +626,11 @@ impl Portfolio {
             let db = dir.join(script_type.db_file());
             accounts.push(Account::create_from_wif(wif, *script_type, &db, network)?);
         }
-        Ok(Portfolio { accounts, primary })
+        Ok(Portfolio {
+            accounts,
+            primary,
+            imported: true,
+        })
     }
 
     pub fn is_empty(&self) -> bool {

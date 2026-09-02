@@ -19,6 +19,9 @@ pub enum WalletPageOutput {
     AskRescan,
     /// Look on the derivation paths this wallet is not watching.
     AskSearchPaths,
+    /// Somebody typed the words: show this wallet's receive address, and
+    /// keep showing it. Recorded against the wallet, not the session.
+    AcknowledgeReceive,
     /// Name a transaction or an address, or clear its name. The app owns the
     /// label file, so it does the writing.
     SetLabel {
@@ -618,6 +621,9 @@ pub struct WalletPage {
     /// address can be checked against one. Not *which* device: that is asked
     /// of the devices when it matters.
     device_backed: bool,
+    /// The receive address is withheld until somebody says they will use it
+    /// without a device confirming it. See `SetReceiveGated`.
+    receive_gated: bool,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -693,6 +699,10 @@ pub enum WalletPageMsg {
     SetDeviceBacked(bool),
     /// Ask the device to show the receive address on its own screen.
     VerifyAddress,
+    /// Whether to withhold the receive address on this wallet.
+    SetReceiveGated(bool),
+    /// Ask, in words somebody has to type, before showing it.
+    AskShowAddress,
     /// Name a payment just made, from what its request called itself.
     NameTransaction {
         txid: String,
@@ -1765,6 +1775,8 @@ impl Component for WalletPage {
                             // allocates its child a square, whatever it is
                             // handed.
                             gtk::AspectFrame {
+                                #[watch]
+                                set_visible: !model.receive_gated,
                                 set_ratio: 1.0,
                                 set_obey_child: false,
                                 set_halign: gtk::Align::Center,
@@ -1884,7 +1896,60 @@ impl Component for WalletPage {
                                 set_wrap: true,
                                 set_justify: gtk::Justification::Center,
                                 #[watch]
+                                set_visible: !model.receive_gated,
+                                #[watch]
                                 set_label: &model.address_hint(),
+                            },
+
+                            // In place of the address, on a wallet whose keys
+                            // are elsewhere and which has no device to ask.
+                            //
+                            // **A wall rather than a warning, because a
+                            // warning beside an address is read after the
+                            // address has been copied.** Watch-only is mostly
+                            // a way to look at history; handing out an address
+                            // Sieve cannot vouch for is the one thing on this
+                            // screen that can lose money, and it should take a
+                            // deliberate act rather than a glance.
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 12,
+                                set_margin_top: 24,
+                                set_margin_bottom: 24,
+                                #[watch]
+                                set_visible: model.receive_gated,
+
+                                gtk::Image {
+                                    set_icon_name: Some("channel-secure-symbolic"),
+                                    set_pixel_size: 48,
+                                    add_css_class: "dim-label",
+                                },
+
+                                gtk::Label {
+                                    add_css_class: "title-4",
+                                    set_wrap: true,
+                                    set_justify: gtk::Justification::Center,
+                                    set_label: "Take the address from the wallet that holds the keys",
+                                },
+
+                                gtk::Label {
+                                    add_css_class: "dim-label",
+                                    set_wrap: true,
+                                    set_justify: gtk::Justification::Center,
+                                    set_max_width_chars: 46,
+                                    set_label: "Sieve is watching this wallet, not holding it. \
+                                                It can show you an address derived from the \
+                                                descriptor you imported, but nothing here can \
+                                                confirm that address is really yours — only the \
+                                                wallet with the keys can do that.",
+                                },
+
+                                gtk::Button {
+                                    add_css_class: "pill",
+                                    set_halign: gtk::Align::Center,
+                                    set_label: "Show the address anyway",
+                                    connect_clicked => WalletPageMsg::AskShowAddress,
+                                },
                             },
 
                             gtk::Label {
@@ -1892,6 +1957,8 @@ impl Component for WalletPage {
                                 set_wrap: true,
                                 set_wrap_mode: gtk::pango::WrapMode::WordChar,
                                 set_selectable: true,
+                                #[watch]
+                                set_visible: !model.receive_gated,
                                 // A selectable label selects its *whole* text
                                 // the moment it takes focus, so the address sat
                                 // there looking as though somebody had dragged
@@ -1926,6 +1993,8 @@ impl Component for WalletPage {
                             gtk::Box {
                                 set_halign: gtk::Align::Center,
                                 set_spacing: 12,
+                                #[watch]
+                                set_visible: !model.receive_gated,
 
                                 gtk::Button {
                                     add_css_class: "pill",
@@ -1961,14 +2030,59 @@ impl Component for WalletPage {
                                 },
                             },
 
+                            // Only on a wallet whose keys are elsewhere.
+                            //
+                            // **Sieve did not derive this address from a key it
+                            // holds — it derived it from what was imported.**
+                            // On a hardware wallet the device settles it, which
+                            // is why the button above exists. On a pasted
+                            // descriptor nothing can: a descriptor that is
+                            // subtly wrong parses, derives perfectly good
+                            // addresses, and none of them belong to anybody
+                            // here. That is not hypothetical — a change chain
+                            // built from only the first cosigner did exactly
+                            // that.
+                            //
+                            // So the check is named, and it is one somebody can
+                            // actually perform: compare against the wallet that
+                            // exported this, and let the scan find the history
+                            // you expect before you are paid at a new address.
+                            gtk::Label {
+                                add_css_class: "warning",
+                                set_wrap: true,
+                                set_justify: gtk::Justification::Center,
+                                set_margin_top: 12,
+                                set_max_width_chars: 44,
+                                #[watch]
+                                set_visible: model.watch_only && !model.receive_gated,
+                                #[watch]
+                                set_label: if model.device_backed {
+                                    "This address came from what you imported, not from a \
+                                     key held here. Show it on the device before giving it \
+                                     to anybody."
+                                } else {
+                                    "This address came from the descriptor you imported, \
+                                     and nothing here can confirm it. Check it against the \
+                                     wallet that exported the descriptor before giving it \
+                                     to anybody."
+                                },
+                            },
+
                             // Naming the address before handing it out is what
                             // makes the payment recognisable when it lands —
                             // and it is the moment you actually know who it is
                             // for. Offered, never demanded: an open field here
                             // reads as a question that must be answered before
                             // the address can be used.
+                            // Gated with the address, not beside it. Naming
+                            // an address is something you do to one you are
+                            // about to hand out, and the list is every address
+                            // this wallet has — which is a way round the gate
+                            // rather than an exception to it.
                             adw::PreferencesGroup {
                                 set_margin_top: 12,
+                                #[watch]
+                                set_visible: !model.receive_gated,
 
                                 #[name(address_label_shown)]
                                 adw::ActionRow {
@@ -2390,6 +2504,7 @@ impl Component for WalletPage {
             receive_path: None,
             fresh_address: None,
             device_backed: false,
+            receive_gated: false,
             summary: None,
             progress: Progress::Connecting,
             peers: None,
@@ -2709,6 +2824,65 @@ impl Component for WalletPage {
             WalletPageMsg::SetDeviceBacked(backed) => {
                 self.device_backed = backed;
                 self.send.emit(SendMsg::SetDeviceBacked(backed));
+            }
+
+            WalletPageMsg::SetReceiveGated(gated) => self.receive_gated = gated,
+
+            WalletPageMsg::AskShowAddress => {
+                // Typed, not clicked. A button says "I would like to get on
+                // with it"; a sentence somebody has to write says they read
+                // the one above it. This is the only place in Sieve that asks
+                // for that, and it is here because the mistake it guards
+                // against — being paid at an address nobody here can vouch
+                // for — is not visible when it happens and not recoverable
+                // afterwards.
+                const PHRASE: &str = "I understand";
+
+                let dialog =
+                    adw::AlertDialog::new(Some("Show an address nothing here can confirm?"), None);
+                dialog.set_body(
+                    "This wallet's keys are somewhere else, and Sieve derived this address \
+                     from the descriptor you imported. If that descriptor is wrong in any \
+                     way, the address belongs to nobody and a payment to it is gone.\n\n\
+                     The wallet that holds the keys can show you the address itself. That \
+                     is the only check there is.\n\n\
+                     Type “I understand” to show it here anyway.",
+                );
+
+                let group = adw::PreferencesGroup::new();
+                let entry = adw::EntryRow::new();
+                entry.set_title("Type: I understand");
+                group.add(&entry);
+                dialog.set_extra_child(Some(&group));
+
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("show", "Show it anyway");
+                dialog.set_response_appearance("show", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+                // Enabled only once the words are actually there.
+                dialog.set_response_enabled("show", false);
+                {
+                    let dialog = dialog.clone();
+                    entry.connect_changed(move |row| {
+                        let typed = row.text().trim().eq_ignore_ascii_case(PHRASE);
+                        dialog.set_response_enabled("show", typed);
+                    });
+                }
+                {
+                    let sender = sender.clone();
+                    let entry = entry.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response != "show" {
+                            return;
+                        }
+                        if !entry.text().trim().eq_ignore_ascii_case(PHRASE) {
+                            return;
+                        }
+                        let _ = sender.output(WalletPageOutput::AcknowledgeReceive);
+                    });
+                }
+                dialog.present(Some(root));
             }
 
             WalletPageMsg::VerifyAddress => {
@@ -3444,20 +3618,32 @@ impl WalletPage {
         nav.push(&nav_page);
     }
 
-    /// How many addresses this wallet has handed out, and how many are spent.
+    /// How many receive addresses this wallet is watching, and how many have
+    /// been paid to.
+    ///
+    /// **Not "handed out", which is what this used to say and could not know.**
+    /// The list is the revealed range of the receive chain, and on an imported
+    /// wallet that range comes from the scan: it reaches at least as far as the
+    /// highest index a payment was found at. A wallet that gave out twenty
+    /// addresses and was paid at two of them therefore shows twenty-odd here,
+    /// none of which Sieve watched being given to anybody. Whether one was
+    /// handed out is a fact about a conversation somewhere else.
     fn addresses_note(&self) -> String {
         let Some(summary) = &self.summary else {
-            return "Nothing handed out yet".into();
+            return "None yet".into();
         };
         let all = summary.addresses.len();
         if all == 0 {
-            return "Nothing handed out yet".into();
+            return "None yet".into();
         }
         let used = summary.addresses.iter().filter(|a| a.payments > 0).count();
-        format!("{}, {used} paid to", plural(all, "address", "addresses"))
+        format!(
+            "Watching {}, {used} paid to",
+            plural(all, "address", "addresses")
+        )
     }
 
-    /// Every address handed out, as a page over the wallet.
+    /// Every receive address this wallet watches, as a page over the wallet.
     ///
     /// Receive addresses only. Change belongs to transactions rather than to
     /// anybody, and listing it here would offer addresses to hand out that
@@ -3470,7 +3656,10 @@ impl WalletPage {
 
         let page = adw::PreferencesPage::new();
         let group = adw::PreferencesGroup::new();
-        group.set_title("Handed out");
+        // Not "handed out": on an imported wallet these are the addresses the
+        // scan revealed, and which of them somebody was actually given is a
+        // fact this program never saw. See `addresses_note`.
+        group.set_title("Receive addresses");
         // Which paths are in the list, since a wallet imported from a device
         // watches four and they are interleaved here by age rather than kept
         // apart.

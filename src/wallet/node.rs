@@ -240,7 +240,11 @@ impl Session {
         let network = meta.network();
         let dir = paths.db.parent().unwrap_or(&paths.db).to_path_buf();
 
-        let portfolio = Portfolio::load(&dir, &meta.script_types, meta.primary, network)?;
+        // Created here or brought from elsewhere, which decides which
+        // receive address is safe to offer. `created_at` is set by `create`
+        // and by nothing else.
+        let portfolio = Portfolio::load(&dir, &meta.script_types, meta.primary, network)?
+            .imported(meta.created_at.is_none());
         if portfolio.is_empty() {
             anyhow::bail!("no wallet databases found — unlock first");
         }

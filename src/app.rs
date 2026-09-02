@@ -425,6 +425,8 @@ pub enum AppMsg {
     Back,
     ShowOnboarding,
     ShowRestore,
+    /// Record that this wallet may show its receive address, and show it.
+    AcknowledgeReceive,
     ShowPreferences,
     /// Hold a coin back, or let it be spent again. BIP-329's `spendable`, in
     /// the same file every other label lives in.
@@ -700,6 +702,9 @@ impl Component for App {
                         AppMsg::ShowPreferences
                     }
                     crate::ui::wallet_page::WalletPageOutput::Unlock => AppMsg::PromptUnlock,
+                    crate::ui::wallet_page::WalletPageOutput::AcknowledgeReceive => {
+                        AppMsg::AcknowledgeReceive
+                    }
                     crate::ui::wallet_page::WalletPageOutput::NewAddress(script_type) => {
                         AppMsg::RevealAddress(script_type)
                     }
@@ -1028,6 +1033,23 @@ impl Component for App {
                 self.onboarding.emit(OnboardingMsg::EnteredByChoice);
                 self.nav.push_by_tag("onboarding");
             }
+            AppMsg::AcknowledgeReceive => {
+                let Some(paths) = self.active.clone() else {
+                    return;
+                };
+                // Against the wallet rather than the session: this is a thing
+                // somebody decided about *this* wallet, and asking again every
+                // time they open it would teach them to type it without
+                // reading it, which is the opposite of the point.
+                if let Some(mut meta) = wallet::Meta::load(&paths) {
+                    meta.receive_acknowledged = true;
+                    if let Err(e) = meta.save(&paths) {
+                        tracing::warn!(%e, "could not record the receive acknowledgement");
+                    }
+                }
+                self.wallet.emit(WalletPageMsg::SetReceiveGated(false));
+            }
+
             AppMsg::ShowRestore => {
                 self.close_prefs();
                 // Both ways: on the way in as well as on the way out. Leaving
@@ -1061,6 +1083,12 @@ impl Component for App {
                             move |_| sender.input(AppMsg::PrefsClosed)
                         });
                     }
+                    // Back to the root page every time. The dialog owns a
+                    // navigation stack and keeps it, so leaving on the wallet
+                    // list — which is what happens after switching wallets or
+                    // importing one — meant the *next* press of Preferences
+                    // opened on a wallet chooser rather than on preferences.
+                    while self.prefs.pop_subpage() {}
                     self.prefs.present(Some(&window));
                     self.prefs_open = true;
                 }
@@ -2357,6 +2385,12 @@ impl Component for App {
                     .unwrap_or_default();
                 let meta = wallet::Meta::load(&paths);
                 let watch_only = meta.as_ref().is_some_and(|m| m.watch_only);
+                // **Not the same question as watch-only.** A descriptor import
+                // is watch-only and has no device behind it, so passing
+                // `watch_only` here put a "Verify on device" button on a wallet
+                // with no device to verify against — a button that could only
+                // ever fail, on the screen where trust is being decided.
+                let device_backed = meta.as_ref().is_some_and(|m| m.device_kind.is_some());
                 let has_passphrase = meta.as_ref().is_some_and(|m| m.bip39_passphrase);
 
                 self.active = Some(paths.clone());
@@ -2367,7 +2401,15 @@ impl Component for App {
                 // arrives by — this one, and `restate_wallet`. Said on only one
                 // of them, the receive screen's Verify button stayed hidden on
                 // exactly the wallets it exists for.
-                self.wallet.emit(WalletPageMsg::SetDeviceBacked(watch_only));
+                self.wallet
+                    .emit(WalletPageMsg::SetDeviceBacked(device_backed));
+                // Gated only where nothing can confirm an address: a wallet
+                // with keys derives its own, and a device can be asked.
+                self.wallet.emit(WalletPageMsg::SetReceiveGated(
+                    watch_only
+                        && !device_backed
+                        && !meta.as_ref().is_some_and(|m| m.receive_acknowledged),
+                ));
                 self.wallet
                     .emit(WalletPageMsg::SetHasPassphrase(has_passphrase));
 
@@ -3482,7 +3524,10 @@ impl App {
         // stored at all any more: it is asked of the devices at the moment it
         // matters, which is also when the fingerprint gets checked.
         self.wallet
-            .emit(WalletPageMsg::SetDeviceBacked(meta.watch_only));
+            .emit(WalletPageMsg::SetDeviceBacked(meta.device_kind.is_some()));
+        self.wallet.emit(WalletPageMsg::SetReceiveGated(
+            meta.watch_only && meta.device_kind.is_none() && !meta.receive_acknowledged,
+        ));
         self.wallet
             .emit(WalletPageMsg::SetHasPassphrase(meta.bip39_passphrase));
         self.wallet.emit(WalletPageMsg::SetLabels(Box::new(
