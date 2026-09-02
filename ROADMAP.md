@@ -346,6 +346,22 @@ mainnet as well, from a cold start and from an interrupted one.
 - [x] **Search other derivation paths**, for the case that reads as lost money: a phrase
       restored into another wallet, used on a path this one does not watch, brought back.
 
+**Watch-only wallets changed what this milestone means, and two of its assumptions were
+wrong.** A wallet whose keys are elsewhere cannot vouch for the address it shows: Sieve derives
+it from an imported descriptor, and a descriptor that is subtly wrong parses, derives perfectly
+good addresses, and none of them are anybody's. So a descriptor import shows no address at all
+until somebody types "I understand" — a wall rather than a warning, because a caution beside an
+address is read after the address has been copied. A device wallet keeps its address and its
+Verify button, which is the check a device can actually make.
+
+And **an imported wallet must not offer the first unused address**. That is right for a wallet
+made here, where Sieve is the only thing that has ever revealed one, and wrong for one that
+arrived: the revealed range comes from the scan, and the wallet it came from may have handed
+out every index below it — some mint a fresh address on every receive screen, so twenty given
+out against two paid. Offering the first unused index handed a new payer an address somebody
+else had already published. Imported wallets offer past the revealed tip now, peeked rather
+than revealed so a summary does not walk the wallet forward on every sync.
+
 ### M4 — Send — DONE, except silent payments
 - [x] Address and amount validation — wrong-network addresses get their own message, and
       amounts are read with integer arithmetic in whichever unit is on display.
@@ -527,6 +543,17 @@ Left to build:
       and read back off disk before Sieve reports it saved. A test asserts an exported file
       carries the key origins, input values and change derivation another wallet needs, across
       all four script types — without those it would look valid and be unsignable.
+- [x] **Read what wallets actually export.** A descriptor arrives wrapped by an email, with
+      its asterisks eaten by rich text, as two lines under `External:` / `Internal:`, or as a
+      `zpub` rather than an `xpub` — and each of those failed with a miniscript error naming a
+      byte rather than the problem. Whitespace is stripped, labels are found by position rather
+      than by line so wrapping cannot break them, SLIP-132 prefixes are converted (a bare
+      `zpub` is enough, because unlike an `xpub` it says which script it makes), and a key
+      whose path lost its `*` is told so and told where to copy from instead.
+- [x] **Multisig descriptors watch.** `wsh(sortedmulti(…))` imports, which found a bug that had
+      been shipping: the change descriptor moved only the *first* cosigner to the change chain,
+      producing a different wallet whose addresses derived cleanly and were nobody's. Change
+      would never have been seen. Signing multisig is still out of scope.
 - [ ] **PSBT import**, which is the half that closes the loop and is deliberately not next.
       The review screen is the whole safety story: a PSBT is a stranger's claim about what a
       transaction does, and the only defence is recomputing every figure from our own

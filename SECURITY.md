@@ -273,6 +273,31 @@ address the wallet will ever have, and the dialog already said so; what it did
 not say is that most desktops keep a clipboard history on disk. The file export
 sitting beside it is the tidier route and now reads that way.
 
+## Wallets whose keys are elsewhere
+
+Two rules that only exist because a watch-only wallet is not a wallet with the
+keys taken out — it is a wallet Sieve cannot check anything against.
+
+**A descriptor import shows no receive address until somebody says they
+understand that.** Sieve derives the address from what was pasted, and a
+descriptor that is subtly wrong parses, derives perfectly good addresses, and
+none of them belong to anybody. Nothing here can tell the difference; only the
+wallet holding the keys can. A device-backed wallet is not gated, because a
+device *can* be asked, and that is what the Verify button is for.
+
+**An imported wallet never offers the first unused address.** The revealed
+range comes from the scan, so it reaches the highest index a payment was found
+at — and the wallet it came from may have handed out every index below.
+Offering the first unused one hands a new payer an address somebody else has
+already published, which is address reuse across two wallets. Imported wallets
+offer past the revealed tip.
+
+**And a wallet with no password is never locked.** Locking is one end of a
+pair: a watch-only wallet with no vault and no `lock.sieve` has nothing for the
+unlock screen to check against, so locking one shut it until the app was
+restarted. `Paths::can_be_unlocked` is the guard, and no reason — idle, screen,
+suspend — gets past it.
+
 ## On disk
 
 Sieve writes to two directories, both mode 0700 with every file 0600 —

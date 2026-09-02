@@ -84,8 +84,10 @@ behaves like the rest of the desktop rather than like a browser in a window.
 - **Labels** on payments, addresses and individual coins, stored in BIP-329's
   format so they can be exported and imported anywhere else. A coin without a
   name of its own inherits one from the payment that brought it in.
-- Every address you have handed out, which are used, what each received, and
-  which have been paid more than once.
+- Every receive address the wallet is watching, which are used, what each
+  received, and which have been paid more than once.
+- **Hide the amounts** with one button, for reading the app where somebody can
+  see the screen. The direction of each payment stays; only the numbers go.
 - **Search** the activity list by amount, address, transaction id, the name you
   gave a payment, or anything it published.
 - Amounts **typed in dollars** as well as read in them, with the bitcoin figure
@@ -94,6 +96,16 @@ behaves like the rest of the desktop rather than like a browser in a window.
   every other wallet reads. Enough to watch this wallet anywhere and not enough
   to spend from it — so it is the backup that costs privacy rather than money:
   whoever holds it can see every address and every payment, past and future.
+
+**Watching a wallet whose keys are elsewhere**
+- Import a descriptor — including a multisig one, and including the two-line
+  `External:` / `Internal:` bundles some wallets export. `zpub`, `ypub`, `upub`
+  and `vpub` are accepted and converted; a bare one of those is enough, because
+  unlike an `xpub` it says which kind of addresses it makes.
+- **The receive address is withheld** on a descriptor import until you say you
+  understand that nothing here can confirm it belongs to you. The keys are
+  elsewhere, and a descriptor that is subtly wrong derives addresses that are
+  nobody's. Take the address from the wallet that holds the keys.
 
 **Hardware wallets**
 - Import a watch-only wallet from a Ledger, Coldcard or Specter over USB — no
@@ -125,12 +137,15 @@ behaves like the rest of the desktop rather than like a browser in a window.
 - The seed is sealed with XChaCha20-Poly1305 under a key derived from your
   password with Argon2id (256 MiB, 3 passes, 4 lanes) and is decrypted only at
   the moment of signing — never held open while the wallet is on screen.
-- Watch-only wallets can have a password too. They hold no keys, so there is
-  nothing to decrypt — the password seals a known value instead, which gives a
-  hardware-wallet or descriptor wallet something to fail against rather than
-  leaving its whole history open to anyone who opens the app.
+- Watch-only wallets can have a password too, offered when you import one and
+  settable afterwards. They hold no keys, so there is nothing to decrypt — the
+  password seals a known value instead, which gives a hardware-wallet or
+  descriptor wallet something to fail against rather than leaving its whole
+  history open to anyone who opens the app.
 - Idle auto-lock, and lock when the computer goes to sleep or the session is
-  locked — the three ordinary ways a machine is left unattended.
+  locked — the three ordinary ways a machine is left unattended. A wallet with
+  no password is never locked by any of them: there would be nothing to open it
+  with afterwards.
 
 **Looking like the rest of the desktop**
 - Light and dark follow the desktop, with no switch of Sieve's own: an
@@ -164,7 +179,9 @@ Stated plainly, because a wallet that overstates itself is dangerous:
   import proceed; `ELECTRUM.md` records what supporting one would take.
   Wallets that use BIP-39 and standard paths, Sparrow among them, import by
   phrase today.
-- **Multisig.** Single-signature only.
+- **Multisig signing.** Single-signature only. A multisig *descriptor* imports
+  and watches — balance, history and addresses, with a PSBT to sign elsewhere —
+  but Sieve will not sign for one.
 - **Packages.** There is no `.deb`, `.rpm` or AUR package yet — see
   `PACKAGING.md` for the plan.
 
@@ -225,7 +242,7 @@ Then unplug the device and plug it in again.
 | `SECURITY.md` | what is defended against, what is not, and what leaves the machine |
 
 ```sh
-cargo test          # 225 tests, needing no network and no display
+cargo test          # 227 tests, needing no network and no display
 cargo fmt --check
 cargo clippy -- -D warnings
 ```

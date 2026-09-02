@@ -518,11 +518,61 @@ every time — which links two payers who are each handed it. The refresh button
 `reveal_next_address`, advancing the keychain and persisting the reveal so the new script is
 watched. Show a fresh address per payer; never present one address as "the" wallet address.
 
+**On an imported wallet that rule is not enough, and `next_address_to_offer` is why.** For a
+wallet created here Sieve is the only thing that has ever revealed an address, so "unused"
+really does mean "never given to anybody". For an imported one the revealed range comes from
+the *scan*, which reaches the highest index a payment was found at — and the wallet it came
+from may have handed out every index below. Plenty do: one that mints a fresh address each
+time its receive screen opens will have given out twenty while being paid at two. Offering the
+first unused index there hands a new payer an address somebody else already published, which
+is address reuse across two wallets, made silently, by the program whose whole argument is not
+linking payments. So an imported wallet offers *past the revealed tip*.
+
+**Peeked, not revealed.** A summary is built on every sync, so revealing there would move the
+index by one each time until the wallet walked away from its own addresses. Peeking is pure.
+Not being revealed does not leave it unwatched — `IMPORT_LOOKAHEAD` matches two hundred
+scripts past the tip. `Portfolio::imported` carries the answer, set from `Meta::created_at`,
+which `create` writes and nothing else does; it defaults to the cautious side.
+
+**A descriptor import shows no address at all until somebody types "I understand".** Its keys
+are elsewhere and nothing here can check that an address belongs to them — a descriptor that is
+subtly wrong parses, derives perfectly good addresses, and none of them are anybody's. A device
+wallet is not gated, because the device *can* be asked and the Verify button is that answer; a
+wallet holding keys is not, because it derives its own. The QR, the address, the copy buttons,
+the label row and the address list all go together — the list is every address the wallet has,
+so leaving it visible was a way round the gate rather than an exception to it. Recorded in
+`Meta::receive_acknowledged` against the wallet rather than the session, because asking every
+visit teaches somebody to type the words without reading them.
+
+**It was a warning first, and a warning was not enough.** A caution beside an address is read
+after the address has been copied.
+
+**"Handed out" is not a thing Sieve can say about an imported wallet.** The address list is the
+revealed range, which is a fact about a scan; which addresses somebody actually gave to a payer
+is a fact about a conversation this program never saw. The list says "Watching 22 addresses, 2
+paid to".
+
 The derivation-path list is a balance breakdown and must not show addresses: it duplicated
 the receive row and read as address reuse.
 
 The picker defaults to **native segwit** on every wallet that watches it, and never offers
 legacy at all. See the import model above for why those are two different rules.
+
+## Locking is one end of a pair
+
+`Paths::can_be_unlocked`. A wallet holding keys has a vault and the vault's password is the
+wallet's. A watch-only wallet has one only if somebody set one, which puts `lock.sieve` beside
+it. **A watch-only wallet with neither can be locked perfectly well and then never opened**,
+because the unlock screen has nothing to check a password against — and the idle timer was
+doing exactly that after five minutes, leaving the wallet shut until the app restarted.
+
+No reason locks a wallet that cannot be unlocked: not idle, not the screen locking, not
+suspend. Asking by hand says so and points at the preferences row that sets one.
+
+The shape is worth recognising because it has now happened twice: a feature written for wallets
+that hold keys, inherited by watch-only wallets where its assumption does not hold. The other
+was `SetDeviceBacked(watch_only)`, which put a "Verify on device" button on wallets with no
+device.
 
 ## Coins, and holding one back
 
@@ -833,7 +883,7 @@ even in dev builds. Do not remove those profile overrides.
 
 ```sh
 cargo run                        # launch
-cargo test                       # 225 tests; no network, no display
+cargo test                       # 227 tests; no network, no display
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 RUST_LOG=sieve=debug cargo run   # app logging
