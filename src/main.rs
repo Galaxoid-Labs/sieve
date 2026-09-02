@@ -143,6 +143,13 @@ const GLOBAL_CSS: &str = ".qr-ground { background-color: #ffffff; border-radius:
        padding: 10px 12px; \
      } \
      .seed-index { opacity: 0.5; font-size: 0.8em; } \
+     /* A TextView paints its own view background, which inside a card is a \
+        darker rectangle sitting on a lighter one. Let the card behind it show \
+        through instead, and take the text colour from the window. */ \
+     .paste-box, .paste-box text { \
+       background-color: transparent; \
+       color: @window_fg_color; \
+     } \
      .seed-word entry { \
        background: none; \
        box-shadow: none; \

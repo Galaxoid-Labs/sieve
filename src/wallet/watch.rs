@@ -164,6 +164,8 @@ pub fn parse(text: &str) -> Result<Descriptors> {
     // chains down knows better than a rule that guesses the second from the
     // first.
     if let Some((external, internal)) = labelled_pair(text) {
+        let external = without_whitespace(&external);
+        let internal = without_whitespace(&internal);
         let script_type =
             script_type_of(&external).or_else(|e| normalise_slip132(&external).1.ok_or(e))?;
         return Ok(Descriptors {
@@ -172,6 +174,10 @@ pub fn parse(text: &str) -> Result<Descriptors> {
             script_type,
         });
     }
+
+    // Not a labelled pair, so every line belongs to one descriptor.
+    let joined = without_whitespace(text);
+    let text = joined.as_str();
 
     let script_type = match script_type_of(text) {
         Ok(script_type) => script_type,
@@ -225,35 +231,69 @@ fn holds_private_key(text: &str) -> bool {
         .any(|token| token.get(1..4) == Some("prv"))
 }
 
+/// A descriptor with every space, tab and newline taken out.
+///
+/// A descriptor contains no whitespace anywhere, so any that arrived came from
+/// the journey rather than from the wallet — and an email or a document
+/// wrapping a three-hundred-character line puts newlines *inside* it.
+/// miniscript's answer to that is "unprintable character 0x0a", which names
+/// the byte and not the problem.
+fn without_whitespace(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// Two descriptors written down under labels, if that is what this is.
 ///
-/// Case-insensitive on the label and tolerant of the separator, because this
-/// is a convention rather than a standard — wallets write `External:`,
-/// `external =`, and worse. Anything that does not hold both labels is left
-/// alone, so this cannot swallow an ordinary descriptor.
+/// **Found by position, not by line.** A line-by-line reading looked obvious
+/// and was wrong: a descriptor is three hundred characters, and anything that
+/// wraps — an email, a document, a terminal — puts the rest of it on lines
+/// with no label on them. Walking lines and giving up on the first one without
+/// a separator meant a wrapped export failed while the same text unwrapped
+/// worked, which is a maddening thing to debug from the outside.
+///
+/// So the labels are located wherever they are, and everything between one and
+/// the next is that descriptor, whitespace and all, which is then removed.
 fn labelled_pair(text: &str) -> Option<(String, String)> {
-    let mut external = None;
-    let mut internal = None;
+    const EXTERNAL: [&str; 3] = ["external", "receive", "receiving"];
+    const INTERNAL: [&str; 2] = ["internal", "change"];
 
-    for line in text.lines() {
-        let line = line.trim();
-        let (label, rest) = line.split_once([':', '='])?;
-        let value = rest.trim();
-        if value.is_empty() {
-            return None;
-        }
-        // Strip a checksum here too: these arrive with one, and the pair is
-        // returned without going back through the caller's stripping.
-        let value = value.split('#').next().unwrap_or(value).trim().to_string();
-        match label.trim().to_ascii_lowercase().as_str() {
-            "external" | "receive" | "receiving" => external = Some(value),
-            "internal" | "change" => internal = Some(value),
-            _ => return None,
-        }
-    }
+    let haystack = text.to_ascii_lowercase();
+    let find = |names: &[&str]| {
+        names
+            .iter()
+            .filter_map(|name| haystack.find(name).map(|at| (at, name.len())))
+            .min_by_key(|(at, _)| *at)
+    };
 
-    let (external, internal) = (external?, internal?);
-    // Both must be descriptors. Two labels around something else is not this.
+    let (ext_at, ext_len) = find(&EXTERNAL)?;
+    let (int_at, int_len) = find(&INTERNAL)?;
+
+    // The label has to be followed by a separator, or this is a descriptor
+    // that merely contains the word somewhere.
+    let after = |at: usize, len: usize| -> Option<usize> {
+        let rest = &text[at + len..];
+        let skip = rest.find(|c: char| !c.is_whitespace())?;
+        (rest.as_bytes()[skip] == b':' || rest.as_bytes()[skip] == b'=')
+            .then_some(at + len + skip + 1)
+    };
+    let ext_from = after(ext_at, ext_len)?;
+    let int_from = after(int_at, int_len)?;
+
+    // Whichever label comes first owns the text up to the other.
+    let (external, internal) = if ext_at < int_at {
+        (&text[ext_from..int_at], &text[int_from..])
+    } else {
+        (&text[ext_from..], &text[int_from..ext_at])
+    };
+
+    let clean = |value: &str| {
+        let value = without_whitespace(value);
+        value.split('#').next().unwrap_or(&value).to_string()
+    };
+    let (external, internal) = (clean(external), clean(internal));
+
+    // Both must actually be descriptors. Two labels around something else is
+    // not this, and must fall through rather than be forced.
     (external.contains('(') && internal.contains('(')).then_some((external, internal))
 }
 
@@ -357,6 +397,28 @@ fn split_paths(descriptor: &str) -> Result<(String, String)> {
     // wallet's change addresses. Change would simply not have been seen.
     if descriptor.contains("/0/*") {
         return Ok((descriptor.to_string(), descriptor.replace("/0/*", "/1/*")));
+    }
+
+    // A key whose path ends in a bare `/` — `…xpub…/0/` — is the shape a lost
+    // asterisk leaves behind, and miniscript's answer to it is "Error while
+    // parsing key derivation path", which tells nobody anything.
+    //
+    // Worth naming because of *how* it happens: a descriptor pasted through
+    // anything that renders Markdown loses its asterisks to emphasis, so the
+    // text looks almost right and one character per key is missing. Somebody
+    // comparing it against their wallet's screen will not see it.
+    if descriptor.contains("/0/,")
+        || descriptor.contains("/1/,")
+        || descriptor.ends_with("/0/")
+        || descriptor.contains("/0/)")
+        || descriptor.contains("/1/)")
+    {
+        bail!(
+            "a key in that descriptor ends in `/0/` with no `*` after it. The asterisks \
+             are missing — copying a descriptor through a chat window or a document that \
+             formats text eats them, because `*` means emphasis. Copy it straight from \
+             the wallet that exported it."
+        );
     }
 
     // A descriptor with no wildcard describes one address, not a wallet.
@@ -520,6 +582,13 @@ mod tests {
         // Labels are a convention, not a standard.
         let loose = format!("receive = {external}\nchange = {internal}");
         assert_eq!(parse(&loose).unwrap().external, external);
+
+        // **Blank lines between them**, which is how a real export arrives —
+        // and which used to abandon the whole parse, handing BDK a newline.
+        let spaced = format!("External: {external}\n\n\nInternal: {internal}\n");
+        let parsed = parse(&spaced).unwrap();
+        assert_eq!(parsed.external, external);
+        assert_eq!(parsed.internal, internal);
 
         // An ordinary descriptor is not mistaken for a pair.
         let plain = format!("wpkh([ab12cd34/84h/0h/0h]{XPUB}/0/*)");
