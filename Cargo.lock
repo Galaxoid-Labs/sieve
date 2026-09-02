@@ -2313,7 +2313,7 @@ dependencies = [
  "directories",
  "getrandom 0.4.3",
  "glib-build-tools",
- "libc",
+ "nix 0.31.3",
  "qrcode",
  "relm4",
  "relm4-components",

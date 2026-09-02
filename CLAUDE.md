@@ -551,6 +551,30 @@ Three rules, and the second is the one that is easy to get wrong:
 The coin-naming field is the exception that needs nothing: it lives in an
 `adw::AlertDialog`, which already has a cancel response.
 
+## No `unsafe`, and the lint that keeps it that way
+
+`#![forbid(unsafe_code)]` at the crate root. **`forbid` rather than `deny`**,
+because `deny` can be switched off again by an `allow` on the offending item —
+which is precisely what somebody in a hurry reaches for.
+
+The four syscalls Sieve makes go through `nix`: `setrlimit(RLIMIT_CORE)`,
+`prctl(PR_SET_DUMPABLE)`, `mlockall`, and `kill`. **This does not remove the
+`unsafe` so much as relocate it** — a kernel boundary is unsafe by definition,
+and `nix::set_dumpable` is a thin wrapper around the same call. What it buys is
+who has read it: the gap `SECURITY.md` recorded was never the keyword, it was
+that those blocks had been reviewed by nobody but their author.
+
+`nix` was already in the tree transitively, so this added an edge and not a
+crate — 310 before, 310 after — and the direct `libc` dependency went with it.
+Returning `Result` is a real gain rather than ceremony: `setrlimit`'s return
+value had been discarded, so a failure to disable core dumps was silent.
+
+The tests used to write `$SIEVE_TOR` to inject a stand-in Tor, which Rust 2024
+made `unsafe` for a good reason — the environment is process-wide and writing
+it races every other thread reading it. `ensure_in_using` and `find_binary_with`
+take the path as an argument instead. **The variable was never the seam a test
+wanted; it was the seam that happened to exist.**
+
 ## The name
 
 **Sieve**, one word, and it stays that way. The GNOME naming guidance asks for

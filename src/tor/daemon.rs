@@ -41,12 +41,20 @@ static TEST_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// version this release was tested against, and on a Flatpak it is the only
 /// one reachable anyway.
 pub fn find_binary() -> Option<PathBuf> {
-    // An explicit override, and how the tests inject a stand-in.
-    if let Ok(path) = std::env::var("SIEVE_TOR") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
+    find_binary_with(std::env::var_os("SIEVE_TOR").map(PathBuf::from))
+}
+
+/// The search, with `$SIEVE_TOR` already read.
+///
+/// Split out so that what the override *does* can be tested without writing
+/// the process environment — `set_var` is `unsafe` in Rust 2024 because the
+/// environment is process-wide and writing it races every other thread that
+/// reads it. Reading it stays in `find_binary`, where there is nothing to test.
+fn find_binary_with(override_path: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(path) = override_path
+        && path.is_file()
+    {
+        return Some(path);
     }
 
     // Shipped beside the executable: /app/bin/tor in a Flatpak, or the
@@ -68,6 +76,15 @@ pub fn find_binary() -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join("tor"))
         .find(|candidate| candidate.is_file())
+}
+
+/// Is there still a process with this id?
+///
+/// Signal `None` is the kernel's "does this exist" — it performs the
+/// permission checks and delivers nothing.
+#[cfg(unix)]
+fn alive(pid: i32) -> bool {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
 /// Where the port of a Tor we started is written, and where its pid goes.
@@ -114,26 +131,27 @@ fn clear_stale(dir: &std::path::Path) {
     }
 
     #[cfg(unix)]
-    unsafe {
-        // Signal 0 asks whether it exists without touching it.
-        if libc::kill(pid, 0) != 0 {
+    {
+        // Signal `None` asks whether it exists without touching it.
+        if !alive(pid) {
             return;
         }
         tracing::warn!(
             pid,
             "a Tor from an earlier run is still holding the data directory"
         );
-        libc::kill(pid, libc::SIGTERM);
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGTERM,
+        );
     }
 
     // Tor unlinks its lock on the way out; give it a moment to do so.
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(50));
         #[cfg(unix)]
-        unsafe {
-            if libc::kill(pid, 0) != 0 {
-                return;
-            }
+        if !alive(pid) {
+            return;
         }
     }
     tracing::warn!(pid, "the earlier Tor did not exit; starting anyway");
@@ -153,7 +171,23 @@ pub fn ensure(progress: impl FnMut(String)) -> Result<Proxy> {
 /// Separate so the tests can drive a stand-in Tor without reaching into the
 /// real one — which they did, adopting the Tor the running app had started and
 /// then failing for reasons that had nothing to do with the code under test.
-pub(crate) fn ensure_in(dir: PathBuf, mut progress: impl FnMut(String)) -> Result<Proxy> {
+pub(crate) fn ensure_in(dir: PathBuf, progress: impl FnMut(String)) -> Result<Proxy> {
+    ensure_in_using(dir, None, progress)
+}
+
+/// The same again, with the binary named rather than looked for.
+///
+/// **This is how the tests inject a stand-in Tor, and it exists so they do not
+/// have to set an environment variable.** `std::env::set_var` is `unsafe` in
+/// Rust 2024, and rightly: the environment is process-wide, so writing it
+/// races with every other thread reading it — including the ones inside the
+/// standard library. Passing the path as an argument is what a test wanted all
+/// along; the variable was only ever the seam that happened to exist.
+fn ensure_in_using(
+    dir: PathBuf,
+    binary_override: Option<PathBuf>,
+    mut progress: impl FnMut(String),
+) -> Result<Proxy> {
     // Already running — the system service, or Tor Browser. Nothing to start,
     // and nothing of ours to clean up.
     if let Some(proxy) = super::detect() {
@@ -166,7 +200,7 @@ pub(crate) fn ensure_in(dir: PathBuf, mut progress: impl FnMut(String)) -> Resul
         return Ok(proxy);
     }
 
-    let binary = find_binary().ok_or_else(|| {
+    let binary = binary_override.or_else(find_binary).ok_or_else(|| {
         anyhow!(
             "no Tor found. This build does not ship one, so install it — on Arch, \
              `sudo pacman -S tor` — and try again."
@@ -271,9 +305,12 @@ pub(crate) fn ensure_in(dir: PathBuf, mut progress: impl FnMut(String)) -> Resul
             }
             tracing::warn!("Tor did not finish starting in time; stopping it");
             #[cfg(unix)]
-            unsafe {
+            {
                 // Only ever our own child, and harmless if it has already gone.
-                libc::kill(watched as i32, libc::SIGTERM);
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(watched as i32),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
             }
         });
     }
@@ -470,10 +507,8 @@ mod tests {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        // SAFETY: single-threaded test.
-        unsafe { std::env::set_var("SIEVE_TOR", &fake) };
         *TEST_DIR.lock().unwrap() = Some(dir.clone());
-        ensure_in(dir.clone(), |_| {}).unwrap();
+        ensure_in_using(dir.clone(), Some(fake.clone()), |_| {}).unwrap();
 
         // Still there a moment later, and still there after the watchdog has
         // had every chance to poll.
@@ -486,7 +521,6 @@ mod tests {
 
         stop();
         assert!(!ours_is_alive(), "stop left it running");
-        unsafe { std::env::remove_var("SIEVE_TOR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -514,20 +548,29 @@ mod tests {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        // SAFETY: single-threaded test, and the variable is read by this test
-        // only. Restored below.
-        unsafe { std::env::set_var("SIEVE_TOR", &fake) };
-        assert_eq!(find_binary().as_deref(), Some(fake.as_path()));
+        // The override is honoured, and named rather than exported.
+        assert_eq!(
+            find_binary_with(Some(fake.clone())).as_deref(),
+            Some(fake.as_path())
+        );
+        // A path that is not a file falls through to the ordinary search
+        // rather than being returned as if it existed.
+        assert_ne!(
+            find_binary_with(Some(dir.join("not-here"))).as_deref(),
+            Some(dir.join("not-here").as_path())
+        );
 
         let mut seen = Vec::new();
         *TEST_DIR.lock().unwrap() = Some(dir.clone());
-        let proxy = ensure_in(dir.clone(), |message| seen.push(message)).unwrap();
+        let proxy = ensure_in_using(dir.clone(), Some(fake.clone()), |message| {
+            seen.push(message)
+        })
+        .unwrap();
         assert_eq!(proxy, Proxy::local(19051));
         assert!(seen.iter().any(|m| m.contains("10%")), "{seen:?}");
         assert!(seen.iter().any(|m| m.contains("100%")), "{seen:?}");
 
         stop();
-        unsafe { std::env::remove_var("SIEVE_TOR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -548,15 +591,18 @@ mod live {
         // The test binary lives in target/debug/deps, so the bundle beside the
         // *app* binary is named directly rather than discovered.
         let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/tor/tor");
-        if bundled.is_file() {
-            // SAFETY: single-threaded test.
-            unsafe { std::env::set_var("SIEVE_TOR", &bundled) };
-        }
+        let override_path = bundled.is_file().then_some(bundled);
 
-        let binary = find_binary().expect("no Tor to start — run scripts/fetch-tor.sh");
+        let binary = find_binary_with(override_path.clone())
+            .expect("no Tor to start — run scripts/fetch-tor.sh");
         println!("using {}", binary.display());
 
-        let proxy = ensure(|message| println!("{message}")).expect("Tor did not start");
+        let proxy = ensure_in_using(
+            crate::wallet::data_root().join("tor"),
+            override_path,
+            |message| println!("{message}"),
+        )
+        .expect("Tor did not start");
         println!("proxy at {proxy}");
 
         // Not merely listening: answering RESOLVE, which only Tor does.

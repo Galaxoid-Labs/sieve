@@ -390,13 +390,17 @@ for somebody to remember this file.
   written, it is tested everywhere a test can reach without hardware on the
   desk, and that is not the same thing. `ROADMAP.md` M4a says which order to
   try it in.
-- **`unsafe`** appears in two files: `main.rs` (three libc calls for
-  hardening) and `tor/daemon.rs` (three for process control, plus `set_var` in
-  its own tests, which Rust 2024 made unsafe and which runs in no shipped
-  code). All of them are syscalls rather than pointer arithmetic, all are
-  small, and none has been reviewed by anyone but their author. Nothing
-  elsewhere in `src/` contains an `unsafe` block — the word appears in two doc
-  comments and nowhere else, which is worth knowing before grep is believed.
+- **`unsafe` is gone, and `#![forbid(unsafe_code)]` keeps it gone.** This was
+  a gap on the grounds that nobody but the author had read those blocks. Four
+  syscalls — `setrlimit`, `PR_SET_DUMPABLE`, `mlockall`, `kill` — moved to
+  `nix`'s safe wrappers, which does not delete the `unsafe` so much as move it
+  into code many more people have read; the kernel boundary is unsafe by
+  definition and no crate changes that. Four writes to the process environment
+  in `tor/daemon.rs`'s own tests were removed outright, by passing a path
+  rather than exporting one. `nix` was already compiled in transitively, so the
+  crate count did not move: 310 before and after. One thing improved on the
+  way — `setrlimit`'s result had been discarded, so a failure to switch core
+  dumps off was silent.
 - **Swap** is out of Sieve's hands, as above.
 
 ## If you find something

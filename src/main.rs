@@ -1,5 +1,20 @@
 //! Sieve — a privacy-focused Bitcoin wallet.
 
+// Sieve contains no `unsafe`, and this is what keeps it that way.
+//
+// It used to contain eight blocks: four syscalls for process hardening and
+// killing a stray Tor, and four `set_var` calls in tests. `SECURITY.md` listed
+// them as a known gap on the grounds that nobody but their author had read
+// them — which was the real problem, not the keyword.
+//
+// The syscalls went to `nix`, which does not remove the `unsafe` so much as
+// move it somewhere many more people have read; the test writes to the
+// environment were removed outright, by passing a path instead of exporting
+// one. `forbid` rather than `deny` deliberately: `deny` can be switched off
+// again by an `allow` on the offending item, which is exactly what somebody in
+// a hurry would reach for.
+#![forbid(unsafe_code)]
+
 mod about;
 mod app;
 mod fees;
@@ -44,31 +59,42 @@ pub struct Inspectable;
 
 impl Inspectable {
     pub fn while_choosing_a_file() -> Self {
-        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) };
+        let _ = nix::sys::prctl::set_dumpable(true);
         Self
     }
 }
 
 impl Drop for Inspectable {
     fn drop(&mut self) {
-        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+        // Nothing useful to do if this fails: the process would stay
+        // inspectable, and a dialog that has already closed is no place to
+        // raise it. Logged nowhere for the same reason.
+        let _ = nix::sys::prctl::set_dumpable(false);
     }
 }
 
 fn harden() {
-    unsafe {
-        let no_core = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        libc::setrlimit(libc::RLIMIT_CORE, &no_core);
+    use nix::sys::mman::{MlockAllFlags, mlockall};
+    use nix::sys::resource::{Resource, setrlimit};
 
-        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
-            tracing::warn!("PR_SET_DUMPABLE failed; this process is ptrace-attachable");
-        }
-        if libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) != 0 {
-            tracing::debug!("mlockall failed; secrets may reach swap");
-        }
+    // No core file, so a crash cannot write the heap — and with it a decrypted
+    // seed — somewhere a debugger or a crash reporter can read it. The result
+    // was discarded before this went through `nix`, so a failure to switch
+    // core dumps off was silent; it is the one of the three that would be a
+    // real loss.
+    if let Err(e) = setrlimit(Resource::RLIMIT_CORE, 0, 0) {
+        tracing::warn!(%e, "could not disable core dumps; a crash may write memory to disk");
+    }
+
+    if let Err(e) = nix::sys::prctl::set_dumpable(false) {
+        tracing::warn!(%e, "PR_SET_DUMPABLE failed; this process is ptrace-attachable");
+    }
+
+    // Expected to fail: the default RLIMIT_MEMLOCK is 8 MiB and a GTK
+    // application is far larger. Logged at debug because it is the ordinary
+    // case rather than a misconfiguration, and the answer is encrypted swap.
+    if let Err(e) = mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE) {
+        tracing::debug!(%e, "mlockall failed; secrets may reach swap");
     }
 }
 
