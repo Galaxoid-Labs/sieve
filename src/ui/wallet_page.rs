@@ -166,6 +166,8 @@ impl FactoryComponent for TxRow {
         bool,
         // What this payment was for, when it has been named.
         Option<String>,
+        // Whether amounts are being kept off the screen.
+        bool,
     );
     type Input = ();
     type Output = TxRowOutput;
@@ -240,7 +242,7 @@ impl FactoryComponent for TxRow {
     }
 
     fn init_model(
-        (tx, denomination, tip, price, network, show_path, label): Self::Init,
+        (tx, denomination, tip, price, network, show_path, label, hidden): Self::Init,
         _index: &DynamicIndex,
         _sender: FactorySender<Self>,
     ) -> Self {
@@ -299,14 +301,22 @@ impl FactoryComponent for TxRow {
             } else {
                 when
             },
-            amount: format!(
-                "{}{}",
-                if incoming { "+" } else { "−" },
-                denomination.format(magnitude, &network)
-            ),
+            // The sign stays: which way the money went is what the row is
+            // for, and hiding the amount should not hide the direction.
+            amount: if hidden {
+                format!("{}{}", if incoming { "+" } else { "−" }, WalletPage::HIDDEN)
+            } else {
+                format!(
+                    "{}{}",
+                    if incoming { "+" } else { "−" },
+                    denomination.format(magnitude, &network)
+                )
+            },
             incoming,
             pending: tx.height.is_none(),
-            fiat: price.map(|p| format!("≈ ${}", crate::price::usd(p.value_of(magnitude)))),
+            fiat: (!hidden)
+                .then(|| price.map(|p| format!("≈ ${}", crate::price::usd(p.value_of(magnitude)))))
+                .flatten(),
             txid: tx.txid,
         }
     }
@@ -624,6 +634,9 @@ pub struct WalletPage {
     /// The receive address is withheld until somebody says they will use it
     /// without a device confirming it. See `SetReceiveGated`.
     receive_gated: bool,
+    /// Amounts replaced with dots, for reading the app where somebody can see
+    /// the screen. Session-only: it is about the room, not the wallet.
+    values_hidden: bool,
     /// A freshly revealed address, shown instead of the next unused one until
     /// the path or wallet changes. Giving the same unused address to two payers
     /// links them, so asking for a new one has to actually produce one.
@@ -703,6 +716,8 @@ pub enum WalletPageMsg {
     SetReceiveGated(bool),
     /// Ask, in words somebody has to type, before showing it.
     AskShowAddress,
+    /// Show or hide every amount on screen.
+    ToggleValues,
     /// Name a payment just made, from what its request called itself.
     NameTransaction {
         txid: String,
@@ -769,7 +784,17 @@ pub enum WalletPageMsg {
 }
 
 impl WalletPage {
+    /// What stands in for a number that is being kept off the screen.
+    ///
+    /// Dots rather than a blank: a row that loses its amount entirely reads as
+    /// a row with nothing in it, and the shape of the list should not change
+    /// when the values do.
+    const HIDDEN: &'static str = "••••••";
+
     fn balance(&self) -> String {
+        if self.values_hidden {
+            return Self::HIDDEN.into();
+        }
         match &self.summary {
             Some(s) => self
                 .settings
@@ -921,6 +946,9 @@ impl WalletPage {
     /// marked as such rather than presented as a second exact figure beside
     /// an exact one.
     fn fiat(&self) -> Option<String> {
+        if self.values_hidden {
+            return None;
+        }
         let price = self.price?;
         let summary = self.summary.as_ref()?;
         Some(format!(
@@ -1650,6 +1678,33 @@ impl Component for WalletPage {
                                     set_valign: gtk::Align::Center,
                                     set_hexpand: true,
                                     set_label: "Transactions",
+                                },
+
+                                // Not a secret, and not a setting: a way to
+                                // read the app on a train. Session-only,
+                                // because it is about the room rather than
+                                // about the wallet.
+                                gtk::ToggleButton {
+                                    #[watch]
+                                    set_icon_name: if model.values_hidden {
+                                        "view-conceal-symbolic"
+                                    } else {
+                                        "view-reveal-symbolic"
+                                    },
+                                    set_valign: gtk::Align::Center,
+                                    add_css_class: "flat",
+                                    #[watch]
+                                    set_tooltip_text: Some(if model.values_hidden {
+                                        "Show amounts"
+                                    } else {
+                                        "Hide amounts"
+                                    }),
+                                    #[watch]
+                                    #[block_signal(values_toggled)]
+                                    set_active: model.values_hidden,
+                                    connect_toggled[sender] => move |_| {
+                                        sender.input(WalletPageMsg::ToggleValues);
+                                    } @values_toggled,
                                 },
 
                                 #[name(search_button)]
@@ -2505,6 +2560,7 @@ impl Component for WalletPage {
             fresh_address: None,
             device_backed: false,
             receive_gated: false,
+            values_hidden: false,
             summary: None,
             progress: Progress::Connecting,
             peers: None,
@@ -2828,6 +2884,15 @@ impl Component for WalletPage {
 
             WalletPageMsg::SetReceiveGated(gated) => self.receive_gated = gated,
 
+            WalletPageMsg::ToggleValues => {
+                self.values_hidden = !self.values_hidden;
+                // The rows carry formatted text, so they are rebuilt the same
+                // way a change of denomination rebuilds them.
+                if let Some(summary) = self.summary.clone() {
+                    self.rebuild_transactions(&summary);
+                }
+            }
+
             WalletPageMsg::AskShowAddress => {
                 // Typed, not clicked. A button says "I would like to get on
                 // with it"; a sentence somebody has to write says they read
@@ -3087,6 +3152,7 @@ impl WalletPage {
     /// Rebuild the activity list. Rows carry formatted text, so they are
     /// rebuilt when the summary or the denomination changes.
     fn rebuild_transactions(&mut self, summary: &Summary) {
+        let hidden = self.values_hidden;
         self.sync_activity_filter(summary);
 
         // Worth naming on each row only when there is more than one path for a
@@ -3123,6 +3189,7 @@ impl WalletPage {
                 summary.network.clone(),
                 show_path,
                 label,
+                hidden,
             ));
         }
     }
