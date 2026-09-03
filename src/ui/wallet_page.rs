@@ -2731,6 +2731,24 @@ impl Component for WalletPage {
                 self.send.emit(SendMsg::SetMinFee(
                     chain.as_ref().and_then(|c| c.min_relay_fee),
                 ));
+                // **A new block is the evidence against "no new blocks".**
+                //
+                // kyoto warns about a stale tip and never withdraws it — there
+                // is no "the tip is fine again" message to wait for — so the
+                // note it raised stayed on screen for the life of the session.
+                // Left running overnight, a wallet sat at the tip still saying
+                // its connection might be stale, which is worse than saying
+                // nothing: a warning that is wrong is a warning nobody reads
+                // the next time.
+                //
+                // Cleared here rather than on a timer, because the thing that
+                // makes it false is a block arriving, and that is exactly what
+                // this message carries.
+                if let (Some(new), Some(old)) = (chain.as_ref(), self.chain.as_ref())
+                    && new.tip_height > old.tip_height
+                {
+                    self.note = None;
+                }
                 self.chain = chain;
             }
             WalletPageMsg::SetTor(tor) => self.tor = tor,

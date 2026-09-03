@@ -471,6 +471,40 @@ What a restart actually costs is peer discovery: roughly a minute of DNS seeding
 and handshaking before anything syncs. If start-up feels slow, that is where the time is —
 not headers.
 
+## What a night of running found
+
+Three faults that need hours to appear, and everything else had been tested in
+sessions minutes old. All three came from one event: **the light client died and
+nothing noticed.**
+
+**A closed channel means the node is gone, and it cannot revive itself.**
+`recv` returns `None` only when every sender has dropped, which for kyoto means
+the task behind them ended. The old code logged and stopped re-arming — right,
+because re-arming a closed channel spins, and one step short, because from that
+moment nothing was listening to the network at all: no peer counts, no
+problems, no recovery, on a wallet that still looked synced. `App` rebuilds the
+session now, guarded by an `Instant` rather than a flag so a replacement that
+dies as quickly as the original says so instead of rebuilding for ever.
+
+**An empty update that returns instantly is a loop, not an update.**
+`UpdateSubscriber::updates` yields `Ok` with nothing in it once the node has
+gone, and `AppCmd::Update` re-arms on every `Ok` — so `next_update` rebuilt the
+whole summary, drove a full transaction-list rebuild *on the GTK thread*, and
+came straight back. Overnight that spent **230 minutes of CPU on the main
+thread**, which is what a stuttering navigation animation actually looks like
+from the inside. `QUIET_UPDATE_FLOOR` is 250 ms under an empty update and costs
+nothing when updates are real, because real ones are not empty.
+
+**A warning nobody withdraws is a warning nobody reads.** kyoto raises
+`PotentialStaleTip` and has no message for the tip being fine again, so the
+note stayed on screen for the life of the session — a wallet sitting at the tip
+still saying its connection might be stale. It is cleared when the chain tip
+advances, because a new block is the evidence against "no new blocks".
+
+**The habit worth keeping is leaving it running overnight.** None of this is
+reachable in a five-minute session, and the symptom that led to it was a
+desktop notification saying the window had stopped responding.
+
 ## Remembered peers
 
 **The two stages have different peer rules, and the interface says so.** Block headers are a

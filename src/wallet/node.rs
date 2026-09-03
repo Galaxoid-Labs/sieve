@@ -79,6 +79,14 @@ const QUIET_BEFORE_WAITING: Duration = Duration::from_secs(20);
 /// figure.
 const QUIET_OVER_TOR: Duration = Duration::from_secs(60);
 
+/// The least time an *empty* wallet update may take.
+///
+/// A real update takes as long as it takes and is not affected by this. An
+/// empty one arriving in microseconds means the stream behind it has nothing
+/// left to say, and the caller re-arms on every one — so without a floor the
+/// pair becomes a hot loop that pegs the interface thread.
+const QUIET_UPDATE_FLOOR: Duration = Duration::from_millis(250);
+
 /// Group digits so six-figure block heights stay readable.
 fn thousands(n: u32) -> String {
     let digits = n.to_string();
@@ -530,6 +538,23 @@ impl Session {
                 .collect()
         };
         let waited = waited.elapsed();
+
+        // **An empty update that returns instantly is a loop, not an update.**
+        //
+        // `updates()` yields `Ok` with nothing in it once the node behind it
+        // has gone, and the caller re-arms on every `Ok` — so this returned
+        // immediately, rebuilt the whole summary, drove a full transaction-list
+        // rebuild on the main thread, and came straight back. Left overnight it
+        // burned four hours of CPU on the GTK thread, which is why the window
+        // went sluggish and its animations stuttered.
+        //
+        // The cure for the cause is elsewhere: the app rebuilds a client whose
+        // channels have closed. This is the floor under it, so that no future
+        // way of producing an empty update can spin the interface again. It
+        // costs nothing when updates are real, because then they are not empty.
+        if updates.is_empty() && waited < QUIET_UPDATE_FLOOR {
+            tokio::time::sleep(QUIET_UPDATE_FLOOR - waited).await;
+        }
 
         let applying = std::time::Instant::now();
         let mut portfolio = self.portfolio.lock().await;

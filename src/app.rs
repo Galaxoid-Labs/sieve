@@ -86,6 +86,12 @@ pub struct App {
     /// The proxy currently in use — the one Sieve found running, or the one it
     /// started. Nothing connects through Tor until this is set.
     tor_active: Option<crate::tor::Proxy>,
+    /// When the light client was last rebuilt because it stopped talking.
+    ///
+    /// A node whose channels have closed cannot come back on its own, so the
+    /// session is rebuilt — and this is what stops that becoming a loop when
+    /// the new one dies as quickly as the old one.
+    node_restarted: Option<std::time::Instant>,
     session: Option<Arc<Session>>,
     chooser: Controller<Chooser>,
     onboarding: Controller<Onboarding>,
@@ -950,6 +956,7 @@ impl Component for App {
             tor_row: None,
             tor_switch: None,
             tor_active: None,
+            node_restarted: None,
             session: None,
             chooser,
             onboarding,
@@ -2769,6 +2776,9 @@ impl Component for App {
                 self.wallet.emit(WalletPageMsg::SetProgress(progress));
                 self.await_progress(&sender);
             }
+            // The same closed channel seen from the other end. The warning
+            // arm above owns the rebuild; this one only records it, so two
+            // streams ending together cannot rebuild twice.
             AppCmd::Progress { progress: None, .. } => {
                 tracing::warn!("the node stopped emitting progress")
             }
@@ -2797,8 +2807,44 @@ impl Component for App {
                 }
                 self.await_warning(&sender);
             }
-            AppCmd::Warning { notice: None, .. } => {
-                tracing::warn!("the node stopped emitting warnings")
+            // **The node's channels only close when the node is gone.**
+            //
+            // `recv` returns `None` when every sender has been dropped, which
+            // for kyoto means the task behind them ended. Re-arming would spin
+            // on a closed channel, so this used to log a warning and stop —
+            // and stopping is where it went wrong. Nothing was listening to
+            // the network from that moment on: no peer counts, no problems,
+            // no recovery. A wallet left running overnight sat there looking
+            // synced, with the last thing the node ever said still on screen.
+            //
+            // A dead client cannot revive itself, so it is rebuilt. Guarded by
+            // a clock rather than a flag, because the failure worth surviving
+            // is one that repeats: if the replacement dies as fast as the
+            // original, this says so instead of rebuilding for ever.
+            AppCmd::Warning {
+                generation,
+                notice: None,
+            } if self.current(generation) => {
+                const SOONEST_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+                let recent = self
+                    .node_restarted
+                    .is_some_and(|at| at.elapsed() < SOONEST_AGAIN);
+
+                if recent {
+                    tracing::error!("the light client stopped again straight away");
+                    self.wallet.emit(WalletPageMsg::Note(
+                        "Lost the connection to the network, and reconnecting did not \
+                         hold. Check your network, or reopen this wallet."
+                            .into(),
+                    ));
+                    return;
+                }
+
+                tracing::warn!("the light client stopped talking; rebuilding it");
+                self.node_restarted = Some(std::time::Instant::now());
+                self.wallet
+                    .emit(WalletPageMsg::Note("Reconnecting to the network…".into()));
+                self.restart_session(&sender);
             }
             AppCmd::Opened(Ok((paths, summary))) => {
                 sender.input(AppMsg::Ready { paths, summary });
