@@ -471,6 +471,40 @@ What a restart actually costs is peer discovery: roughly a minute of DNS seeding
 and handshaking before anything syncs. If start-up feels slow, that is where the time is —
 not headers.
 
+## Known upstream gap: kyoto's peers outlive its node
+
+**Shutting the light client down does not stop it, and the node gets a tokio runtime of its
+own so that something can.** `Session::shutdown` asks first — `ClientMessage::Shutdown` is
+handled as `return Ok(())`, and a node that returns closes its sockets, which is a politer
+goodbye to eight peers than having the connections vanish — and then shuts that runtime down,
+which cancels every task kyoto spawned whether kyoto tracks it or not.
+
+The reason it has to. bip157 0.6.3 spawns a task per peer (`peer_map.rs`) and a reader task
+under each one (`peer.rs`), calls `abort` nowhere and implements `Drop` nowhere. So `Node::run`
+returning drops the `PeerMap` and every `JoinHandle` in it — and a dropped handle in tokio
+*detaches* the task rather than cancelling it. What each stranded peer does then is spin:
+`peer.rs` selects on its channel from the node and treats a closed one as `None => continue`,
+so `recv()` completes instantly on every pass and the loop turns as fast as the processor
+allows until `max_connection_time`, which kyoto defaults to **two hours**.
+
+**This was the Tor toggle burning a CPU.** Turning Tor on or off restarts the session, because
+a node already talking to peers cannot change how it connects — so each toggle stranded a set
+of peers, and the cost appeared when Tor went on and did not come back when it went off.
+
+Two earlier fixes missed it, which is why the third was measured rather than reasoned about.
+Not re-arming a closed update channel was a real bug and a different one. Aborting the task
+`managed_start` hands back does nothing at all: that task has already returned by the time
+`shutdown` runs, and the peers were never its children in any sense tokio tracks.
+`stranded_peers_do_not_go_on_spinning_after_a_shutdown` is the number instead — real peers on
+signet, then the process's own `/proc/self/stat` time for five seconds after the shutdown. One
+stranded peer measured 5,830 ms in that window, over a whole core; the fix measures 0.
+
+`shutdown_background` rather than dropping the runtime, and that detail is load-bearing:
+dropping a runtime blocks, blocking inside an async context is a panic, and `Arc<Session>`
+clones get moved into relm4 commands — so the last one can fall out of scope inside a future.
+Nothing needs waiting for anyway, since the node only does network I/O and everything
+persisted goes through `next_update` on our side of the channel.
+
 ## What a night of running found
 
 Three faults that need hours to appear, and everything else had been tested in
@@ -927,8 +961,22 @@ GTK_DEBUG=interactive cargo run  # widget inspector
 cargo test -- --ignored --nocapture filter_peers
 cargo test -- --ignored --nocapture qr_samples   # writes codes to look at
 cargo test --release -- --ignored --nocapture kdf_cost
+cargo test --release -- --ignored --nocapture stranded_peers
 cargo test --release -- --ignored --nocapture repeated_words
 ```
+
+`stranded_peers` connects to signet and then measures this process's own CPU for five seconds
+after shutting the node down. It is the guard on the upstream gap above, and it needs a real
+peer: a node that connected to nobody has nothing to strand and would pass with the fix
+reverted, which is why it asserts it had peers before it believes the number.
+
+Also worth knowing for a CPU fault: `SIEVE_DEBUGGABLE=1` skips `PR_SET_DUMPABLE(0)` so the
+process can be attached to at all. Without it `gdb`, `eu-stack` and `perf` are locked out —
+correct for a wallet, and the reason a spinning task went two rounds of guessing. It warns
+loudly, because a process left attachable is one anything running as you can read the memory
+of. Note that yama's `ptrace_scope=1` additionally wants the tracer to be an *ancestor*, so a
+sampler has to launch the app rather than find it; `/proc/<tid>/wchan` and
+`/proc/<pid>/task/*/stat` need neither, and they are enough to find the thread.
 
 The last measures how often a generated phrase repeats a word, against what the birthday
 arithmetic predicts. A repeat is normal — about one 12-word phrase in 31 — and it is also what

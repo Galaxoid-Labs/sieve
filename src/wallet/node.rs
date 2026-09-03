@@ -198,8 +198,89 @@ impl Progress {
     }
 }
 
+/// Where the light client runs, and the only thing that reliably stops it.
+///
+/// **kyoto spawns a task per peer and never cancels one.**
+/// `ClientMessage::Shutdown` is handled as `return Ok(())`, so `Node::run`
+/// simply returns — dropping the `PeerMap` and with it every `JoinHandle` it
+/// was holding. A dropped handle in tokio *detaches* the task rather than
+/// cancelling it, and nothing in kyoto calls `abort` or implements `Drop`, so
+/// each peer carries on running with nobody left to talk to.
+///
+/// What it does then is spin. `peer.rs` selects on its channel from the node
+/// and treats a closed one as `None => continue`, so once the node is gone
+/// `recv()` completes instantly on every pass and the loop turns as fast as the
+/// processor allows. It stops at `max_connection_time`, which kyoto defaults to
+/// **two hours**.
+///
+/// That is the CPU that appeared when Tor was switched on and stayed after it
+/// was switched off. Both toggles restart the session, because a node already
+/// talking to peers cannot change how it connects; each restart stranded
+/// another set of peers, and each set spun for two hours. Aborting the task
+/// returned by `managed_start` does nothing about it — that task has already
+/// returned by then, and the peers were never its children in any sense tokio
+/// tracks.
+///
+/// So the node gets a runtime of its own, and stopping the session shuts that
+/// runtime down. Every task kyoto spawned dies with it, tracked or not. This is
+/// the one lever that does not depend on kyoto's cooperation.
+struct NodeHost {
+    /// Taken by `stop`, so stopping twice is not an error and dropping after a
+    /// stop has nothing left to do.
+    runtime: std::sync::Mutex<Option<tokio::runtime::Runtime>>,
+}
+
+impl NodeHost {
+    /// Start a node on a runtime of its own.
+    fn start(node: bdk_kyoto::bip157::Node) -> Result<Self> {
+        // Sized like the runtime this used to share with relm4, so nothing
+        // about the scan gets slower: kyoto's filter matching is one
+        // sequential task, and the rest is a socket per peer.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .thread_name("sieve:node")
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow!("could not start a runtime for the light client: {e}"))?;
+
+        runtime.spawn(async move { node.run().await });
+
+        Ok(Self {
+            runtime: std::sync::Mutex::new(Some(runtime)),
+        })
+    }
+
+    /// Shut the runtime down, cancelling everything on it.
+    ///
+    /// `shutdown_background` rather than a plain drop, and deliberately:
+    /// dropping a runtime blocks, and blocking is a panic inside an async
+    /// context. A `Session` is held by `Arc` and clones of it are moved into
+    /// relm4 commands, so the last one can very well fall out of scope inside
+    /// a future — which would turn this cleanup into a crash. Nothing here
+    /// needs to be waited for anyway: the node does network I/O, and
+    /// everything persisted goes through `next_update` on our side of the
+    /// channel, so there is no half-written state to protect.
+    fn stop(&self) {
+        if let Ok(mut slot) = self.runtime.lock()
+            && let Some(runtime) = slot.take()
+        {
+            runtime.shutdown_background();
+        }
+    }
+}
+
+impl Drop for NodeHost {
+    /// So a session that is dropped without being shut down still takes its
+    /// node with it, and still does not block to do it.
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// A running light client bound to one wallet.
 pub struct Session {
+    /// The runtime the node runs on, and the only reliable way to stop it.
+    /// See `NodeHost`.
+    node: NodeHost,
     portfolio: Arc<AsyncMutex<Portfolio>>,
     updates: Arc<AsyncMutex<UpdateSubscriber<Multiple>>>,
     info: Arc<AsyncMutex<bdk_kyoto::Receiver<Info>>>,
@@ -433,9 +514,12 @@ impl Session {
         // `managed_start` hands back the node so it is spawned explicitly on
         // relm4's runtime rather than whichever runtime happens to be current.
         let (client, node) = client.managed_start();
-        relm4::spawn(async move { node.run().await });
+        // On a runtime of its own, which is what makes it possible to stop.
+        // See `NodeHost`.
+        let host = NodeHost::start(node)?;
 
         let session = Session {
+            node: host,
             portfolio: Arc::new(AsyncMutex::new(portfolio)),
             updates: Arc::new(AsyncMutex::new(updates)),
             info: Arc::new(AsyncMutex::new(logging.info_subscriber)),
@@ -1298,8 +1382,16 @@ impl Session {
         self.blocks_read.load(Ordering::Relaxed)
     }
 
+    /// Stop the light client, and make sure it actually stopped.
+    ///
+    /// Asked first, so a node that can stop itself does — it closes its
+    /// sockets on the way out, which is a politer goodbye to eight peers than
+    /// having the connections vanish. Then the runtime goes, because asking is
+    /// not enough on its own: kyoto's peers outlive the node that spawned them
+    /// and spin when it is gone. `NodeHost` has the detail.
     pub fn shutdown(&self) {
         let _ = self.requester.shutdown();
+        self.node.stop();
     }
 }
 
@@ -1312,6 +1404,114 @@ impl std::fmt::Debug for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This process's own processor time, in milliseconds.
+    ///
+    /// `/proc/self/stat`, because the question is what *this* program is
+    /// burning and there is no portable way to ask. Fields 14 and 15 are user
+    /// and system jiffies; the two before them are inside the comm field,
+    /// which can itself contain spaces and brackets, so the split is after the
+    /// last `)` rather than on whitespace.
+    #[cfg(target_os = "linux")]
+    fn cpu_ms() -> u64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("this is Linux");
+        let after_comm = stat.rsplit_once(')').expect("a comm field").1;
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        let jiffies: u64 =
+            fields[11].parse::<u64>().expect("utime") + fields[12].parse::<u64>().expect("stime");
+        // `CLK_TCK` is 100 everywhere Linux runs in practice, and this is a
+        // test measuring a difference of seconds against a threshold of
+        // hundreds of milliseconds — precision beyond this is not the thing
+        // that would make it wrong.
+        jiffies * 10
+    }
+
+    /// A light client that has been shut down stops using the processor.
+    ///
+    /// **The regression this exists for was reported as "turning Tor on costs
+    /// 9% of a CPU, and turning it off does not give it back".** Both toggles
+    /// restart the session; the restart left kyoto's peer tasks running with
+    /// their node gone, and a stranded peer spins on its closed channel for up
+    /// to two hours. `NodeHost` has the mechanism written out.
+    ///
+    /// It is measured rather than reasoned about because the reasoning had
+    /// already been wrong twice: the first fix stopped re-arming a closed
+    /// update channel, the second aborted the task `managed_start` returns,
+    /// and neither touched the tasks actually burning the time. What settles
+    /// it is a number.
+    ///
+    /// Real peers on signet, because the bug needs a peer: a node that
+    /// connected to nobody has nothing to strand, and would pass this test
+    /// with the fix reverted. That is also why it asserts it *had* peers
+    /// first — a network failure has to fail loudly here rather than quietly
+    /// passing.
+    ///
+    /// `cargo test --release -- --ignored --nocapture stranded_peers`
+    #[test]
+    #[ignore = "connects to real peers on signet"]
+    #[cfg(target_os = "linux")]
+    fn stranded_peers_do_not_go_on_spinning_after_a_shutdown() {
+        use std::time::Duration;
+
+        let network = bdk_wallet::bitcoin::Network::Signet;
+        let outer = tokio::runtime::Runtime::new().expect("a runtime");
+
+        let mut builder = bdk_kyoto::bip157::Builder::new(network);
+        for ip in outer.block_on(resolve_seeds_directly(network, REQUIRED_PEERS as usize * 3)) {
+            builder = builder.add_peer(bdk_kyoto::bip157::TrustedPeer::from_ip(ip));
+        }
+        let (node, client) = builder.required_peers(REQUIRED_PEERS).build();
+
+        let host = NodeHost::start(node).expect("a runtime for the node");
+        let requester = client.requester;
+
+        // Long enough for a handshake with several peers. The node is left to
+        // get on with headers; what matters is that peer tasks exist.
+        let peers = outer.block_on(async {
+            let mut seen = Vec::new();
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if let Ok(info) = requester.peer_info().await
+                    && !info.is_empty()
+                {
+                    seen = info;
+                    break;
+                }
+            }
+            seen
+        });
+        assert!(
+            !peers.is_empty(),
+            "no peer ever connected, so there was nothing to strand — check the \
+             network before reading anything into this test"
+        );
+        println!("{} peers connected", peers.len());
+
+        let _ = requester.shutdown();
+        host.stop();
+
+        // Settle first: the runtime is being torn down, and the tail of that
+        // is work this test is not asking about.
+        outer.block_on(async { tokio::time::sleep(Duration::from_secs(2)).await });
+
+        const WINDOW: Duration = Duration::from_secs(5);
+        let before = cpu_ms();
+        outer.block_on(async { tokio::time::sleep(WINDOW).await });
+        let spent = cpu_ms() - before;
+
+        println!("{spent} ms of processor time in the {WINDOW:?} after shutdown");
+
+        // A stranded peer spins flat out, so the failing case is hundreds of
+        // milliseconds per peer per second and the fixed case is close to
+        // nothing. The threshold sits far enough above idle that a busy build
+        // machine does not fail it, and far enough below one spinning task
+        // that the bug cannot hide under it.
+        assert!(
+            spent < 500,
+            "{spent} ms of processor time in {WINDOW:?} with the node shut down: \
+             something kyoto spawned is still running. See `NodeHost`."
+        );
+    }
 
     /// Every chain the interface offers can be seeded.
     ///

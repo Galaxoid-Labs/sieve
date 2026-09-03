@@ -110,8 +110,11 @@ ureq = { version = "3", features = ["socks-proxy"] }
 # QR rendering. Pure Rust, no C dependency, and nothing leaves the machine.
 qrcode = { version = "0.14", default-features = false }
 
-# Plumbing.
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+# Plumbing. `net` is for the IO driver on the runtime the light client gets to
+# itself — see `wallet::node::NodeHost`. bip157 asks for it too, so Cargo's
+# feature unification would supply it either way; a runtime that cannot drive a
+# socket is not a thing to leave resting on another crate's feature list.
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "6"
