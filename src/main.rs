@@ -86,7 +86,25 @@ fn harden() {
         tracing::warn!(%e, "could not disable core dumps; a crash may write memory to disk");
     }
 
-    if let Err(e) = nix::sys::prctl::set_dumpable(false) {
+    // `SIEVE_DEBUGGABLE=1` leaves the process attachable.
+    //
+    // **Only for finding a fault in a running Sieve, and it costs the
+    // protection while it is set.** With `PR_SET_DUMPABLE(0)` the kernel
+    // re-owns `/proc/<pid>`, so `gdb`, `eu-stack` and `perf` cannot attach —
+    // which is the point, and which also means a wallet burning a core cannot
+    // be profiled at all. That came up: a spinning task went three rounds of
+    // guessing because there was no way to ask the process what it was doing.
+    //
+    // Loud rather than quiet, because a process left attachable is one another
+    // program running as this user can read the memory of, including a seed
+    // while it is being signed with.
+    if std::env::var_os("SIEVE_DEBUGGABLE").is_some() {
+        tracing::warn!(
+            "SIEVE_DEBUGGABLE is set: this process can be attached to by a debugger, \
+             and anything running as you can read its memory. Do not use it with a \
+             wallet holding real money."
+        );
+    } else if let Err(e) = nix::sys::prctl::set_dumpable(false) {
         tracing::warn!(%e, "PR_SET_DUMPABLE failed; this process is ptrace-attachable");
     }
 
