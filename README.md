@@ -14,6 +14,8 @@ and works out the answers itself.
 Written in Rust with [Relm4](https://relm4.org), GTK 4 and libadwaita, so it
 behaves like the rest of the desktop rather than like a browser in a window.
 
+https://github.com/user-attachments/assets/f3995714-58a1-4382-ba01-460ba9539abe
+
 ## What it does
 
 **Sync without disclosure**
