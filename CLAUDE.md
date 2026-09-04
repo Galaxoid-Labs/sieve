@@ -539,6 +539,45 @@ advances, because a new block is the evidence against "no new blocks".
 reachable in a five-minute session, and the symptom that led to it was a
 desktop notification saying the window had stopped responding.
 
+## What a second night found: a placeholder that was not inert
+
+The symptom was the processor waking every couple of seconds, all night. The
+cause was one line: `pin_resume_point` had nothing to report and returned
+`AppCmd::Tick`, because a relm4 command must return *some* `CommandOutput`.
+
+`Tick` is not inert. Its handler runs a whole tick and calls `schedule_tick`,
+arming another eight-second timer — so every resume point written during a scan
+left a permanent timer chain behind it. A resume point goes down about every
+twenty seconds, so a night of scanning accumulated **over a thousand chains**,
+all firing for ever. Measured before the fix: `chain_info` was being called
+between sixty and a hundred and seventy times a second, and the log contained
+essentially nothing else.
+
+Three faults had to line up to produce it, and fixing only the loudest would
+have hidden the other two:
+
+- **A message used as a placeholder did work.** `AppCmd::Nothing` exists now
+  and is the only thing a command should hand back when it has nothing to say.
+- **A self-rearming timer had no owner.** `schedule_tick` is armed from
+  `AppCmd::Started` *and* from the tick itself, so every session restart left a
+  chain running beside the new one. `AppCmd::Tick` carries its session's
+  generation now, and a stale chain stops instead of doubling up. The idle
+  poller had the same shape — toggling the idle lock off and on inside one poll
+  interval left the retired chain running, because it had not woken up to learn
+  it was retired — and carries an epoch for the same reason.
+- **A reader wrote to disk.** `chain_info` remembers filter-serving peers, and
+  `peers::remember` goes through `vault::write_atomic`: temp file, fsync,
+  rename, fsync the directory. Two flushes per call, on a function that
+  everything on the Network tab goes through. It writes only when the peer set
+  has actually changed now, compared as a set, since a reshuffle of the same
+  eight peers is not news.
+
+**The general lesson is about self-rearming timers**, which this codebase now
+has two of. One is only correct if exactly one chain exists, and nothing in the
+type system says so. Both are tied to something that can go stale — a
+generation, an epoch — so a chain that should have stopped finds out that it
+has.
+
 ## Remembered peers
 
 **The two stages have different peer rules, and the interface says so.** Block headers are a

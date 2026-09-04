@@ -65,6 +65,15 @@ pub struct App {
     /// The tip height the block rows were last read at, so opening the Network
     /// tab repeatedly does not re-download the same block.
     tip_block_read: Option<u32>,
+    /// Which idle poller is the live one.
+    ///
+    /// A self-rearming timer needs something to say "you are the old one" to,
+    /// or every restart of it leaves the previous chain running beside the
+    /// new. Turning the idle lock off and on again inside one poll interval
+    /// did exactly that: the chain that was told to stop had not woken up yet,
+    /// found the setting on again, and carried on. See `AppCmd::Nothing` for
+    /// the same fault with far worse consequences.
+    idle_epoch: u64,
     /// The height the chain view last reported, which is what makes the
     /// estimate stale.
     chain_tip: Option<u32>,
@@ -608,8 +617,21 @@ pub enum AppCmd {
     },
     Planned(Result<crate::wallet::send::Plan, String>),
     Sent(Result<(String, Summary), String>),
-    Tick,
+    Tick {
+        generation: u64,
+    },
     Priced(Result<crate::price::Price, String>),
+    /// Nothing to report.
+    ///
+    /// **A command must return a `CommandOutput`, and this is the one to
+    /// return when there is nothing to say.** `pin_resume_point` used to hand
+    /// back `AppCmd::Tick`, which is not inert: its handler runs a whole tick
+    /// and arms another eight-second timer. A resume point is written roughly
+    /// every twenty seconds during a scan, so a night of scanning left well
+    /// over a thousand timer chains all firing forever, each one calling
+    /// `chain_info` — which reads the peer table and writes the peers file.
+    /// That was the processor waking every couple of seconds.
+    Nothing,
     /// The block at the tip, read whole. It was already being downloaded for
     /// the fee estimate; this keeps the rest of it.
     TipBlock(Result<Box<crate::wallet::node::TipBlock>, String>),
@@ -623,7 +645,9 @@ pub enum AppCmd {
     /// A replacement was built, or could not be.
     PlannedBump(Result<Box<crate::wallet::send::Plan>, String>),
     /// Time to ask whether the wallet has been left alone long enough.
-    Idle,
+    Idle {
+        epoch: u64,
+    },
     /// A watch-only wallet, opened without a password.
     Opened(Result<(Paths, Summary), String>),
     /// Who is connected, without waiting for the chain.
@@ -957,6 +981,7 @@ impl Component for App {
             scan_recorded: None,
             fee_estimate: None,
             tip_block_read: None,
+            idle_epoch: 0,
             chain_tip: None,
             peers_read: None,
             amounts_row: None,
@@ -2707,7 +2732,10 @@ impl Component for App {
                 // Whatever survived, the wallet is still watchable.
                 self.start_session(&sender);
             }
-            AppCmd::Idle => {
+            AppCmd::Idle { epoch } if epoch != self.idle_epoch => {
+                tracing::trace!(epoch, "an idle check from a poller that was replaced");
+            }
+            AppCmd::Idle { .. } => {
                 // Trace, not debug: this fires every fifteen seconds for the
                 // life of the process, and it has already answered the
                 // question it was added for.
@@ -2728,7 +2756,17 @@ impl Component for App {
                 self.watch_for_idle(&sender);
             }
 
-            AppCmd::Tick => {
+            AppCmd::Nothing => {}
+
+            // Only the current session's tick survives. Without the guard a
+            // chain armed for a session that has since been replaced goes on
+            // ticking beside the new one, and every restart leaves another
+            // behind — which is the same fault as the one above arriving by a
+            // slower road.
+            AppCmd::Tick { generation } if !self.current(generation) => {
+                tracing::debug!(generation, "a tick from a session that has been replaced");
+            }
+            AppCmd::Tick { .. } => {
                 self.check_tor(&sender);
                 // The peers separately from the chain. kyoto stops warning
                 // about connections once it has enough, so between the last
@@ -3145,13 +3183,22 @@ impl App {
     /// every fifteen seconds that almost always says no. The cost of the
     /// coarseness is that the lock can be up to that late, which nobody can
     /// perceive against a five-minute setting.
-    fn watch_for_idle(&self, sender: &ComponentSender<Self>) {
+    /// Start the idle poller, retiring whichever one was running.
+    fn watch_for_idle(&mut self, sender: &ComponentSender<Self>) {
+        self.idle_epoch = self.idle_epoch.wrapping_add(1);
+        self.rearm_idle(sender);
+    }
+
+    /// Keep the current poller going. Silent if it has been superseded or
+    /// switched off.
+    fn rearm_idle(&self, sender: &ComponentSender<Self>) {
         if self.settings.idle_lock.duration().is_none() {
             return;
         }
+        let epoch = self.idle_epoch;
         sender.oneshot_command(async move {
             tokio::time::sleep(IDLE_CHECK).await;
-            AppCmd::Idle
+            AppCmd::Idle { epoch }
         });
     }
 
@@ -3159,9 +3206,10 @@ impl App {
         if self.session.is_none() {
             return;
         }
+        let generation = self.generation;
         sender.oneshot_command(async move {
             tokio::time::sleep(TICK).await;
-            AppCmd::Tick
+            AppCmd::Tick { generation }
         });
     }
 
@@ -3330,7 +3378,8 @@ impl App {
                 tracing::info!(height, "recording how far the scan has checked");
                 wallet::Meta::record_scanned_to(&paths, height, &hash.to_string());
             }
-            AppCmd::Tick
+            // Not `AppCmd::Tick`. See `AppCmd::Nothing`.
+            AppCmd::Nothing
         });
     }
 
