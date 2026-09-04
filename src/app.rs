@@ -62,6 +62,9 @@ pub struct App {
     /// came from. Kept so switching to Send twice does not download the same
     /// block twice.
     fee_estimate: Option<(u32, f64, String)>,
+    /// The tip height the block rows were last read at, so opening the Network
+    /// tab repeatedly does not re-download the same block.
+    tip_block_read: Option<u32>,
     /// The height the chain view last reported, which is what makes the
     /// estimate stale.
     chain_tip: Option<u32>,
@@ -469,6 +472,8 @@ pub enum AppMsg {
     },
     SetShowFiat(bool),
     SetMempoolFees(bool),
+    /// Read the block at the tip for the Network tab's chain rows.
+    ReadTipBlock,
     SetTor(bool),
     SetTorProxy(String),
     /// Ask the proxy whether it is there, and whether it is Tor.
@@ -605,6 +610,9 @@ pub enum AppCmd {
     Sent(Result<(String, Summary), String>),
     Tick,
     Priced(Result<crate::price::Price, String>),
+    /// The block at the tip, read whole. It was already being downloaded for
+    /// the fee estimate; this keeps the rest of it.
+    TipBlock(Result<Box<crate::wallet::node::TipBlock>, String>),
     /// The chain data has been cleared, or could not be.
     Rescanned(Result<(), String>),
     /// Which paths were added, or why none were.
@@ -717,6 +725,7 @@ impl Component for App {
                         AppMsg::RevealAddress(script_type)
                     }
                     crate::ui::wallet_page::WalletPageOutput::EstimateFee => AppMsg::EstimateFee,
+                    crate::ui::wallet_page::WalletPageOutput::ReadTipBlock => AppMsg::ReadTipBlock,
                     crate::ui::wallet_page::WalletPageOutput::AskRescan => AppMsg::AskRescan,
                     crate::ui::wallet_page::WalletPageOutput::AskSearchPaths => {
                         AppMsg::AskSearchPaths
@@ -947,6 +956,7 @@ impl Component for App {
             generation: 0,
             scan_recorded: None,
             fee_estimate: None,
+            tip_block_read: None,
             chain_tip: None,
             peers_read: None,
             amounts_row: None,
@@ -1175,6 +1185,28 @@ impl Component for App {
                 sender.input(AppMsg::EstimateFee);
             }
 
+            AppMsg::ReadTipBlock => {
+                // Once per block, not once per visit: the same download the
+                // local fee estimate makes, and the tip is the only thing that
+                // invalidates it.
+                if self.tip_block_read.is_some() && self.tip_block_read == self.chain_tip {
+                    return;
+                }
+                let Some(session) = self.session.clone() else {
+                    return;
+                };
+                self.tip_block_read = self.chain_tip;
+                sender.oneshot_command(async move {
+                    AppCmd::TipBlock(
+                        session
+                            .read_tip_block()
+                            .await
+                            .map(Box::new)
+                            .map_err(|e| e.to_string()),
+                    )
+                });
+            }
+
             AppMsg::EstimateFee => {
                 let network = self
                     .active
@@ -1231,11 +1263,11 @@ impl Component for App {
                     return;
                 }
                 sender.oneshot_command(async move {
-                    AppCmd::Estimated(
+                    AppCmd::TipBlock(
                         session
-                            .average_fee_at_tip()
+                            .read_tip_block()
                             .await
-                            .map(|(height, rate)| (rate, format!("Average of block {height}")))
+                            .map(Box::new)
                             .map_err(|e| e.to_string()),
                     )
                 });
@@ -2909,6 +2941,26 @@ impl Component for App {
                 self.refresh_tor_row();
             }
 
+            AppCmd::TipBlock(Ok(block)) => {
+                // Two things out of one download: the fee field's number, and
+                // the shape of the block it came from. The second is what
+                // gives the first its context — an average fee from a block
+                // that was only a third full means something different from
+                // the same number out of a full one.
+                let source = format!("Average of block {}", block.height);
+                let rate = block.fee_rate;
+                self.wallet.emit(WalletPageMsg::SetTipBlock(Some(block)));
+                // Down the same path a mempool.space answer takes, so the two
+                // sources cannot drift apart in how they are cached or shown.
+                sender.oneshot_command(async move { AppCmd::Estimated(Ok((rate, source))) });
+            }
+            AppCmd::TipBlock(Err(message)) => {
+                // Clear the marker, or one failed read would suppress every
+                // later attempt at this height.
+                self.tip_block_read = None;
+                tracing::warn!(%message, "could not read the block at the tip");
+                self.wallet.emit(WalletPageMsg::SetTipBlock(None));
+            }
             AppCmd::Estimated(Ok((rate, source))) => {
                 if let Some(height) = self.chain_tip {
                     self.fee_estimate = Some((height, rate, source.clone()));

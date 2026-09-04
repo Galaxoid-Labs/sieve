@@ -68,6 +68,8 @@ pub enum WalletPageOutput {
     NewAddress(crate::wallet::accounts::ScriptType),
     /// The send form came into view and wants a fee rate to start from.
     EstimateFee,
+    /// Read the block at the tip, for the Network tab's chain rows.
+    ReadTipBlock,
     /// Try to bring Tor up again after it failed.
     RetryTor,
     /// Build a transaction, watch-only, and hand back what it would cost.
@@ -490,6 +492,26 @@ pub(crate) fn thousands(n: u32) -> String {
     out
 }
 
+/// What the block at the tip held, in one line.
+///
+/// Fees and fullness together, because the fee number on the Send screen is an
+/// average across this block and means something different depending on how
+/// full it was — the same average out of a third-full block is a quiet
+/// network, and out of a full one it is a busy one.
+fn tip_block_shape(
+    block: &crate::wallet::node::TipBlock,
+    unit: crate::settings::Denomination,
+    network: &str,
+) -> String {
+    let fees = unit.format(block.total_fees_sat, network);
+    format!(
+        "{} transactions · {:.0}% of a full block · {} in fees",
+        block.transactions,
+        block.weight_used * 100.0,
+        fees,
+    )
+}
+
 /// How long ago, in the terms a person would use.
 ///
 /// Recent payments are the ones being checked on, so they get relative time.
@@ -549,6 +571,8 @@ pub struct WalletPage {
     /// Somewhere to say things worth saying once and not keeping.
     toaster: Toaster,
     chain: Option<crate::wallet::node::ChainInfo>,
+    /// The block at the tip, as last read. Free with the fee estimate.
+    tip_block: Option<crate::wallet::node::TipBlock>,
     peers_list: FactoryVecDeque<PeerRow>,
     /// The wallet is the root screen now, so it exists before anyone has
     /// proved they may look at it.
@@ -666,6 +690,11 @@ pub enum WalletPageMsg {
     SetPrice(Option<crate::price::Price>),
     Toast(String),
     SetChain(Option<crate::wallet::node::ChainInfo>),
+    /// The block at the tip, read whole — its shape and what it says about
+    /// who made it.
+    SetTipBlock(Option<Box<crate::wallet::node::TipBlock>>),
+    /// Ask for the block at the tip, so the chain rows have something to say.
+    ReadTipBlock,
     /// Start over from the birthday, after the app has asked.
     AskRescan,
     /// Look on the derivation paths this wallet is not watching.
@@ -1181,6 +1210,46 @@ impl WalletPage {
             Some(route) => route.clone(),
             None => "Direct — the peers you connect to see your IP address".into(),
         }
+    }
+
+    /// What the tip block held, or nothing when none has been read.
+    fn tip_block_shape(&self) -> String {
+        let Some(block) = &self.tip_block else {
+            return String::new();
+        };
+        let network = self
+            .summary
+            .as_ref()
+            .map(|s| s.network.clone())
+            .unwrap_or_default();
+        tip_block_shape(block, self.settings.denomination, &network)
+    }
+
+    /// Subsidy plus fees: what the block at the tip actually paid.
+    fn tip_block_reward(&self) -> String {
+        let Some(block) = &self.tip_block else {
+            return String::new();
+        };
+        let network = self
+            .summary
+            .as_ref()
+            .map(|s| s.network.clone())
+            .unwrap_or_default();
+        self.settings
+            .denomination
+            .format(block.reward_sat(), &network)
+    }
+
+    /// Who the tip block signs itself as, escaped.
+    ///
+    /// **Escaped, because this is bytes a stranger chose.** A coinbase is
+    /// arbitrary data written by whoever made the block, an Adwaita row reads
+    /// Pango markup, and a miner is perfectly free to put a `<span>` in there.
+    /// `node::coinbase_text` already strips it to printable ASCII and caps the
+    /// length; this closes the markup half.
+    fn tip_block_signature(&self) -> Option<String> {
+        let miner = self.tip_block.as_ref()?.miner.as_deref()?;
+        Some(gtk::glib::markup_escape_text(miner).to_string())
     }
 
     /// The clock consensus uses, which is not the tip's own timestamp.
@@ -2367,6 +2436,35 @@ impl Component for WalletPage {
                             #[watch]
                             set_subtitle: &model.median_time(),
                         },
+
+                        // All three come out of the block the fee estimate
+                        // already downloads. See `node::TipBlock`.
+                        adw::ActionRow {
+                            #[watch]
+                            set_visible: model.tip_block.is_some(),
+                            set_title: "Last block held",
+                            #[watch]
+                            set_subtitle: &model.tip_block_shape(),
+                            set_subtitle_lines: 2,
+                        },
+
+                        adw::ActionRow {
+                            #[watch]
+                            set_visible: model.tip_block_signature().is_some(),
+                            set_title: "Signed by",
+                            // "Signed", not "mined by": the coinbase is
+                            // whatever the miner chose to put there, nothing
+                            // verifies it, and one pool may sign as another.
+                            set_subtitle: "The coinbase says so; nothing proves it",
+
+                            add_suffix = &gtk::Label {
+                                #[watch]
+                                set_label: model.tip_block_signature()
+                                    .as_deref()
+                                    .unwrap_or_default(),
+                                add_css_class: "heading",
+                            },
+                        },
                     },
 
                     adw::PreferencesGroup {
@@ -2410,6 +2508,18 @@ impl Component for WalletPage {
                             set_title: "Block subsidy",
                             #[watch]
                             set_subtitle: &model.subsidy(),
+                        },
+
+                        // The subsidy is the schedule; this is what the last
+                        // block actually paid, fees included. The gap between
+                        // the two is the fee market, in the one place it can
+                        // be stated as a fact rather than an estimate.
+                        adw::ActionRow {
+                            #[watch]
+                            set_visible: model.tip_block.is_some(),
+                            set_title: "Last block paid",
+                            #[watch]
+                            set_subtitle: &model.tip_block_reward(),
                         },
 
                         adw::ActionRow {
@@ -2547,6 +2657,7 @@ impl Component for WalletPage {
             price: None,
             toaster: Toaster::default(),
             chain: None,
+            tip_block: None,
             peers_list,
             name: "Sieve".into(),
             transactions,
@@ -2651,12 +2762,24 @@ impl Component for WalletPage {
         widgets.send_slot.append(model.send.widget());
 
         // Both fee sources cost something — a block download or a disclosure —
-        // so neither happens until the form is actually on screen.
+        // so neither happens until a screen that needs one is actually open.
+        //
+        // Network as well as Send, because the Chain and Issuance groups now
+        // describe the block at the tip, and that block *is* the fee estimate's
+        // download. One request serves both, and `App::fee_estimate` caches it
+        // against the tip height, so this costs one block per new block rather
+        // than one per visit.
         widgets.view_stack.connect_visible_child_name_notify({
             let sender = sender.clone();
             move |stack| {
-                if stack.visible_child_name().as_deref() == Some("send") {
-                    sender.input(WalletPageMsg::EstimateFee);
+                match stack.visible_child_name().as_deref() {
+                    Some("send") => sender.input(WalletPageMsg::EstimateFee),
+                    // The chain rows want the block itself, whichever fee
+                    // source is configured — they describe the chain, not
+                    // fees, and tying them to that setting would make them
+                    // vanish for anyone using mempool.space.
+                    Some("network") => sender.input(WalletPageMsg::ReadTipBlock),
+                    _ => {}
                 }
             }
         });
@@ -2753,6 +2876,7 @@ impl Component for WalletPage {
             }
             WalletPageMsg::SetTor(tor) => self.tor = tor,
 
+            WalletPageMsg::SetTipBlock(block) => self.tip_block = block.map(|b| *b),
             WalletPageMsg::SetBirthday(height) => self.birthday = Some(height),
             WalletPageMsg::SetNetwork(network) => self.network = Some(network),
             WalletPageMsg::SetAskingToUnlock(asking) => self.asking_to_unlock = asking,
@@ -3126,6 +3250,9 @@ impl Component for WalletPage {
                     password,
                     passphrase,
                 });
+            }
+            WalletPageMsg::ReadTipBlock => {
+                let _ = sender.output(WalletPageOutput::ReadTipBlock);
             }
             WalletPageMsg::EstimateFee => {
                 let _ = sender.output(WalletPageOutput::EstimateFee);

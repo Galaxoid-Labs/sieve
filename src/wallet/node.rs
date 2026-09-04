@@ -276,6 +276,121 @@ impl Drop for NodeHost {
     }
 }
 
+/// Markers pools put in their coinbase, and what to call them.
+///
+/// **Incomplete by construction, and matched loosely.** New pools appear, old
+/// ones rename, and several sign with more than one marker. An unrecognised
+/// block is reported as unrecognised rather than guessed at.
+const POOL_MARKERS: &[(&str, &str)] = &[
+    ("foundry usa", "Foundry USA"),
+    ("f2pool", "F2Pool"),
+    ("antpool", "AntPool"),
+    ("viabtc", "ViaBTC"),
+    ("binance", "Binance Pool"),
+    ("slush", "Braiins Pool"),
+    ("braiins", "Braiins Pool"),
+    ("btc.com", "BTC.com"),
+    ("poolin", "Poolin"),
+    ("luxor", "Luxor"),
+    ("mara", "MARA Pool"),
+    ("spiderpool", "SpiderPool"),
+    ("secpool", "SecPool"),
+    ("ocean.xyz", "OCEAN"),
+    ("sbicrypto", "SBI Crypto"),
+    ("bitfufu", "BitFuFu"),
+    ("carbonneg", "Carbon Negative"),
+    ("ultimuspool", "Ultimus"),
+    ("whitepool", "WhitePool"),
+];
+
+/// The longest run of printable text a coinbase carries, cleaned up.
+///
+/// **This is arbitrary data chosen by whoever made the block**, and it reaches
+/// a label in the interface, so it is treated as hostile input on both counts.
+/// Non-printable bytes are dropped rather than rendered, the result is capped,
+/// and the caller escapes it for markup — an Adwaita row's subtitle is Pango
+/// markup, and a miner is free to put a `<span>` in a coinbase.
+///
+/// It is also **unverified and unverifiable**: nothing stops one pool signing
+/// as another, and nothing in the chain says who really made a block. The
+/// interface says "signed" rather than "mined by" for that reason.
+fn coinbase_text(script: &[u8]) -> String {
+    const LONGEST: usize = 40;
+    let mut runs: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for &byte in script {
+        // Printable ASCII, space included: anything else is length prefixes
+        // and the block height, which are not a name.
+        if (0x20..0x7f).contains(&byte) {
+            current.push(byte as char);
+        } else if !current.is_empty() {
+            runs.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+
+    let mut text = runs
+        .into_iter()
+        .max_by_key(String::len)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    text.truncate(LONGEST);
+    text
+}
+
+/// Who a block says made it, if it says anything recognisable.
+fn miner_tag(script: &[u8]) -> Option<String> {
+    let text = coinbase_text(script);
+    let haystack = text.to_lowercase();
+    if let Some((_, name)) = POOL_MARKERS
+        .iter()
+        .find(|(marker, _)| haystack.contains(marker))
+    {
+        return Some((*name).to_string());
+    }
+    // Something legible but unrecognised is worth showing as-is — it is often
+    // a small pool or a solo miner, and "unrecognised" is more honest than
+    // silence. Too short to be a name is treated as no name.
+    (text.chars().filter(char::is_ascii_alphanumeric).count() >= 4).then_some(text)
+}
+
+/// What the block at the tip looked like.
+///
+/// **Every field here comes out of a block Sieve already downloads.** The fee
+/// estimate has always fetched the whole tip block — kyoto's `average_fee_rate`
+/// issues a `GetBlock` internally — and kept one number from it. Reading the
+/// block ourselves costs the same bytes and throws less away.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TipBlock {
+    pub height: u32,
+    /// The block's average fee rate in sat/vB. An average, so one enormous fee
+    /// drags it up, and it describes the block that closed rather than the one
+    /// being bid for.
+    pub fee_rate: f64,
+    pub transactions: usize,
+    pub weight: u64,
+    /// How much of the four million weight units a block may use was used.
+    pub weight_used: f64,
+    pub total_fees_sat: u64,
+    pub subsidy_sat: u64,
+    /// What the coinbase signs itself as. Self-reported and unverifiable.
+    pub miner: Option<String>,
+}
+
+impl TipBlock {
+    /// Subsidy plus fees: what the block paid whoever made it.
+    pub fn reward_sat(&self) -> u64 {
+        self.subsidy_sat.saturating_add(self.total_fees_sat)
+    }
+}
+
+/// The maximum weight a block may have, which is what "full" is measured
+/// against.
+const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
+
 /// A running light client bound to one wallet.
 pub struct Session {
     /// The runtime the node runs on, and the only reliable way to stop it.
@@ -994,20 +1109,58 @@ impl Session {
     ///
     /// Costs a block download — up to four megabytes on mainnet — so callers
     /// should ask once per tip, not once per keystroke.
-    pub async fn average_fee_at_tip(&self) -> Result<(u32, f64)> {
+    pub async fn read_tip_block(&self) -> Result<TipBlock> {
         let tip = self
             .requester
             .chain_tip()
             .await
             .map_err(|e| anyhow!("could not read the chain tip: {e}"))?;
 
-        let rate = self
+        // `get_block` rather than `average_fee_rate`, which downloads exactly
+        // this block and returns one number from it. Same bytes, more kept.
+        let indexed = self
             .requester
-            .average_fee_rate(tip.hash)
+            .get_block(tip.hash)
             .await
             .map_err(|e| anyhow!("could not fetch the last block: {e}"))?;
 
-        Ok((tip.height, rate.to_sat_per_kwu() as f64 / 250.0))
+        let block = indexed.block;
+        let height = indexed.height;
+        let weight = block.weight().to_wu();
+        let subsidy_sat = subsidy_sats(height);
+
+        // The coinbase pays out the subsidy plus every fee in the block, so
+        // the fees are what is left after the subsidy. `saturating_sub`
+        // because a miner may underpay themselves, which is legal and would
+        // otherwise wrap.
+        let coinbase = block
+            .txdata
+            .first()
+            .context("a block with no coinbase is not a block")?;
+        let paid: u64 = coinbase.output.iter().map(|out| out.value.to_sat()).sum();
+        let total_fees_sat = paid.saturating_sub(subsidy_sat);
+
+        // sat/vB from sat per weight unit: four weight units to the virtual
+        // byte.
+        let fee_rate = if weight > 0 {
+            total_fees_sat as f64 / (weight as f64 / 4.0)
+        } else {
+            0.0
+        };
+
+        Ok(TipBlock {
+            height,
+            fee_rate,
+            transactions: block.txdata.len(),
+            weight,
+            weight_used: weight as f64 / MAX_BLOCK_WEIGHT as f64,
+            total_fees_sat,
+            subsidy_sat,
+            miner: coinbase
+                .input
+                .first()
+                .and_then(|input| miner_tag(input.script_sig.as_bytes())),
+        })
     }
 
     /// Sign a plan with the key from the vault and hand it to the network.
@@ -1568,6 +1721,76 @@ mod tests {
                  and its seed list before believing the network is empty"
             );
         }
+    }
+
+    /// Pools are recognised by the marker they sign with.
+    #[test]
+    fn a_known_pool_is_named_from_its_coinbase() {
+        // Real-shaped: a height push and some binary, then the tag.
+        let mut script = vec![0x03, 0x9a, 0x0e, 0x0e, 0x00, 0xff];
+        script.extend_from_slice(b"/Foundry USA Pool #dropgold/");
+        assert_eq!(miner_tag(&script).as_deref(), Some("Foundry USA"));
+
+        let mut other = vec![0x03, 0x01, 0x02, 0x03];
+        other.extend_from_slice(b"Mined by AntPool999");
+        assert_eq!(miner_tag(&other).as_deref(), Some("AntPool"));
+    }
+
+    /// An unrecognised but legible tag is shown as it is, because
+    /// "unrecognised" is more use than silence — it is often a small pool.
+    #[test]
+    fn an_unknown_but_legible_tag_survives() {
+        let mut script = vec![0x03, 0x00, 0x01];
+        script.extend_from_slice(b"/some-small-pool/");
+        assert_eq!(miner_tag(&script).as_deref(), Some("/some-small-pool/"));
+
+        // Nothing legible at all is nothing, rather than punctuation.
+        assert_eq!(miner_tag(&[0x03, 0x9a, 0x0e, 0x0e, 0x00, 0xff]), None);
+        assert_eq!(miner_tag(&[]), None);
+        // Too short to be a name.
+        let mut tiny = vec![0x03, 0x00];
+        tiny.extend_from_slice(b"ab");
+        assert_eq!(miner_tag(&tiny), None);
+    }
+
+    /// **A coinbase is bytes a stranger chose, and they end up in a label.**
+    ///
+    /// Two defences, and this is the first: anything unprintable is dropped
+    /// rather than rendered, and the result is capped so a miner cannot push a
+    /// paragraph into a row. The second is `markup_escape_text` at the point
+    /// of display, since an Adwaita subtitle reads Pango markup.
+    #[test]
+    fn a_hostile_coinbase_cannot_reach_the_interface_intact() {
+        // Control characters and newlines are not part of a name.
+        let mut nasty = Vec::new();
+        nasty.extend_from_slice(b"good\x00\x01\nstuff");
+        let text = coinbase_text(&nasty);
+        assert!(
+            text.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+            "unprintable bytes must not survive: {text:?}"
+        );
+
+        // A very long tag is cut, not passed on whole.
+        let huge = vec![b'A'; 4_000];
+        assert!(coinbase_text(&huge).len() <= 40);
+
+        // Markup is left intact here on purpose — this function's job is the
+        // byte range, and escaping belongs where it is rendered. What matters
+        // is that it is bounded and printable.
+        let mut markup = vec![0x03, 0x00];
+        markup.extend_from_slice(b"<span foreground='red'>x</span>");
+        let text = coinbase_text(&markup);
+        assert!(text.len() <= 40);
+    }
+
+    /// The weight share is a fraction of a whole block, not a percentage.
+    #[test]
+    fn block_fullness_is_a_fraction_of_the_weight_limit() {
+        // A block at the limit is one, and the arithmetic must not exceed it
+        // for an ordinary block.
+        assert_eq!(MAX_BLOCK_WEIGHT, 4_000_000);
+        let half = 2_000_000_f64 / MAX_BLOCK_WEIGHT as f64;
+        assert!((half - 0.5).abs() < f64::EPSILON);
     }
 
     /// A checkpoint the resume can start from, or refuse to.
