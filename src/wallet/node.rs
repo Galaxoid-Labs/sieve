@@ -431,6 +431,9 @@ pub struct Session {
     /// deal through Tor, where each one is a circuit. It only changes when the
     /// tip does, so it is worked out once per block rather than once per
     /// refresh.
+    /// The last set of peers written to disk, so an unchanged set is not
+    /// written again. See where it is used in `chain_info`.
+    remembered: std::sync::Mutex<Vec<String>>,
     median_time: std::sync::Mutex<Option<(u32, u64)>>,
 }
 
@@ -646,6 +649,7 @@ impl Session {
             } else {
                 QUIET_BEFORE_WAITING
             },
+            remembered: std::sync::Mutex::new(Vec::new()),
             median_time: std::sync::Mutex::new(None),
             synced: Arc::new(AtomicBool::new(false)),
             scanning: Arc::new(AtomicBool::new(false)),
@@ -2161,10 +2165,37 @@ impl Session {
         // time — waiting for the end meant learning nothing from a scan that
         // was interrupted, which is how a wallet ends up with no pinned peers
         // at all.
+        //
+        // **Written only when the set has actually changed.** `peers::remember`
+        // goes through `vault::write_atomic` — temp file, fsync, rename, fsync
+        // the directory — so every call is two flushes to disk. `chain_info`
+        // is a reader that everything on the Network tab goes through, and it
+        // was making those flushes on every single call: an hour-long scan
+        // rewrote an identical list some hundreds of times, and when a timer
+        // leak once drove this function at a hundred and sixty calls a second
+        // it drove the disk with it.
+        //
+        // Compared as a set rather than a list. kyoto's ordering is its own
+        // business and a reshuffle of the same peers is not news.
         if self.scanning.load(Ordering::Relaxed) && !info.peers.is_empty() {
             let addresses: Vec<String> = info.peers.iter().map(|p| p.address.clone()).collect();
-            tracing::debug!(count = addresses.len(), "remembering filter-serving peers");
-            crate::peers::remember(self.network, &addresses);
+            let mut sorted = addresses.clone();
+            sorted.sort();
+
+            let changed = {
+                let mut last = self.remembered.lock().unwrap();
+                if *last == sorted {
+                    false
+                } else {
+                    *last = sorted;
+                    true
+                }
+            };
+
+            if changed {
+                tracing::debug!(count = addresses.len(), "remembering filter-serving peers");
+                crate::peers::remember(self.network, &addresses);
+            }
         }
 
         // Eleven headers. Cached against the tip they describe: over Tor
