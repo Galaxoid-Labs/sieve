@@ -191,7 +191,13 @@ impl IdleLock {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// `#[serde(default)]` gives `false` for a bool, and this one is on unless it
+/// is turned off — including in a settings file written before it existed.
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub denomination: Denomination,
@@ -211,6 +217,26 @@ pub struct Settings {
     /// payment is about to be sent, and roughly when.
     #[serde(default)]
     pub mempool_fees: bool,
+    /// Dial the peers that served filters last time, before looking for others.
+    ///
+    /// On by default, and the reasoning cuts both ways.
+    ///
+    /// Keeping them buys a quick start and, more importantly, resistance to
+    /// being eclipsed: somebody who can fill every connection slot on a fresh
+    /// start has a far easier job than somebody who must also displace peers
+    /// that already served this wallet honestly. For a filter client that does
+    /// not mean stolen coins — headers still cost real work — but a peer that
+    /// withholds blocks can leave a payment unseen.
+    ///
+    /// **The cost lands almost entirely on Tor users.** Without Tor every peer
+    /// already sees the same IP each session, so returning to the same
+    /// machines tells them nothing new. With Tor each session leaves from a
+    /// different exit, which is the point — and dialling the same twelve peers
+    /// while asking for the same filter range, which reveals roughly this
+    /// wallet's birthday, hands those peers the identifier that survives the
+    /// change of address. That is the case for switching this off.
+    #[serde(default = "yes")]
+    pub remember_peers: bool,
     /// Route every connection — peers, price, fee rates — through a Tor
     /// SOCKS5 proxy.
     ///
@@ -280,7 +306,20 @@ impl Settings {
         std::fs::read(path())
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_else(Self::fresh)
+    }
+
+    /// The settings a machine with no settings file gets.
+    ///
+    /// **Serde's defaults, not `#[derive(Default)]`.** The derive gives
+    /// `false` for every bool no matter what `#[serde(default = "...")]`
+    /// says, so a setting that is on unless turned off would arrive *off* on
+    /// a fresh machine and *on* for everybody who already had a file — a
+    /// split nobody would think to look for. Parsing an empty object runs the
+    /// same defaults a half-written file would get, so there is one answer to
+    /// the question instead of two.
+    fn fresh() -> Self {
+        serde_json::from_str("{}").expect("every field in Settings has a serde default")
     }
 
     pub fn save(&self) {
@@ -296,6 +335,40 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A machine with no settings file gets the same answers as one with a
+    /// half-written file.
+    ///
+    /// **`#[derive(Default)]` would not.** It gives `false` for every bool
+    /// regardless of `#[serde(default = "...")]`, so `remember_peers` — which
+    /// is on unless turned off — would have arrived *off* on a fresh install
+    /// and *on* for everybody who already had a file. Nothing would have
+    /// failed; the two would just have disagreed for ever.
+    #[test]
+    fn a_fresh_install_gets_the_same_defaults_as_a_partial_file() {
+        let fresh = Settings::fresh();
+        let partial: Settings =
+            serde_json::from_str("{}").expect("every field has a serde default");
+
+        assert!(fresh.remember_peers, "peers are pinned unless turned off");
+        assert_eq!(fresh.remember_peers, partial.remember_peers);
+
+        // The disclosures stay off either way, which is the rule that must
+        // never quietly invert.
+        assert!(!fresh.show_fiat);
+        assert!(!fresh.mempool_fees);
+        assert!(!fresh.tor);
+    }
+
+    /// A file written before the setting existed still pins peers.
+    #[test]
+    fn an_older_settings_file_keeps_pinning_peers() {
+        let older: Settings =
+            serde_json::from_str(r#"{"show_fiat": true, "tor": true}"#).expect("parses");
+        assert!(older.remember_peers);
+        assert!(older.show_fiat);
+        assert!(older.tor);
+    }
 
     #[test]
     fn idle_lock_choices_are_ordered_and_finite() {

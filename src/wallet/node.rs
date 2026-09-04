@@ -2177,7 +2177,12 @@ impl Session {
         //
         // Compared as a set rather than a list. kyoto's ordering is its own
         // business and a reshuffle of the same peers is not news.
-        if self.scanning.load(Ordering::Relaxed) && !info.peers.is_empty() {
+        // Asked here rather than remembered on the session, because it can be
+        // switched off while a scan is running and the next write should
+        // notice. Reading a small JSON file every eight seconds is nothing
+        // beside the two fsyncs this guards.
+        let pinning = crate::settings::Settings::load().remember_peers;
+        if pinning && self.scanning.load(Ordering::Relaxed) && !info.peers.is_empty() {
             let addresses: Vec<String> = info.peers.iter().map(|p| p.address.clone()).collect();
             let mut sorted = addresses.clone();
             sorted.sort();

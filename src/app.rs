@@ -94,6 +94,11 @@ pub struct App {
     /// written into them directly. Rebuilding the whole preferences page for
     /// each percentage threw the reader back to the top of it.
     tor_row: Option<adw::ActionRow>,
+    /// The remembered-peers row and its Forget button, held so the count and
+    /// the button can be rewritten without rebuilding the page. Rebuilding
+    /// scrolls somebody back to the top, which after pressing a switch means
+    /// they cannot see whether it took.
+    peers_row: Option<(adw::ActionRow, gtk::Button)>,
     tor_switch: Option<(adw::SwitchRow, gtk::glib::SignalHandlerId)>,
     /// The proxy currently in use — the one Sieve found running, or the one it
     /// started. Nothing connects through Tor until this is set.
@@ -475,6 +480,8 @@ pub enum AppMsg {
     UnlockClosed,
     ToggleDenomination,
     ForgetPeers,
+    /// Keep dialling the peers that served filters, or stop.
+    SetRememberPeers(bool),
     RenameWallet {
         paths: Paths,
         name: String,
@@ -989,6 +996,7 @@ impl Component for App {
             tor_failed: false,
             tor_asked_for: false,
             tor_row: None,
+            peers_row: None,
             tor_switch: None,
             tor_active: None,
             node_restarted: None,
@@ -1327,6 +1335,24 @@ impl Component for App {
                 }
             }
 
+            AppMsg::SetRememberPeers(on) => {
+                self.settings.remember_peers = on;
+                self.settings.save();
+                // Switching it off throws away what is already written, which
+                // is the only thing that makes the switch mean anything today
+                // rather than from the next start.
+                if !on {
+                    let network = self
+                        .active
+                        .as_ref()
+                        .and_then(wallet::Meta::load)
+                        .map(|m| m.network())
+                        .unwrap_or(wallet::DEFAULT_NETWORK);
+                    crate::peers::clear(network);
+                }
+                self.refresh_peers_row();
+            }
+
             AppMsg::ForgetPeers => {
                 let network = self
                     .active
@@ -1335,7 +1361,7 @@ impl Component for App {
                     .map(|m| m.network())
                     .unwrap_or(wallet::DEFAULT_NETWORK);
                 crate::peers::clear(network);
-                self.rebuild_preferences(&sender);
+                self.refresh_peers_row();
             }
 
             AppMsg::ShowWallets => {
@@ -3438,6 +3464,35 @@ impl App {
     ///
     /// In place, for the same reason as the Tor row: rebuilding the page under
     /// somebody who has just tapped a row throws them back to the top of it.
+    /// Rewrite the remembered-peers row where it stands.
+    ///
+    /// In place, for the reason the Tor and Amounts rows are: rebuilding the
+    /// preferences page returns it to the top, and somebody who has just
+    /// pressed a switch is then looking at a different part of the dialog and
+    /// cannot tell whether it took.
+    fn refresh_peers_row(&self) {
+        let Some((row, forget)) = &self.peers_row else {
+            return;
+        };
+        let network = self
+            .active
+            .as_ref()
+            .and_then(wallet::Meta::load)
+            .map(|m| m.network())
+            .unwrap_or(wallet::DEFAULT_NETWORK);
+        let known = crate::peers::count(network);
+
+        row.set_subtitle(&match (self.settings.remember_peers, known) {
+            // Says why it is empty. "None yet" under a switch that has just
+            // been turned off reads as the count not having caught up.
+            (false, _) => "Not kept — every start finds peers afresh".to_string(),
+            (true, 0) => "None yet — the next sync will remember some".to_string(),
+            (true, 1) => "1 peer, tried first on the next start".to_string(),
+            (true, n) => format!("{n} peers, tried first on the next start"),
+        });
+        forget.set_sensitive(known > 0);
+    }
+
     fn refresh_amounts_row(&self) {
         let Some((row, unit)) = &self.amounts_row else {
             return;
@@ -4318,31 +4373,47 @@ impl App {
         // Remembering peers is what makes a restart quick; forgetting them is
         // how you start over if the set has gone stale or you would rather not
         // reconnect to the same machines.
-        if let Some(paths) = &self.active
-            && let Some(meta) = wallet::Meta::load(paths)
-        {
-            let network = meta.network();
-            let known = crate::peers::count(network);
-
+        // Only the question of whether a wallet is open. Which network it is
+        // on, how many peers are pinned and what the row should say are all
+        // `refresh_peers_row`'s business.
+        if self.active.is_some() {
             let peers = adw::ActionRow::new();
             peers.set_title("Remembered peers");
-            peers.set_subtitle(&match known {
-                0 => "None yet — the next sync will remember some".to_string(),
-                1 => "1 peer, tried first on the next start".to_string(),
-                n => format!("{n} peers, tried first on the next start"),
-            });
             peers.set_subtitle_lines(2);
+
+            let pin = adw::SwitchRow::new();
+            pin.set_title("Reconnect to peers that worked before");
+            pin.set_subtitle(
+                "Quicker to start, and harder to surround: somebody who can fill every \
+                 connection on a fresh start has an easier job than somebody who must also \
+                 displace peers that already served this wallet. Worth turning off if you \
+                 use Tor — each session leaves from a different exit, and returning to the \
+                 same machines is what lets them be joined up again.",
+            );
+            pin.set_subtitle_lines(6);
+            pin.set_active(self.settings.remember_peers);
+            {
+                let sender = sender.clone();
+                pin.connect_active_notify(move |row| {
+                    sender.input(AppMsg::SetRememberPeers(row.is_active()));
+                });
+            }
+            this.add(&pin);
 
             let forget = gtk::Button::with_label("Forget");
             forget.set_valign(gtk::Align::Center);
             forget.add_css_class("flat");
-            forget.set_sensitive(known > 0);
             {
                 let sender = sender.clone();
                 forget.connect_clicked(move |_| sender.input(AppMsg::ForgetPeers));
             }
             peers.add_suffix(&forget);
             this.add(&peers);
+            self.peers_row = Some((peers, forget));
+            // The wording and the button's state are decided in one place, so
+            // the row cannot say one thing when it is built and another when
+            // it is refreshed.
+            self.refresh_peers_row();
         }
 
         // Last in the group, and the only destructive thing in preferences.

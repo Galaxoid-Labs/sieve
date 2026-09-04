@@ -618,6 +618,25 @@ Onion addresses are remembered alongside plain ones and only offered when Tor is
 one directly spends an attempt on something that cannot work. `tor::onion` encodes and decodes
 them, checksum included, so a corrupted entry is dropped rather than dialled.
 
+**It can be switched off, and the reason to is Tor.** `settings.remember_peers` is on by
+default, because keeping a known-good set buys a quick start and resistance to being
+surrounded: somebody who can fill every connection slot on a fresh start has a far easier job
+than somebody who must also displace peers that already served this wallet honestly. For a
+filter client that is not stolen coins — headers still cost real work — but a peer that
+withholds blocks can leave a payment unseen.
+
+The cost lands almost entirely on Tor users. Without Tor every peer already sees the same IP
+each session, so returning to the same machines tells them nothing new. With Tor each session
+leaves from a different exit, which is the whole point — and dialling the same twelve peers
+while asking for the same filter range, which reveals roughly this wallet's birthday, hands
+those peers the one identifier that survives the change of address. So the switch is offered
+rather than decided, and the row says which case it is for.
+
+Deliberately *not* automatic. This codebase already varies behaviour by whether Tor is up —
+onion addresses are only offered then — but a *setting* that quietly means different things in
+different modes is how an app becomes impossible to explain. Turning it off clears what is
+already stored, so the switch means something now rather than from the next start.
+
 ## Receiving
 
 `next_unused_address` never returns a *used* address, but it returns the same unused one
@@ -712,6 +731,20 @@ was frozen to avoid. The picker also refuses to tick one, but that is a courtesy
 own coins and a payment is built from one, so "all your coins" is false the moment another path
 holds anything — false in the direction that sends somebody hunting for money that is not
 missing. `coins_scope` says "in this wallet" or names the path, depending.
+
+## A default that is `true`
+
+`Settings` does not derive `Default`, and must not. The derive gives `false` for every bool
+regardless of what `#[serde(default = "...")]` says, and `Settings::load` falls back to a
+default when there is no file — so a setting that is *on unless turned off* would arrive off on
+a fresh machine and on for everybody who already had a settings file. Nothing fails; the two
+populations simply disagree for ever.
+
+`Settings::fresh` parses `{}` instead, which runs exactly the defaults a half-written file
+would get. One answer to the question rather than two, and every future field is right by
+construction. `a_fresh_install_gets_the_same_defaults_as_a_partial_file` holds the line, and
+also asserts the three disclosure settings are off either way — that is the rule that must
+never quietly invert.
 
 ## Two directories, and which one is safe to delete
 
@@ -927,7 +960,7 @@ src/
   palette.rs         the desktop's accent, and Omarchy's whole palette
   peers.rs           peers that served filters last time
   price.rs           a price from Bitfinex, when that is switched on
-  settings.rs        preferences on disk
+  settings.rs        preferences on disk. Defaults come from serde, not `Default` — see below
   ui/
     onboarding.rs    make a wallet: password, phrase, dice, verification
     phrase.rs        typing a recovery phrase, one numbered box per word
