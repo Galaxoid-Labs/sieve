@@ -30,7 +30,15 @@ optdepends=('tor: route every connection through Tor')
 # Rust's own LTO is unaffected and stays on — `cargo build --release` links
 # perfectly well outside makepkg. This switches off the *C* LTO that makepkg
 # adds, which is the standard measure for a Rust package with a C dependency.
-options=(!lto)
+#
+# `!debug` because makepkg's default OPTIONS now include `debug`, which splits
+# a `sieve-debug` package off beside the real one. Here it comes out *empty* —
+# the release profile carries no debug info to move — so it is a second package
+# that costs a second upload and says nothing. It also broke the release
+# workflow, which globbed `*.pkg.tar.zst` expecting one file and handed bsdtar
+# two: the first was read as the archive and the second as a member to find
+# inside it.
+options=(!lto !debug)
 # GitHub's generated tarball, which is what this points at, is produced on
 # demand and has changed bytes before — which is why the release attaches a
 # tarball of its own and why the PKGBUILD published to the AUR must point at

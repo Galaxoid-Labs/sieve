@@ -115,7 +115,18 @@ jobs:
           # say where the wallets are without touching them. A missing
           # `install=` is silent: the package builds, installs and runs, and the
           # only sign is somebody removing Sieve and being told nothing.
-          bsdtar -xOf packaging/aur/*.pkg.tar.zst .INSTALL > /tmp/install.sh
+          # The main package by name, not by glob. `*.pkg.tar.zst` matched two
+          # files the moment makepkg split a debug package off, and bsdtar read
+          # the first as the archive and the second as a member to find inside
+          # it — "Not found in archive", from a check that had nothing to do
+          # with what broke. The PKGBUILD sets `!debug` so there is one again;
+          # this makes the check say so rather than depend on it.
+          built=$(ls packaging/aur/*.pkg.tar.zst | grep -v -- '-debug-')
+          # `test -f` rather than counting lines: it refuses an empty result
+          # too, which is makepkg having produced nothing at all. Counting
+          # accepts that case, because one empty string is still one line.
+          test -f "$built"
+          bsdtar -xOf "$built" .INSTALL > /tmp/install.sh
           grep -q 'Your wallets have not been removed' /tmp/install.sh
           # And it must stay a message rather than becoming a cleanup hook.
           ! grep -qE '\brm\b|rmdir|unlink|-delete' /tmp/install.sh
