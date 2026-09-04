@@ -1062,16 +1062,35 @@ factories, Adwaita patterns). Consult it rather than guessing at macro syntax.
 
 ## Not yet built
 
-**Signing on a hardware device**, which is the whole of M4a and the largest hole: a
-device-imported wallet can receive and build a payment and cannot spend one. PSBT export and
-import as files does not exist either, so there is no air-gapped path at all — `PSBT.md` has
-the design.
+**Read this against the code before repeating it.** This section said hardware signing and
+PSBT files did not exist for some time after both were built, which is how release notes come
+to understate what shipped. `ROADMAP.md` is the authority; this is a summary of it.
 
-**Packages.** No `.deb`, `.rpm` or AUR package has been published, and the signing key is not
-made. `PACKAGING.md` has the plan and `ROADMAP.md` M8 the order.
+**PSBT import — the half that closes the loop.** Export is built: `SaveUnsigned` writes the
+file and `app.rs` reads it back before claiming it was written, because a signer on another
+machine cannot ask for another copy. Nothing reads a *signed* PSBT back in, so there is no
+complete air-gapped round trip. `psbt::from_bytes` exists and is used only to verify the
+export. `PSBT.md` has the design.
+
+**Hardware signing is built and barely exercised.** `SignOnDevice` is wired end to end and
+`hardware::sign` calls `async-hwi`'s `sign_tx`. Only Ledger has ever run: Coldcard, Specter and
+Jade compile and have never touched a device. Also missing there — accounts past `0'`, a
+passphrase-derived device wallet, and handling a device unplugged or locked mid-flow.
+`ROADMAP.md` M4a has the list.
+
+**Packages are built but not published.** `.deb`, `.rpm` and AUR packaging all exist, and the
+release workflow has five jobs — `check, arch, deb, rpm, publish` — which build and install
+them and check what was installed. What has not happened is a release: no signing key, no
+signed tag, no `SHA256SUMS`, nothing on the AUR. `PACKAGING.md` has the plan and `ROADMAP.md`
+M8 the order.
 
 Smaller, and each with a note of its own: silent payments (`SILENT_PAYMENTS.md`, sending is
-buildable and receiving is not), desktop notifications (`NOTIFICATIONS.md`, deliberately
-deferred), coin freezing, and reading a BIP-21 request from a camera.
+designed and not built, receiving is not buildable), desktop notifications
+(`NOTIFICATIONS.md`, deliberately deferred), and reading a BIP-21 request from a camera —
+`ui/qr.rs` only *produces* codes.
+
+**Coin freezing is built**, and was listed here long after it stopped being true. `wallet::labels`
+stores the flag and `node::plan` puts frozen coins in `unspendable`, so the builder keeps the
+rule rather than the view. See "Coins, and holding one back".
 
 The full milestone plan (M0–M8) is in `ROADMAP.md`.
