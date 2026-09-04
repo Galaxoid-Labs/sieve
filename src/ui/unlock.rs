@@ -232,3 +232,22 @@ impl Component for Unlock {
         self.update_view(widgets, sender);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The wallet password must not print itself.
+    ///
+    /// `UnlockMsg::Submit` carries it, and relm4 formats every input into
+    /// `input=?message` before the update runs — so a derived `Debug` here
+    /// would write the password that opens the vault into the journal, from
+    /// the one screen whose whole job is to take it.
+    #[test]
+    fn a_password_does_not_print_itself() {
+        let password = super::Password(zeroize::Zeroizing::new("correct horse".to_string()));
+        assert_eq!(format!("{password:?}"), "Password(<redacted>)");
+
+        let message = super::UnlockMsg::Submit(password);
+        let printed = format!("{message:?}");
+        assert!(!printed.contains("correct horse"), "{printed}");
+    }
+}

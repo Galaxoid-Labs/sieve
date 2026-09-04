@@ -8,6 +8,37 @@ being true.
 **Nobody independent has reviewed any of this.** It is a young program that
 handles money.
 
+## If you find something
+
+**Email <jacob@galaxoidlabs.com>.** That is the security contact. It reaches
+one person, because Sieve is written by one — there is no team behind the
+address and no rota, so treat the timeline as best effort rather than as a
+commitment this file is in a position to make.
+
+**Please do not open a public issue for a vulnerability.** The repository is
+public — <https://github.com/Galaxoid-Labs/sieve> — so an issue is readable by
+everybody from the moment it is filed, which for a wallet means the people who
+would use the finding learn it at the same time as the person who can fix it.
+Anything that is not a vulnerability is welcome as an issue and easier to
+track there.
+
+**There is no PGP key yet**, so mail to that address is unencrypted in transit
+and sits in plaintext on a mail provider's disk. Send enough for the report to
+be understood and acted on, and hold back anything you would rather that
+provider did not keep — a working proof of concept can wait for a channel
+agreed in the reply. The key belongs with the release signing key that
+`PACKAGING.md` describes and that does not exist either; when it is made, this
+section names its fingerprint.
+
+GitHub's private vulnerability reporting is worth enabling on the repository as
+a second route, and this section should say so once it is on.
+
+**What is most worth looking at**, given what the rest of this file admits: the
+vault format and the code that opens it, the signing path — including what a
+hardware device hands back — and any way to make Sieve reveal which addresses
+belong to a wallet, since that last one is the claim the whole program is built
+on.
+
 ## The threat model, stated so it can be argued with
 
 Sieve is built against three adversaries and not against a fourth:
@@ -241,37 +272,36 @@ trusted. The node's own DNS seeding, which would have leaked around the proxy,
 is replaced by seeds resolved through Tor. If Tor is on and unreachable, Sieve
 refuses to connect rather than falling back to the clear.
 
-## Findings from the privacy pass
+## What reaches the logs
 
-Three, all fixed in the commit that adds this section. The first is the one
-that mattered.
+Under a desktop session `tracing` goes to the systemd journal, which more people
+can read than `~/.local/share` — and a log is the thing somebody pastes when
+asking for help with something unrelated. So the rule is that a log may say what
+happened and not whose it was.
 
-**The opt-in services went out over the clear while Tor was coming up.** The
-proxy was read as `settings.tor.then_some(tor_active).flatten()`, which
-answered `None` for two different situations — Tor switched off, and Tor
-switched on but not yet running — and every caller read `None` as "connect
-directly". It was not a narrow window: the price lookup runs immediately
-*before* the code that starts Tor, so with both switches on, opening the first
-wallet after launch announced to a price service that a Bitcoin wallet at this
-address had just been opened. `start_session` had its own guard and was
-correct; these two did not. The proxy is a three-state `Route` now — `Direct`,
-`Through`, `Refuse` — so there is no value meaning "no proxy" that a
-wanted-but-absent Tor can be mistaken for. A fee lookup in that state falls
-through to the node's own estimate, which needs no third party at all.
+- **No balance, ever.** A transaction count instead. `no_balance_in_the_logs`
+  reads `app.rs` and fails on any `tracing` call mentioning one.
+- **No transaction ids**, which name the user's own money and are searchable on
+  any explorer.
+- **No block hashes of matched blocks.** A block that matches this wallet's
+  filters is a block holding its transactions, so naming them hands over the
+  transaction set. A count instead.
+- **No descriptor ids.** Derived from the descriptor, so a stable fingerprint
+  for the wallet.
+- **No secrets, by construction rather than by care.** relm4 formats every
+  message and command result into a span field, so any type carrying key
+  material has a hand-written `Debug` printing `<redacted>`: `Password`
+  (`ui/unlock.rs`, `ui/reveal.rs`), `Secret` (`ui/restore.rs`,
+  `ui/onboarding.rs`), `Face`, `Revealed` and `Word`. Each has a test that
+  builds the message relm4 would format and asserts the secret is not in the
+  output — including `RestoreMsg::Submit`, which carries four of them behind a
+  *derived* `Debug` that is safe only because every field it holds is one of
+  these types.
 
-**The explorer link asks first.** Opening a transaction on mempool.space is the
-only outbound request Tor cannot cover, because it leaves the process for the
-system browser — carrying this machine's real address and whatever the browser
-discloses, alongside a transaction that belongs to the person clicking. That
-pairing is the most identifying thing available here, and it was one click away
-in a screen people open to read a fee. It is a confirmation now, worded
-differently when Tor is on, because "Tor is on and this still goes in the
-clear" is the part that would otherwise surprise somebody.
-
-**Copying a descriptor says where the copy goes.** A descriptor names every
-address the wallet will ever have, and the dialog already said so; what it did
-not say is that most desktops keep a clipboard history on disk. The file export
-sitting beside it is the tidier route and now reads that way.
+**A document is not a mechanism.** Every rule above was once written here as a
+claim and broken anyway; the balance came back into the logs after this file
+said it had been taken out, and nothing failed when it did. What holds them now
+is the tests, and that is why each rule names one.
 
 ## Wallets whose keys are elsewhere
 
@@ -341,66 +371,6 @@ see `PACKAGING.md`.
 to encrypt them with, and the transaction history sitting beside them is
 readable anyway. The preferences row that exports them says this in words.
 
-## Findings from this pass
-
-Three, all of them logging, all fixed in the commit that adds this file. They
-share a shape: identifiers that name the user's own money, written somewhere
-more people can read than the wallet file.
-
-- **Transaction ids at `info`.** A fee bump logged the replaced and
-  replacement ids at the default level, which under a desktop session means
-  the systemd journal — readable by more people than `~/.local/share`. Now
-  logged without them.
-- **Block hashes of matched blocks at `debug`.** A block that matches this
-  wallet's filters is a block holding this wallet's transactions. Naming them
-  in a log hands the user's transaction set to whoever the log is shared with,
-  which for a log is routinely somebody helping to debug something unrelated.
-  Now a count.
-- **The balance at `debug`.** The most sensitive number the app holds that is
-  not a key. Now a transaction count.
-
-## Findings from the second pass
-
-Seven, found by auditing the whole tree rather than a diff. All fixed in the
-commit that adds this section, and the interesting part is not the list — it is
-that **one of them was a fix this file already claimed to have made.**
-
-- **The recovery phrase could reach the log.** `RevealCmd::Opened` was a
-  `Result<String, String>` with a derived `Debug`, and relm4 formats every
-  command result into a span field — `cmd_output=?message`, in its own
-  `component/sync/builder.rs`. So showing the phrase wrote the phrase. It was
-  the rule this project states first about secrets, broken in the one component
-  whose entire purpose is that phrase. Now a redacted `Revealed` newtype, with
-  a test that formats the message and looks for the words.
-- **The balance was back in the logs**, at `debug`, after the paragraph above
-  says it was taken out. Nothing failed when it returned; a document is not a
-  mechanism. `no_balance_in_the_logs` reads `app.rs` and fails on any `tracing`
-  call mentioning a balance — a test about text, because the failure was.
-- **An unprotected copy of the seed during signing.** The vault's own buffer is
-  `Zeroizing`; `str::to_string` made a second copy that lived across the whole
-  broadcast and was freed with the phrase still in it. Two other sites doing the
-  same conversion borrow instead of copying, and were already right.
-- **The data key survived the error paths in `vault::open`.** `dek.zeroize()`
-  ran only after everything that could fail had succeeded, so a wrong key length
-  or a body that failed authentication returned the key to the allocator intact.
-  A guard that only fires on success is not a guard; it is `Zeroizing` now.
-- **A vault header could ask for unlimited memory.** KDF parameters are read
-  before anything can be authenticated — the header *is* the associated data —
-  so a file somebody else wrote decided an allocation. The AAD binding already
-  stops the attack that matters, weakening `m_cost` to brute-force a password;
-  this closes the one it does not, which is asking for terabytes. Capped at
-  1 GiB, four times the default.
-- **`SeedWord` derived `Debug` holding a word of the phrase.** Not reachable by
-  relm4's logging today, because its `Input` is `()`. Fenced anyway: it is one
-  message signature away from being the finding above.
-- **A descriptor id at `warn`.** Derived from the descriptor, so a stable
-  fingerprint for the wallet, in a log people paste when asking for help.
-
-**What this pass did not cover**, so the next one knows where to start: network
-disclosure and tracking, which is a separate audit; fuzzing the descriptor,
-PSBT and BIP-21 parsers; and any dynamic analysis at all — no sanitisers, no
-timing work. The `unsafe` blocks were read and not analysed.
-
 ## The dependencies
 
 310 crates, audited with `cargo-audit` and governed by `deny.toml`.
@@ -459,34 +429,7 @@ for somebody to remember this file.
   way — `setrlimit`'s result had been discarded, so a failure to switch core
   dumps off was silent.
 - **Swap** is out of Sieve's hands, as above.
-
-## If you find something
-
-**Email <jacob@galaxoidlabs.com>.** That is the security contact. It reaches
-one person, because Sieve is written by one — there is no team behind the
-address and no rota, so treat the timeline as best effort rather than as a
-commitment this file is in a position to make.
-
-**Please do not open a public issue for a vulnerability.** The repository is
-public — <https://github.com/Galaxoid-Labs/sieve> — so an issue is readable by
-everybody from the moment it is filed, which for a wallet means the people who
-would use the finding learn it at the same time as the person who can fix it.
-Anything that is not a vulnerability is welcome as an issue and easier to
-track there.
-
-**There is no PGP key yet**, so mail to that address is unencrypted in transit
-and sits in plaintext on a mail provider's disk. Send enough for the report to
-be understood and acted on, and hold back anything you would rather that
-provider did not keep — a working proof of concept can wait for a channel
-agreed in the reply. The key belongs with the release signing key that
-`PACKAGING.md` describes and that does not exist either; when it is made, this
-section names its fingerprint.
-
-GitHub's private vulnerability reporting is worth enabling on the repository as
-a second route, and this section should say so once it is on.
-
-**What is most worth looking at**, given what the rest of this file admits: the
-vault format and the code that opens it, the signing path — including what a
-hardware device hands back — and any way to make Sieve reveal which addresses
-belong to a wallet, since that last one is the claim the whole program is built
-on.
+- **Whole areas have never been audited at all**, and this is where a next pass
+  starts: network disclosure and tracking as a subject in its own right;
+  fuzzing the descriptor, PSBT and BIP-21 parsers; and any dynamic analysis
+  whatever — no sanitisers, no timing work.

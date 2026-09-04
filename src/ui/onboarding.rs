@@ -1589,6 +1589,27 @@ mod tests {
     /// A word of the phrase must not print itself, even though nothing logs
     /// one today. The type is one message signature away from being the leak
     /// `RevealCmd` was.
+    /// Neither the phrase nor a die roll prints itself.
+    ///
+    /// `Secret` carries what becomes the seed and `Face` carries the rolls
+    /// mixed into it, and both travel in messages relm4 formats. A roll is
+    /// key material until the phrase exists, which is why it is fenced like
+    /// the phrase rather than like a number.
+    #[test]
+    fn a_secret_and_a_roll_do_not_print_themselves() {
+        let secret = super::Secret(zeroize::Zeroizing::new("abandon about".to_string()));
+        assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
+        assert!(!format!("{secret:?}").contains("abandon"));
+
+        let face = super::Face(4);
+        assert_eq!(format!("{face:?}"), "<redacted>");
+        assert!(!format!("{face:?}").contains('4'));
+
+        // And through the messages that actually reach relm4's span fields.
+        let rolled = super::OnboardingMsg::Roll(super::Face(6));
+        assert!(!format!("{rolled:?}").contains('6'), "{rolled:?}");
+    }
+
     #[test]
     fn a_seed_word_does_not_print_itself() {
         let word = super::SeedWord {

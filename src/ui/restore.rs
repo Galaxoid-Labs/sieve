@@ -1254,6 +1254,42 @@ fn birthday_choices(network: bdk_wallet::bitcoin::Network) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// An import must not print what it is importing.
+    ///
+    /// `Submission` derives `Debug` and holds four secrets — the phrase or
+    /// key, the BIP-39 passphrase, and the wallet password twice — and it
+    /// travels as `RestoreMsg::Submit`, which relm4 formats into `input=?`
+    /// before the update runs. The derive is safe only because every one of
+    /// those fields is a `Secret` whose own `Debug` is written by hand. This
+    /// asserts the whole message rather than the type, because the derive is
+    /// the thing that would quietly start printing if a field were ever added
+    /// as a plain `String`.
+    #[test]
+    fn an_import_does_not_print_what_it_is_importing() {
+        let submission = Submission {
+            kind: KINDS[0],
+            credential: Secret(Zeroizing::new("abandon abandon about".to_string())),
+            bip39_passphrase: Secret(Zeroizing::new("a passphrase".to_string())),
+            password: Secret(Zeroizing::new("hunter2".to_string())),
+            confirm: Secret(Zeroizing::new("hunter2".to_string())),
+            network_index: 0,
+            acknowledged: true,
+            name: "A wallet".into(),
+        };
+
+        let message = RestoreMsg::Submit(Box::new(submission));
+        let printed = format!("{message:?}");
+        for secret in ["abandon", "about", "a passphrase", "hunter2"] {
+            assert!(
+                !printed.contains(secret),
+                "{secret:?} reached a log: {printed}"
+            );
+        }
+        // The name is not a secret and stays readable, or a failed import
+        // cannot be told from another wallet's.
+        assert!(printed.contains("A wallet"), "{printed}");
+    }
+
     /// The choices and the checkpoints they select are one list, not two.
     ///
     /// They used to be two: a hand-written set of phrases beside the checkpoint

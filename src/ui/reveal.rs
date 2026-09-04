@@ -366,6 +366,21 @@ mod tests {
         assert!(format!("{failed:?}").contains("Incorrect password"));
     }
 
+    /// The password that opens the vault must not print itself either.
+    ///
+    /// It travels in this component's `Input`, which relm4 formats into
+    /// `input=?message` on every update. A derived `Debug` here would write
+    /// the vault's password into the journal on each keystroke that submits.
+    #[test]
+    fn a_password_does_not_print_itself() {
+        let password = super::Password(zeroize::Zeroizing::new("hunter2".to_string()));
+        assert_eq!(format!("{password:?}"), "Password(<redacted>)");
+
+        let message = super::RevealMsg::Submit(password);
+        let printed = format!("{message:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+    }
+
     use super::Held;
 
     #[test]
