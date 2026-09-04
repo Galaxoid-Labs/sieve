@@ -3547,8 +3547,14 @@ impl App {
             None if crate::tor::daemon::find_binary().is_some() => {
                 "Tor is on this machine. Sieve will start it when you switch this on.".into()
             }
-            None => "No Tor found on this machine. Install it — on Arch, `sudo pacman -S tor` \
-                     — or use a packaged build of Sieve, which carries its own."
+            // No mention of a build that carries its own, because none does.
+            // Bundling was for a Flatpak that is gone; nothing puts a binary
+            // beside the executable any more, and the sentence sent somebody
+            // looking for a package that does not exist. What is left is the
+            // ordinary answer, and it is the whole answer.
+            None => "No Tor found on this machine. Install your distribution's Tor package \
+                     — on Arch, `sudo pacman -S tor`; on Debian or Ubuntu, `sudo apt install \
+                     tor` — and Sieve will find it."
                 .into(),
         }
     }
